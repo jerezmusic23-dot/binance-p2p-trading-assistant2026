@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { AlertRule, AlertTriggerLog } from '../types';
-import { ApiService } from '../services/api';
+import { ApiService } from '../api';
 import { Bell, Plus, Trash2 } from 'lucide-react';
 
 export const AlertsManager: React.FC = () => {
