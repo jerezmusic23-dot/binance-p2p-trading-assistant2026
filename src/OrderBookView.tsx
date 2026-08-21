@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { MarketSnapshot, NormalizedAd } from '../types';
+import { MarketSnapshot, NormalizedAd } from './types';
 import { BookOpen, ArrowUpRight, ArrowDownRight } from 'lucide-react';
 
 interface OrderBookViewProps {

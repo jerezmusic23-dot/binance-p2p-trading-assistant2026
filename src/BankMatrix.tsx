@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { BankMatrixRow, TradeType, GlobalFilterState, BankFilterKey, AmountFilterKey } from '../types';
-import { ApiService } from '../services/api';
+import { BankMatrixRow, TradeType, GlobalFilterState, BankFilterKey, AmountFilterKey } from './types';
+import { ApiService } from './api';
 import {
   Building2,
   Trophy,
@@ -248,7 +248,7 @@ export const BankMatrix: React.FC<BankMatrixProps> = ({
                               <span>{amt}</span>
                             </td>
                             <td className="py-2.5 px-3 font-bold text-[#FCD535]">
-                              {cell.leaderPrice.toFixed(2)}
+                              {cell.leaderPrice !== null ? cell.leaderPrice.toFixed(2) : '--'}
                             </td>
                             <td className="py-2.5 px-3 text-[#02c076]">
                               {cell.suggestedPrice?.toFixed(2) || '--'}

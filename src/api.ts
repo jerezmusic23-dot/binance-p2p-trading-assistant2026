@@ -8,7 +8,7 @@ import {
   BacktestMetrics,
   AlertRule,
   AlertTriggerLog,
-} from '../types';
+} from './types';
 
 function buildQuery(bank?: string, amount?: number): string {
   const parts: string[] = [];

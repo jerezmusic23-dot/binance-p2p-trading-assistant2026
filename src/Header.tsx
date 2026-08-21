@@ -1,6 +1,6 @@
 import React from 'react';
 import { RefreshCw, ShieldCheck, Clock, AlertTriangle, Building2, DollarSign } from 'lucide-react';
-import { MarketSnapshot, GlobalFilterState } from '../types';
+import { MarketSnapshot, GlobalFilterState } from './types';
 
 interface HeaderProps {
   snapshot: MarketSnapshot | null;

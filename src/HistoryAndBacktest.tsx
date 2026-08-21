@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { HistoryRecord, HistorySummary, BacktestMetrics } from '../types';
-import { ApiService } from '../services/api';
+import { HistoryRecord, HistorySummary, BacktestMetrics } from './types';
+import { ApiService } from './api';
 import {
   History,
   AlertCircle,

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { MarketSnapshot, MarketProjections, MarketAnalysis, HourlyChartPoint } from '../types';
+import { MarketSnapshot, MarketProjections, MarketAnalysis, HourlyChartPoint } from './types';
 import { Sparkles, Compass, TrendingUp, TrendingDown, Clock, DollarSign, Activity, AlertCircle, CheckCircle2 } from 'lucide-react';
 
 interface DailyFluctuationChartProps {

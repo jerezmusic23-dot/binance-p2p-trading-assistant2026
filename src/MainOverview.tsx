@@ -16,7 +16,7 @@ import {
   ShieldCheck,
   Scale,
 } from 'lucide-react';
-import { MarketSnapshot, MarketAnalysis, MarketProjections } from '../types';
+import { MarketSnapshot, MarketAnalysis, MarketProjections } from './types';
 
 interface MainOverviewProps {
   snapshot: MarketSnapshot | null;

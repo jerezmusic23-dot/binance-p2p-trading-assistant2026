@@ -1,6 +1,6 @@
 import React from 'react';
 import { Building2, DollarSign, Filter, RotateCcw, Check, Sparkles, SlidersHorizontal } from 'lucide-react';
-import { BankFilterKey, AmountFilterKey, GlobalFilterState } from '../types';
+import { BankFilterKey, AmountFilterKey, GlobalFilterState } from './types';
 
 interface GlobalFilterBarProps {
   filter: GlobalFilterState;
