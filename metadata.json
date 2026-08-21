@@ -1,0 +1,6 @@
+{
+  "name": "Binance P2P Trading Assistant",
+  "description": "Real-time Binance P2P USDT/VES trading assistant with real market order book data, statistical projections, hourly volatility modeling, backtesting, and bank matrix.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
