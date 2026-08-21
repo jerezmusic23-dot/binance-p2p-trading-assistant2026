@@ -5,7 +5,7 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import Header from './Header';
-import { Navigation, TabType } from './components/Navigation';
+import Navigation from './Navigation';
 import { GlobalFilterBar, BANK_OPTIONS } from './components/GlobalFilterBar';
 import { MainOverview } from './components/MainOverview';
 import { DailyFluctuationChart } from './components/DailyFluctuationChart';
