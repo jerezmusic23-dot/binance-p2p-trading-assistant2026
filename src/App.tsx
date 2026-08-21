@@ -3,18 +3,31 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, {
+  useState,
+  useEffect,
+  useCallback,
+  useRef,
+} from 'react';
+
 import Header from './Header';
 import Navigation from './Navigation';
-import { GlobalFilterBar, BANK_OPTIONS } from './components/GlobalFilterBar';
-import { MainOverview } from './components/MainOverview';
-import { DailyFluctuationChart } from './components/DailyFluctuationChart';
-import { BankMatrix } from './components/BankMatrix';
-import { OrderBookView } from './components/OrderBookView';
-import { HistoryAndBacktest } from './components/HistoryAndBacktest';
-import { AlertsManager } from './components/AlertsManager';
-import { ApiService } from './services/api';
+
 import {
+  GlobalFilterBar,
+  BANK_OPTIONS,
+} from './GlobalFilterBar';
+
+import { MainOverview } from './MainOverview';
+import { DailyFluctuationChart } from './DailyFluctuationChart';
+import { BankMatrix } from './BankMatrix';
+import { OrderBookView } from './OrderBookView';
+import { HistoryAndBacktest } from './HistoryAndBacktest';
+import { AlertsManager } from './AlertsManager';
+
+import { ApiService } from './api';
+
+import type {
   MarketSnapshot,
   MarketAnalysis,
   MarketProjections,
@@ -23,173 +36,429 @@ import {
   AmountFilterKey,
 } from './types';
 
+type TabType =
+  | 'overview'
+  | 'projections'
+  | 'matrix'
+  | 'orderbook'
+  | 'history'
+  | 'alerts';
+
 export default function App() {
-  const [activeTab, setActiveTab] = useState<TabType>('overview');
-  const [globalFilter, setGlobalFilter] = useState<GlobalFilterState>({
-    bank: 'ALL',
-    bankDisplayName: 'Todos los Bancos',
-    amount: 'ALL',
-    amountVal: null,
-  });
+  const [activeTab, setActiveTab] =
+    useState<TabType>('overview');
 
-  const [snapshot, setSnapshot] = useState<MarketSnapshot | null>(null);
-  const [analysis, setAnalysis] = useState<MarketAnalysis | null>(null);
-  const [projections, setProjections] = useState<MarketProjections | null>(null);
-  const [ageSeconds, setAgeSeconds] = useState<number>(0);
-  const [effectiveStatus, setEffectiveStatus] = useState<'LIVE' | 'STALE' | 'OFFLINE'>('LIVE');
-  const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [globalFilter, setGlobalFilter] =
+    useState<GlobalFilterState>({
+      bank: 'ALL',
+      bankDisplayName: 'Todos los Bancos',
+      amount: 'ALL',
+      amountVal: null,
+    });
 
-  // Keep a ref to the latest filter to avoid stale closures in polling intervals
-  const filterRef = useRef(globalFilter);
-  filterRef.current = globalFilter;
+  const [snapshot, setSnapshot] =
+    useState<MarketSnapshot | null>(null);
 
-  const fetchCentralData = useCallback(async (force = false, filterToUse?: GlobalFilterState) => {
-    const currentFilter = filterToUse || filterRef.current;
-    const bankParam = currentFilter.bank !== 'ALL' ? currentFilter.bank : undefined;
-    const amountParam = currentFilter.amountVal ? currentFilter.amountVal : undefined;
+  const [analysis, setAnalysis] =
+    useState<MarketAnalysis | null>(null);
 
-    try {
-      if (force) setIsRefreshing(true);
+  const [projections, setProjections] =
+    useState<MarketProjections | null>(null);
 
-      const results = await Promise.allSettled([
-        force
-          ? ApiService.refreshMarket(bankParam, amountParam)
-          : ApiService.getLatestMarket(bankParam, amountParam),
-        ApiService.getMarketAnalysis(bankParam, amountParam),
-        ApiService.getMarketProjections(bankParam, amountParam),
-      ]);
+  const [ageSeconds, setAgeSeconds] =
+    useState<number>(0);
 
-      const [latestResResult, analysisResResult, projResResult] = results;
+  const [effectiveStatus, setEffectiveStatus] =
+    useState<'LIVE' | 'STALE' | 'OFFLINE'>('LIVE');
 
-      if (latestResResult.status === 'fulfilled' && latestResResult.value.snapshot) {
-        setSnapshot(latestResResult.value.snapshot);
-        setAgeSeconds(latestResResult.value.ageSeconds || 0);
-        setEffectiveStatus(latestResResult.value.effectiveStatus || 'LIVE');
-        setErrorMessage(null);
-      } else if (latestResResult.status === 'rejected') {
-        console.warn('Market snapshot fetch failed:', latestResResult.reason);
-      }
+  const [isRefreshing, setIsRefreshing] =
+    useState<boolean>(false);
 
-      if (analysisResResult.status === 'fulfilled' && analysisResResult.value.analysis) {
-        setAnalysis(analysisResResult.value.analysis);
-      }
+  const [errorMessage, setErrorMessage] =
+    useState<string | null>(null);
 
-      if (projResResult.status === 'fulfilled' && projResResult.value.projections) {
-        setProjections(projResResult.value.projections);
-      }
-    } catch (err: any) {
-      console.error('Error fetching market state:', err);
-      // Keep existing snapshot if available instead of hard offline
-      setEffectiveStatus((prev) => (snapshot ? 'STALE' : 'OFFLINE'));
-      setErrorMessage(err?.message || 'Error comunicando con el servidor local');
-    } finally {
-      if (force) setIsRefreshing(false);
-    }
-  }, [snapshot]);
-
-  const handleFilterChange = (newFilter: GlobalFilterState) => {
-    setGlobalFilter(newFilter);
-    fetchCentralData(false, newFilter);
-  };
-
-  const handleSelectMatrixCell = (bankKey: BankFilterKey, amountKey: AmountFilterKey) => {
-    const amountVal =
-      amountKey === '10K'
-        ? 10000
-        : amountKey === '20K'
-        ? 20000
-        : amountKey === '30K'
-        ? 30000
-        : amountKey === '40K'
-        ? 40000
-        : amountKey === '50K'
-        ? 50000
-        : amountKey === '100K'
-        ? 100000
-        : null;
-
-    const bankOption = BANK_OPTIONS.find((b) => b.key === bankKey);
-    const bankDisplayName = bankOption?.name || bankKey;
-
-    const newFilter: GlobalFilterState = {
-      bank: bankKey,
-      bankDisplayName,
-      amount: amountKey,
-      amountVal,
-    };
-
-    setGlobalFilter(newFilter);
-    fetchCentralData(false, newFilter);
-  };
+  /*
+   * Refs para evitar closures obsoletas dentro
+   * del polling automático.
+   */
+  const filterRef = useRef<GlobalFilterState>(globalFilter);
+  const snapshotRef = useRef<MarketSnapshot | null>(snapshot);
 
   useEffect(() => {
-    // Initial fetch
-    fetchCentralData();
+    filterRef.current = globalFilter;
+  }, [globalFilter]);
 
-    // Fast polling every 5 seconds for real-time filtered market updates
-    const pollInterval = setInterval(() => {
-      fetchCentralData();
+  useEffect(() => {
+    snapshotRef.current = snapshot;
+  }, [snapshot]);
+
+  /*
+   * Convierte el filtro actual en parámetros para la API.
+   */
+  const getApiParams = useCallback(
+    (filter: GlobalFilterState) => {
+      const bankParam =
+        filter.bank !== 'ALL'
+          ? filter.bank
+          : undefined;
+
+      const amountParam =
+        filter.amountVal !== null &&
+        filter.amountVal !== undefined
+          ? filter.amountVal
+          : undefined;
+
+      return {
+        bankParam,
+        amountParam,
+      };
+    },
+    []
+  );
+
+  /*
+   * Carga toda la información del mercado.
+   */
+  const fetchCentralData = useCallback(
+    async (
+      force = false,
+      filterToUse?: GlobalFilterState
+    ) => {
+      const currentFilter =
+        filterToUse ?? filterRef.current;
+
+      const { bankParam, amountParam } =
+        getApiParams(currentFilter);
+
+      if (force) {
+        setIsRefreshing(true);
+      }
+
+      try {
+        const results = await Promise.allSettled([
+          force
+            ? ApiService.refreshMarket(
+                bankParam,
+                amountParam
+              )
+            : ApiService.getLatestMarket(
+                bankParam,
+                amountParam
+              ),
+
+          ApiService.getMarketAnalysis(
+            bankParam,
+            amountParam
+          ),
+
+          ApiService.getMarketProjections(
+            bankParam,
+            amountParam
+          ),
+        ]);
+
+        const [
+          latestResult,
+          analysisResult,
+          projectionsResult,
+        ] = results;
+
+        let hasError = false;
+
+        /*
+         * MARKET SNAPSHOT
+         */
+        if (
+          latestResult.status === 'fulfilled' &&
+          latestResult.value?.snapshot
+        ) {
+          const data = latestResult.value;
+
+          setSnapshot(data.snapshot);
+
+          setAgeSeconds(
+            typeof data.ageSeconds === 'number'
+              ? data.ageSeconds
+              : 0
+          );
+
+          setEffectiveStatus(
+            data.effectiveStatus === 'STALE'
+              ? 'STALE'
+              : data.effectiveStatus === 'OFFLINE'
+              ? 'OFFLINE'
+              : 'LIVE'
+          );
+
+          snapshotRef.current = data.snapshot;
+        } else if (
+          latestResult.status === 'rejected'
+        ) {
+          hasError = true;
+
+          console.warn(
+            '[Market] Snapshot request failed:',
+            latestResult.reason
+          );
+
+          /*
+           * Si tenemos datos anteriores, mantenemos
+           * la aplicación funcionando como STALE.
+           */
+          if (snapshotRef.current) {
+            setEffectiveStatus('STALE');
+          } else {
+            setEffectiveStatus('OFFLINE');
+          }
+        }
+
+        /*
+         * MARKET ANALYSIS
+         */
+        if (
+          analysisResult.status === 'fulfilled' &&
+          analysisResult.value?.analysis
+        ) {
+          setAnalysis(
+            analysisResult.value.analysis
+          );
+        } else if (
+          analysisResult.status === 'rejected'
+        ) {
+          hasError = true;
+
+          console.warn(
+            '[Market] Analysis request failed:',
+            analysisResult.reason
+          );
+        }
+
+        /*
+         * MARKET PROJECTIONS
+         */
+        if (
+          projectionsResult.status === 'fulfilled' &&
+          projectionsResult.value?.projections
+        ) {
+          setProjections(
+            projectionsResult.value.projections
+          );
+        } else if (
+          projectionsResult.status === 'rejected'
+        ) {
+          hasError = true;
+
+          console.warn(
+            '[Market] Projections request failed:',
+            projectionsResult.reason
+          );
+        }
+
+        /*
+         * Mostramos error solamente si alguna
+         * petición realmente falló.
+         */
+        if (hasError) {
+          setErrorMessage(
+            'No se pudieron actualizar todos los datos del mercado.'
+          );
+        } else {
+          setErrorMessage(null);
+        }
+      } catch (error) {
+        console.error(
+          '[Market] Unexpected error:',
+          error
+        );
+
+        if (snapshotRef.current) {
+          setEffectiveStatus('STALE');
+        } else {
+          setEffectiveStatus('OFFLINE');
+        }
+
+        setErrorMessage(
+          error instanceof Error
+            ? error.message
+            : 'Error comunicando con el servidor.'
+        );
+      } finally {
+        if (force) {
+          setIsRefreshing(false);
+        }
+      }
+    },
+    [getApiParams]
+  );
+
+  /*
+   * Cambio del filtro global.
+   */
+  const handleFilterChange = useCallback(
+    (newFilter: GlobalFilterState) => {
+      setGlobalFilter(newFilter);
+
+      filterRef.current = newFilter;
+
+      void fetchCentralData(false, newFilter);
+    },
+    [fetchCentralData]
+  );
+
+  /*
+   * Selección de una celda de la matriz.
+   */
+  const handleSelectMatrixCell = useCallback(
+    (
+      bankKey: BankFilterKey,
+      amountKey: AmountFilterKey
+    ) => {
+      const amountMap: Record<
+        AmountFilterKey,
+        number | null
+      > = {
+        '10K': 10000,
+        '20K': 20000,
+        '30K': 30000,
+        '40K': 40000,
+        '50K': 50000,
+        '100K': 100000,
+        ALL: null,
+      };
+
+      const amountVal =
+        amountMap[amountKey] ?? null;
+
+      const bankOption =
+        BANK_OPTIONS.find(
+          (bank) => bank.key === bankKey
+        );
+
+      const bankDisplayName =
+        bankOption?.name ?? bankKey;
+
+      const newFilter: GlobalFilterState = {
+        bank: bankKey,
+        bankDisplayName,
+        amount: amountKey,
+        amountVal,
+      };
+
+      setGlobalFilter(newFilter);
+
+      filterRef.current = newFilter;
+
+      void fetchCentralData(
+        false,
+        newFilter
+      );
+    },
+    [fetchCentralData]
+  );
+
+  /*
+   * Carga inicial + polling.
+   *
+   * IMPORTANTE:
+   * fetchCentralData ya no depende de snapshot,
+   * por lo que este efecto NO se reinicia cada
+   * vez que cambia el snapshot.
+   */
+  useEffect(() => {
+    void fetchCentralData();
+
+    const pollInterval = window.setInterval(() => {
+      void fetchCentralData();
     }, 5000);
 
-    // Increment age counter locally every second for seamless live feedback
-    const ageInterval = setInterval(() => {
-      setAgeSeconds((prev) => prev + 1);
+    const ageInterval = window.setInterval(() => {
+      setAgeSeconds((previous) => previous + 1);
     }, 1000);
 
     return () => {
-      clearInterval(pollInterval);
-      clearInterval(ageInterval);
+      window.clearInterval(pollInterval);
+      window.clearInterval(ageInterval);
     };
   }, [fetchCentralData]);
 
+  /*
+   * Navegación segura entre tabs.
+   */
+  const handleNavigateTab = useCallback(
+    (tab: TabType) => {
+      setActiveTab(tab);
+    },
+    []
+  );
+
   return (
     <div className="min-h-screen bg-[#0a0c0f] text-[#e0e0e0] flex flex-col font-sans selection:bg-[#FCD535]/30 selection:text-[#FCD535]">
-      {/* Top Main App Header with filter indicators */}
+
+      {/* HEADER */}
       <Header
         snapshot={snapshot}
         globalFilter={globalFilter}
         ageSeconds={ageSeconds}
         status={effectiveStatus}
         isRefreshing={isRefreshing}
-        onRefresh={() => fetchCentralData(true)}
+        onRefresh={() =>
+          void fetchCentralData(true)
+        }
       />
 
-      {/* Main Tab Navigation */}
-      <Navigation activeTab={activeTab} onSelectTab={setActiveTab} />
+      {/* NAVIGATION */}
+      <Navigation
+        activeTab={activeTab}
+        onSelectTab={handleNavigateTab}
+      />
 
-      {/* Global Multi-Filter Bar connected to the Bank Matrix */}
+      {/* GLOBAL FILTER */}
       <GlobalFilterBar
         filter={globalFilter}
         onFilterChange={handleFilterChange}
-        onViewMatrixClick={() => setActiveTab('matrix')}
+        onViewMatrixClick={() =>
+          setActiveTab('matrix')
+        }
       />
 
-      {/* Main Content Area */}
+      {/* MAIN */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 lg:px-6 py-4">
+
+        {/* ERROR */}
         {errorMessage && (
-          <div className="mb-4 p-3 rounded bg-[#cf304a]/10 border border-[#cf304a]/30 text-[#cf304a] text-xs flex items-center justify-between font-mono">
-            <span>{errorMessage}</span>
+          <div className="mb-4 p-3 rounded bg-[#cf304a]/10 border border-[#cf304a]/30 text-[#cf304a] text-xs flex items-center justify-between gap-3 font-mono">
+
+            <span>
+              {errorMessage}
+            </span>
+
             <button
-              onClick={() => fetchCentralData(true)}
-              className="px-2 py-1 bg-[#cf304a]/20 hover:bg-[#cf304a]/30 rounded text-xs font-bold cursor-pointer"
+              type="button"
+              onClick={() =>
+                void fetchCentralData(true)
+              }
+              disabled={isRefreshing}
+              className="px-3 py-1.5 bg-[#cf304a]/20 hover:bg-[#cf304a]/30 disabled:opacity-50 rounded text-xs font-bold cursor-pointer disabled:cursor-not-allowed"
             >
-              Reintentar
+              {isRefreshing
+                ? 'Actualizando...'
+                : 'Reintentar'}
             </button>
           </div>
         )}
 
-        {/* Dynamic Views */}
+        {/* OVERVIEW */}
         {activeTab === 'overview' && (
           <MainOverview
             snapshot={snapshot}
             analysis={analysis}
             projections={projections}
             ageSeconds={ageSeconds}
-            onNavigateTab={(tab) => setActiveTab(tab)}
+            onNavigateTab={handleNavigateTab}
           />
         )}
 
+        {/* PROJECTIONS */}
         {activeTab === 'projections' && (
           <DailyFluctuationChart
             snapshot={snapshot}
@@ -198,34 +467,55 @@ export default function App() {
           />
         )}
 
+        {/* MATRIX */}
         {activeTab === 'matrix' && (
           <BankMatrix
             activeGlobalFilter={globalFilter}
             onSelectFilter={handleSelectMatrixCell}
-            onNavigateTab={(tab) => setActiveTab(tab)}
+            onNavigateTab={handleNavigateTab}
           />
         )}
 
-        {activeTab === 'orderbook' && <OrderBookView snapshot={snapshot} />}
+        {/* ORDER BOOK */}
+        {activeTab === 'orderbook' && (
+          <OrderBookView
+            snapshot={snapshot}
+          />
+        )}
 
-        {activeTab === 'history' && <HistoryAndBacktest />}
+        {/* HISTORY */}
+        {activeTab === 'history' && (
+          <HistoryAndBacktest />
+        )}
 
-        {activeTab === 'alerts' && <AlertsManager />}
+        {/* ALERTS */}
+        {activeTab === 'alerts' && (
+          <AlertsManager />
+        )}
+
       </main>
 
-      {/* Institutional Footer */}
+      {/* FOOTER */}
       <footer className="border-t border-[#2b2f36] bg-[#111417] py-3 px-4 text-center text-xs text-[#848e9c]">
+
         <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-2 text-[11px] font-mono">
-          <span>Binance P2P Trading Assistant · Conexión Directa Binance P2P API</span>
+
+          <span>
+            Binance P2P Trading Assistant ·
+            Conexión Directa Binance P2P API
+          </span>
+
           <span>
             Mercado Activo: USDT/VES · Filtro:{' '}
             <strong className="text-[#FCD535]">
-              {globalFilter.bankDisplayName} ({globalFilter.amount})
+              {globalFilter.bankDisplayName} (
+              {globalFilter.amount})
             </strong>
           </span>
+
         </div>
+
       </footer>
     </div>
   );
 }
-
