@@ -4,7 +4,7 @@
  */
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Header } from './components/Header';
+import Header from './Header';
 import { Navigation, TabType } from './components/Navigation';
 import { GlobalFilterBar, BANK_OPTIONS } from './components/GlobalFilterBar';
 import { MainOverview } from './components/MainOverview';
