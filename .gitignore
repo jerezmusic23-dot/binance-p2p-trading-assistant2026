@@ -1,0 +1,44 @@
+# Dependencias
+node_modules/
+
+# Build
+dist/
+*.tsbuildinfo
+
+# Datos capturados (histórico de mercado) - NUNCA versionar
+data/
+
+# Secretos
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Temporales / caché
+.cache/
+.temp/
+.tmp/
+*.tmp
+.vite/
+
+# Sistema operativo
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+desktop.ini
+
+# IDE / editores
+.vscode/
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+*~
