@@ -356,3 +356,70 @@ describe('fetchFullMarketSnapshot', () => {
     expect(snap.weightedBuyPrice).toBeNull();
   });
 });
+
+describe('FASE 2 - medians agree across both sides', () => {
+  /** Four ads at the given prices, all otherwise identical. */
+  const adsAt = (prices: number[]) =>
+    prices.map((p, i) => makeAdItem({ advNo: `a${i}`, price: p.toFixed(2), tradable: '100' }));
+
+  function stubSides(buy: number[], sell: number[]) {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init: RequestInit) => {
+        const body = JSON.parse(String(init.body));
+        return {
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+          json: async () =>
+            makeBinanceResponse(adsAt(body.tradeType === 'BUY' ? buy : sell)),
+        } as unknown as Response;
+      })
+    );
+  }
+
+  it('averages the two middle prices for an even number of ads', async () => {
+    // Was: BUY sorted ascending -> [floor(4/2)] = 3rd element = 923.
+    stubSides([921, 922, 923, 924], [921, 922, 923, 924]);
+    const snap = await BinanceP2PService.fetchFullMarketSnapshot();
+
+    expect(snap.medianBuyPrice).toBe(922.5);
+    expect(snap.medianSellPrice).toBe(922.5);
+  });
+
+  it('gives BOTH sides the same median for the same prices', async () => {
+    // Was: BUY ascending gave the upper-middle, SELL descending the
+    // lower-middle, so identical books reported different medians.
+    stubSides([921, 922, 923, 924], [924, 923, 922, 921]);
+    const snap = await BinanceP2PService.fetchFullMarketSnapshot();
+
+    expect(snap.medianBuyPrice).toBe(snap.medianSellPrice);
+    expect(snap.medianBuyPrice).toBe(922.5);
+  });
+
+  it('returns the middle price for an odd number of ads', async () => {
+    stubSides([921, 922, 923], [921, 922, 923]);
+    const snap = await BinanceP2PService.fetchFullMarketSnapshot();
+    expect(snap.medianBuyPrice).toBe(922);
+  });
+
+  it('the median ignores an extreme ad that dominates the extremes', async () => {
+    // The production incident, end to end through the capture layer.
+    const level = Array.from({ length: 19 }, (_, i) => 921 + i * 0.05);
+    stubSides(level, [...level, 980]);
+    const snap = await BinanceP2PService.fetchFullMarketSnapshot();
+
+    expect(snap.bestSellPrice).toBe(980); // raw extreme preserved for auditing
+    expect(snap.medianSellPrice).toBeCloseTo(921.48, 1); // strategic level intact
+    expect(snap.medianSellPrice! - snap.medianBuyPrice!).toBeLessThan(0.1);
+  });
+
+  it('keeps the aggregates null when a side is empty', async () => {
+    stubSides([], [921, 922]);
+    const snap = await BinanceP2PService.fetchFullMarketSnapshot();
+
+    expect(snap.medianBuyPrice).toBeNull();
+    expect(snap.averageBuyPrice).toBeNull();
+    expect(snap.medianSellPrice).toBe(921.5);
+  });
+});

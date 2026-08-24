@@ -10,6 +10,7 @@ import {
   MarketSnapshot,
   Valued,
 } from './types.js';
+import { describeSide, round2, weightedAverage } from './marketStatistics.js';
 
 export interface P2PSearchParams {
   asset?: string;
@@ -61,24 +62,11 @@ export const BANK_CODE_MAP: Record<string, { code: string; displayName: string; 
   },
 };
 
-/** Rounds to the 2 decimals this market quotes in. */
-function round2(value: number): number {
-  return Number(value.toFixed(2));
-}
-
-/**
- * Liquidity-weighted average price of a side. null when the side is empty or
- * when no ad reports any available amount - a weighted average with zero total
- * weight is undefined, not zero.
- */
-function weightedAverage(ads: NormalizedAd[]): number | null {
-  let totalVolume = 0;
-  let weightedSum = 0;
-  for (const ad of ads) {
-    totalVolume += ad.availableUsdt;
-    weightedSum += ad.price * ad.availableUsdt;
-  }
-  return totalVolume > 0 ? round2(weightedSum / totalVolume) : null;
+/** Liquidity-weighted average price of one side, or null when no ad reports volume. */
+function liquidityWeightedPrice(ads: NormalizedAd[]): number | null {
+  return round2(
+    weightedAverage(ads.map((ad) => ({ value: ad.price, weight: ad.availableUsdt })))
+  );
 }
 
 export class BinanceP2PService {
@@ -220,33 +208,34 @@ export class BinanceP2PService {
     // Calculate real stats.
     // C2: a side with no ads yields null everywhere. Nothing is derived from
     // the opposite side and nothing defaults to 0 - an absent price is absent.
-    const buyPrices = topBuyAds.map((a) => a.price).sort((a, b) => a - b);
-    const sellPrices = topSellAds.map((a) => a.price).sort((a, b) => b - a);
+    //
+    // FASE 2: every descriptive statistic now comes from marketStatistics, so
+    // BUY and SELL use identical definitions. The previous code sorted BUY
+    // ascending and SELL descending and then indexed [floor(n/2)] on both,
+    // which returned a different middle element per side for an even count.
+    const buyStats = describeSide(topBuyAds.map((a) => a.price));
+    const sellStats = describeSide(topSellAds.map((a) => a.price));
 
-    const hasBuySide = buyPrices.length > 0;
-    const hasSellSide = sellPrices.length > 0;
+    const hasBuySide = buyStats.count > 0;
+    const hasSellSide = sellStats.count > 0;
 
     // Buy side (Taker pays VES to buy USDT): best price is the lowest ask.
-    const bestBuyPrice = hasBuySide ? round2(buyPrices[0]) : null;
+    const bestBuyPrice = round2(buyStats.min);
     // Sell side: best price is the highest bid.
-    const bestSellPrice = hasSellSide ? round2(sellPrices[0]) : null;
+    const bestSellPrice = round2(sellStats.max);
 
-    const averageBuyPrice = hasBuySide
-      ? round2(buyPrices.reduce((acc, p) => acc + p, 0) / buyPrices.length)
-      : null;
-    const averageSellPrice = hasSellSide
-      ? round2(sellPrices.reduce((acc, p) => acc + p, 0) / sellPrices.length)
-      : null;
+    const averageBuyPrice = round2(buyStats.mean);
+    const averageSellPrice = round2(sellStats.mean);
 
-    const medianBuyPrice = hasBuySide ? round2(buyPrices[Math.floor(buyPrices.length / 2)]) : null;
-    const medianSellPrice = hasSellSide
-      ? round2(sellPrices[Math.floor(sellPrices.length / 2)])
-      : null;
+    const medianBuyPrice = round2(buyStats.median);
+    const medianSellPrice = round2(sellStats.median);
 
-    const weightedBuyPrice = weightedAverage(topBuyAds);
-    const weightedSellPrice = weightedAverage(topSellAds);
+    const weightedBuyPrice = liquidityWeightedPrice(topBuyAds);
+    const weightedSellPrice = liquidityWeightedPrice(topSellAds);
 
     // A spread needs two prices. With one side missing there is no spread.
+    // NOTE: still the RAW extreme spread. FASE 3 replaces this with the signed
+    // strategic spread computed from the medians.
     const spreadAbsolute =
       bestBuyPrice !== null && bestSellPrice !== null
         ? round2(Math.abs(bestBuyPrice - bestSellPrice))
