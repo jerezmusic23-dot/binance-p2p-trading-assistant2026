@@ -529,6 +529,79 @@ export interface BankAmountExecutability {
   sellRejections: Record<string, number>;
 }
 
+/**
+ * VERIFIED       - both sides executable AND both liquidities verifiable.
+ * NOT_VERIFIABLE - both sides executable, but a liquidity could not be
+ *                  established. Kept as context; never a usable operation.
+ */
+export type OpportunityVerification = 'VERIFIED' | 'NOT_VERIFIABLE';
+
+/**
+ * One concrete operation: buy USDT and sell them back, same bank, same amount.
+ *
+ * Built EXCLUSIVELY from EXECUTABLE quotes. The strategic median describes
+ * where the market is; an Opportunity describes a trade someone can actually
+ * place. They are different questions and never substitute for one another.
+ */
+export interface Opportunity {
+  bank: string;
+  amountVes: number;
+
+  /** Price paid to acquire USDT. From an EXECUTABLE BUY quote only. */
+  buyPrice: number;
+  /** Price received selling USDT. From an EXECUTABLE SELL quote only. */
+  sellPrice: number;
+  buyAdvNo: string;
+  sellAdvNo: string;
+
+  /** sellPrice - buyPrice. Signed. */
+  spreadAbsolute: number;
+  /** ((sellPrice - buyPrice) / buyPrice) * 100. Signed, denominator buyPrice. */
+  spreadPct: number;
+
+  /**
+   * GROSS margin of the operation, identical to the spread above.
+   *
+   * BEFORE commissions, transfers, banking costs, slippage, rounding and any
+   * other operating cost. This project does not model those yet, and none are
+   * invented here. This is NOT net profit.
+   */
+  marginAbsolute: number;
+  marginPct: number;
+
+  /** null only if a side's liquidity could not be established. Never 0 for absent. */
+  buyAvailableUsdt: number | null;
+  sellAvailableUsdt: number | null;
+  /** min(buy, sell) when both are known; null otherwise. Never invented. */
+  availableUsdt: number | null;
+
+  verification: OpportunityVerification;
+  provenance: DataProvenance;
+  /** Why this is not VERIFIED, when it is not. */
+  reason: string | null;
+}
+
+/** Diagnostic context for one BANK x AMOUNT cell, kept even when no Opportunity exists. */
+export interface OpportunityContext {
+  bank: string;
+  amountVes: number;
+  buyReason: string | null;
+  sellReason: string | null;
+  buyRejections: Record<string, number>;
+  sellRejections: Record<string, number>;
+}
+
+export interface OpportunityEngineResult {
+  /** Every Opportunity found, VERIFIED and NOT_VERIFIABLE alike. */
+  opportunities: Opportunity[];
+  /** byBank[bank][amountKey] - null where no Opportunity exists. */
+  byBank: Record<string, Record<string, Opportunity | null>>;
+  /** Best operation overall. Chosen among VERIFIED opportunities ONLY. */
+  bestOpportunity: Opportunity | null;
+  /** Rejections preserved per cell. Nothing is silently dropped. */
+  context: Record<string, Record<string, OpportunityContext>>;
+}
+
 export interface BankMatrixRow {
   bankKey: string;
   bankDisplayName: string;
