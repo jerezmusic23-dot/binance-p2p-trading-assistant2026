@@ -307,8 +307,8 @@ describe('fetchFullMarketSnapshot', () => {
     expect(snap.topSellAds).toHaveLength(10);
   });
 
-  it('BUG: fabricates the missing side from the other side (+1% / -1%)', async () => {
-    // Audit B13 / project rule 6: a missing side must be null, never derived.
+  it('reports a missing side as null, never derived from the other side', async () => {
+    // Was audit B13 (bestBuy = bestSell * 1.01). Fixed in C2 / project rule 6.
     vi.stubGlobal(
       'fetch',
       vi.fn(async (_url: string, init: RequestInit) => {
@@ -326,7 +326,33 @@ describe('fetchFullMarketSnapshot', () => {
     const snap = await BinanceP2PService.fetchFullMarketSnapshot();
 
     expect(snap.topBuyAds).toHaveLength(0);
-    // 921 * 1.01 = 930.21 -> a price no advertiser ever published.
-    expect(snap.bestBuyPrice).toBe(930.21);
+    expect(snap.bestBuyPrice).toBeNull();
+    expect(snap.averageBuyPrice).toBeNull();
+    expect(snap.medianBuyPrice).toBeNull();
+    expect(snap.weightedBuyPrice).toBeNull();
+    // A spread needs two prices.
+    expect(snap.spreadAbsolute).toBeNull();
+    expect(snap.spreadPercentage).toBeNull();
+    // The side that really existed is untouched.
+    expect(snap.bestSellPrice).toBe(921);
+  });
+
+  it('reports every aggregate as null when BOTH sides are empty', async () => {
+    // fetchFullMarketSnapshot still throws in that case; this pins that the
+    // failure is explicit rather than a snapshot full of zeros.
+    vi.stubGlobal('fetch', makeFetchMock([makeBinanceResponse([])]));
+    await expect(BinanceP2PService.fetchFullMarketSnapshot()).rejects.toThrow(
+      'No active P2P ads found for the specified criteria.'
+    );
+  });
+
+  it('reports a null weighted price when no ad publishes an available amount', async () => {
+    const noVolume = [makeAdItem({ advNo: 'v0', price: '918.00', tradable: '', surplus: '' })];
+    vi.stubGlobal('fetch', makeFetchMock([makeBinanceResponse(noVolume)]));
+
+    const snap = await BinanceP2PService.fetchFullMarketSnapshot();
+    expect(snap.bestBuyPrice).toBe(918);
+    // Zero total weight makes the weighted average undefined, not zero.
+    expect(snap.weightedBuyPrice).toBeNull();
   });
 });

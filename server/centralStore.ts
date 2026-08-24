@@ -94,31 +94,38 @@ export class CentralMarketStore {
     try {
       const snapshot = await BinanceP2PService.fetchFullMarketSnapshot();
 
-      // Validation check
-      if (snapshot.bestBuyPrice <= 0 || snapshot.bestSellPrice <= 0) {
-        throw new Error('Validation failed: Non-positive price returned from Binance');
-      }
-
       this.currentSnapshot = snapshot;
       this.lastValidSnapshot = snapshot;
 
-      // Append record to historical storage with Venezuelan hour
-      const record: HistoryRecord = {
-        id: `tick-${snapshot.timestamp}`,
-        timestamp: snapshot.timestamp,
-        dateStr: new Date(snapshot.timestamp).toISOString(),
-        hour: ProjectionEngine.getVenezuelaHour(snapshot.timestamp),
-        buyPrice: snapshot.bestBuyPrice,
-        sellPrice: snapshot.bestSellPrice,
-        spreadPct: snapshot.spreadPercentage,
-        bestBuyMerchant: snapshot.topBuyAds[0]?.merchantName || 'N/A',
-        bestSellMerchant: snapshot.topSellAds[0]?.merchantName || 'N/A',
-        activeBuyAds: snapshot.topBuyAds.length,
-        activeSellAds: snapshot.topSellAds.length,
-        source: 'BINANCE_P2P',
-      };
+      /*
+       * C2 / decision (b): the history only ever stores complete observations.
+       * When either side of the book was empty there is no price to record, so
+       * nothing is appended - the gap in the series is the honest record of
+       * what happened. This keeps HistoryRecord and storage.ts unchanged.
+       */
+      const { bestBuyPrice, bestSellPrice, spreadPercentage } = snapshot;
+      if (bestBuyPrice !== null && bestSellPrice !== null && spreadPercentage !== null) {
+        const record: HistoryRecord = {
+          id: `tick-${snapshot.timestamp}`,
+          timestamp: snapshot.timestamp,
+          dateStr: new Date(snapshot.timestamp).toISOString(),
+          hour: ProjectionEngine.getVenezuelaHour(snapshot.timestamp),
+          buyPrice: bestBuyPrice,
+          sellPrice: bestSellPrice,
+          spreadPct: spreadPercentage,
+          bestBuyMerchant: snapshot.topBuyAds[0]?.merchantName || 'N/A',
+          bestSellMerchant: snapshot.topSellAds[0]?.merchantName || 'N/A',
+          activeBuyAds: snapshot.topBuyAds.length,
+          activeSellAds: snapshot.topSellAds.length,
+          source: 'BINANCE_P2P',
+        };
 
-      StorageEngine.appendRecord(record);
+        StorageEngine.appendRecord(record);
+      } else {
+        console.warn(
+          '[CentralStore] Snapshot incompleto (BUY o SELL sin anuncios): no se registra en el histórico.'
+        );
+      }
 
       // Evaluate alert rules
       this.evaluateAlerts(snapshot);
@@ -140,22 +147,34 @@ export class CentralMarketStore {
           isoDate: new Date().toISOString(),
           asset: 'USDT',
           fiat: 'VES',
-          bestBuyPrice: 0,
-          bestSellPrice: 0,
-          averageBuyPrice: 0,
-          averageSellPrice: 0,
-          medianBuyPrice: 0,
-          medianSellPrice: 0,
-          weightedBuyPrice: 0,
-          weightedSellPrice: 0,
-          spreadAbsolute: 0,
-          spreadPercentage: 0,
+          bestBuyPrice: null,
+          bestSellPrice: null,
+          averageBuyPrice: null,
+          averageSellPrice: null,
+          medianBuyPrice: null,
+          medianSellPrice: null,
+          weightedBuyPrice: null,
+          weightedSellPrice: null,
+          spreadAbsolute: null,
+          spreadPercentage: null,
           topBuyAds: [],
           topSellAds: [],
           source: 'BINANCE_P2P',
           fetchDurationMs: 0,
           status: 'OFFLINE',
           lastError: err.message || 'Sin conexión a Binance P2P',
+          bestBuy: {
+            value: null,
+            provenance: 'REAL',
+            reason: 'No se ha obtenido ningun snapshot valido de Binance todavia.',
+          },
+          bestSell: {
+            value: null,
+            provenance: 'REAL',
+            reason: 'No se ha obtenido ningun snapshot valido de Binance todavia.',
+          },
+          aggregatesProvenance: 'REAL',
+          orderBookProvenance: 'REAL',
         };
       }
       return this.currentSnapshot;
@@ -263,9 +282,20 @@ export class CentralMarketStore {
       };
     } catch (err: any) {
       console.warn(`[CentralStore] Filtered snapshot query failed for ${normalizedBank} ${normalizedAmount}:`, err);
-      // Fallback to central snapshot if specific bank fails
+      // Fallback to central snapshot if specific bank fails. C1: the fallback
+      // is kept, but it is no longer silent - the snapshot now says the filter
+      // was not honoured, so the UI can stop claiming these are Banesco rates.
       const fallback = this.getCurrentSnapshot();
-      return fallback;
+      if (!fallback.snapshot) return fallback;
+      return {
+        ...fallback,
+        snapshot: {
+          ...fallback.snapshot,
+          filterFallbackReason:
+            `La consulta filtrada (banco: ${normalizedBank}, monto: ${normalizedAmount || 'ALL'}) ` +
+            'fallo. Estos datos corresponden a TODOS los bancos sin filtro de monto.',
+        },
+      };
     }
   }
 
@@ -342,7 +372,7 @@ export class CentralMarketStore {
    */
   public getMarketAnalysis(): MarketAnalysis | null {
     const { snapshot } = this.getCurrentSnapshot();
-    if (!snapshot || snapshot.bestBuyPrice <= 0) return null;
+    if (!snapshot) return null;
 
     const history = StorageEngine.getHistory(100);
     return ProjectionEngine.analyzeMarket(snapshot, history);
@@ -353,7 +383,7 @@ export class CentralMarketStore {
    */
   public getMarketProjections(): MarketProjections | null {
     const { snapshot } = this.getCurrentSnapshot();
-    if (!snapshot || snapshot.bestBuyPrice <= 0) return null;
+    if (!snapshot) return null;
 
     const history = StorageEngine.getHistory(100);
     const analysis = ProjectionEngine.analyzeMarket(snapshot, history);
@@ -479,24 +509,23 @@ export class CentralMarketStore {
                 availableMerchant: bestBuy.merchantName,
                 orderCount: bestBuy.ordersCount,
                 adCount: matchingBuyAds.length,
-              };
-            } else if (normalizedBuy.length > 0) {
-              // Fallback to top bank rate if no specific tier match
-              const bestBuy = normalizedBuy[0];
-              buyRow.ratesByAmount[amt.key] = {
-                leaderPrice: bestBuy.price,
-                suggestedPrice: Number((bestBuy.price + 0.01).toFixed(2)),
-                spreadPct: 0.01,
-                availableMerchant: bestBuy.merchantName,
-                orderCount: bestBuy.ordersCount,
-                adCount: normalizedBuy.length,
+                provenance: 'REAL',
               };
             } else {
+              /*
+               * C2: no fallback to another tier's price. If no ad covers this
+               * amount there is no executable rate, and null says exactly that.
+               */
               buyRow.ratesByAmount[amt.key] = {
                 leaderPrice: null,
                 suggestedPrice: null,
                 spreadPct: null,
                 adCount: 0,
+                provenance: 'REAL',
+                provenanceReason:
+                  normalizedBuy.length > 0
+                    ? `Ningun anuncio de compra de este banco cubre ${amt.val} VES.`
+                    : 'El banco no devolvio ningun anuncio de compra.',
               };
             }
 
@@ -511,16 +540,7 @@ export class CentralMarketStore {
                 availableMerchant: bestSell.merchantName,
                 orderCount: bestSell.ordersCount,
                 adCount: matchingSellAds.length,
-              };
-            } else if (normalizedSell.length > 0) {
-              const bestSell = normalizedSell[0];
-              sellRow.ratesByAmount[amt.key] = {
-                leaderPrice: bestSell.price,
-                suggestedPrice: Number((bestSell.price + 0.01).toFixed(2)),
-                spreadPct: 0.01,
-                availableMerchant: bestSell.merchantName,
-                orderCount: bestSell.ordersCount,
-                adCount: normalizedSell.length,
+                provenance: 'REAL',
               };
             } else {
               sellRow.ratesByAmount[amt.key] = {
@@ -528,6 +548,11 @@ export class CentralMarketStore {
                 suggestedPrice: null,
                 spreadPct: null,
                 adCount: 0,
+                provenance: 'REAL',
+                provenanceReason:
+                  normalizedSell.length > 0
+                    ? `Ningun anuncio de venta de este banco cubre ${amt.val} VES.`
+                    : 'El banco no devolvio ningun anuncio de venta.',
               };
             }
           }
@@ -565,27 +590,40 @@ export class CentralMarketStore {
       let triggered = false;
       let message = '';
 
+      /*
+       * C2: a rule cannot fire on a price that does not exist. Previously a
+       * missing side surfaced as 0, which made every BELOW rule fire.
+       */
+      const needsPrice = rule.condition === 'ABOVE' || rule.condition === 'BELOW';
+      if (needsPrice && targetPrice === null) continue;
+      if (
+        (rule.condition === 'SPREAD_ABOVE' || rule.condition === 'VOLATILITY_SPIKE') &&
+        snapshot.spreadPercentage === null
+      ) {
+        continue;
+      }
+
       switch (rule.condition) {
         case 'ABOVE':
-          if (targetPrice >= rule.targetValue) {
+          if (targetPrice !== null && targetPrice >= rule.targetValue) {
             triggered = true;
             message = `Precio ${rule.targetSide} (${targetPrice.toFixed(2)} VES) superó el umbral de ${rule.targetValue} VES.`;
           }
           break;
         case 'BELOW':
-          if (targetPrice <= rule.targetValue) {
+          if (targetPrice !== null && targetPrice <= rule.targetValue) {
             triggered = true;
             message = `Precio ${rule.targetSide} (${targetPrice.toFixed(2)} VES) cayó por debajo de ${rule.targetValue} VES.`;
           }
           break;
         case 'SPREAD_ABOVE':
-          if (snapshot.spreadPercentage >= rule.targetValue) {
+          if (snapshot.spreadPercentage !== null && snapshot.spreadPercentage >= rule.targetValue) {
             triggered = true;
             message = `Spread P2P (${snapshot.spreadPercentage.toFixed(2)}%) superó el umbral de ${rule.targetValue}%.`;
           }
           break;
         case 'VOLATILITY_SPIKE':
-          if (snapshot.spreadPercentage > rule.targetValue * 1.5) {
+          if (snapshot.spreadPercentage !== null && snapshot.spreadPercentage > rule.targetValue * 1.5) {
             triggered = true;
             message = `Alta volatilidad detectada en el libro de órdenes Binance P2P.`;
           }
@@ -593,6 +631,14 @@ export class CentralMarketStore {
       }
 
       if (triggered) {
+        /*
+         * Unreachable in practice: every branch that sets `triggered` already
+         * required a non-null price (ABOVE/BELOW skip early, and a non-null
+         * spread implies both sides exist). The guard keeps the persisted
+         * AlertTriggerLog schema free of nulls without touching storage.ts.
+         */
+        if (targetPrice === null) continue;
+
         rule.lastTriggeredAt = now;
         StorageEngine.saveAlert(rule);
 

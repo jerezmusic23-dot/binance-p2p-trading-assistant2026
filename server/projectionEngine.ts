@@ -17,9 +17,39 @@ import {
   HourlyProjectionItem,
   BacktestMetrics,
   MerchantDecisionAdvice,
+  DataProvenance,
+  DataWindow,
+  Valued,
 } from './types.js';
 
 export class ProjectionEngine {
+  /**
+   * Minimum stored observations before projections are considered to have any
+   * evidential basis.
+   *
+   * DECLARED ASSUMPTION, not an empirically derived threshold: nothing in the
+   * data has been measured to justify 30 rather than 20 or 200. It exists so
+   * that hasSufficientData can be false for an obviously empty store instead
+   * of being hardcoded true. It should be replaced by a value derived from
+   * measured projection error once the backtest evaluates the production model.
+   */
+  public static readonly MIN_SAMPLES_FOR_PROJECTION = 30;
+
+  /** Describes the stored observations a derived value was computed from. */
+  public static describeWindow(history: HistoryRecord[]): DataWindow {
+    if (history.length === 0) {
+      return { sampleCount: 0, fromTimestamp: null, toTimestamp: null, spanMinutes: null };
+    }
+    const first = history[0].timestamp;
+    const last = history[history.length - 1].timestamp;
+    return {
+      sampleCount: history.length,
+      fromTimestamp: first,
+      toTimestamp: last,
+      spanMinutes: Number((Math.max(0, last - first) / 60000).toFixed(1)),
+    };
+  }
+
   /**
    * Returns the hour of day in Venezuelan Standard Time (VET, UTC-4 / America/Caracas)
    */
@@ -61,20 +91,47 @@ export class ProjectionEngine {
     history: HistoryRecord[]
   ): MarketAnalysis {
     const buyPrices = history.map((h) => h.buyPrice).filter((p) => p > 0);
-    const sellPrices = history.map((h) => h.sellPrice).filter((p) => p > 0);
-
-    if (buyPrices.length === 0) buyPrices.push(snapshot.bestBuyPrice);
-    if (sellPrices.length === 0) sellPrices.push(snapshot.bestSellPrice);
-
     const currentPrice = snapshot.bestBuyPrice;
+    const dataWindow = this.describeWindow(history);
+    const provenance = {
+      overall: 'AGGREGATED' as const,
+      trendStrength: 'AGGREGATED' as const,
+      supportResistance: 'HEURISTIC' as const,
+    };
+
+    // C2: the live price is no longer pushed into the series as a stand-in for
+    // history, and no metric falls back to an invented constant. With nothing
+    // to measure, every derived figure is null.
+    if (buyPrices.length === 0 || currentPrice === null) {
+      return {
+        trend: null,
+        trendStrength: null,
+        momentum: null,
+        volatility: null,
+        volatilityPct: null,
+        priceVsSmaPct: null,
+        rsi: null,
+        supportLevel: null,
+        resistanceLevel: null,
+        summaryText: 'Sin observaciones suficientes para analizar el mercado.',
+        reasons: [
+          buyPrices.length === 0
+            ? 'No hay ningun tick almacenado sobre el que calcular estadisticas.'
+            : 'No hay precio de compra vigente en el snapshot de Binance.',
+        ],
+        provenance,
+        dataWindow,
+      };
+    }
+
     const len = buyPrices.length;
 
-    // 1. Simple Moving Averages & Linear Regression Slope
+    // 1. Simple Moving Average & linear regression slope
     const smaWindow = Math.min(len, 25);
     const recentBuyPrices = buyPrices.slice(-smaWindow);
     const sma = recentBuyPrices.reduce((a, b) => a + b, 0) / recentBuyPrices.length;
 
-    let slope = 0;
+    let slope: number | null = null;
     if (len >= 3) {
       const regPoints = buyPrices.slice(-Math.min(len, 35));
       const n = regPoints.length;
@@ -90,73 +147,102 @@ export class ProjectionEngine {
         sumX2 += i * i;
       }
       const denom = n * sumX2 - sumX * sumX;
-      if (denom !== 0) {
-        slope = (n * sumXY - sumX * sumY) / denom;
-      }
+      slope = denom !== 0 ? (n * sumXY - sumX * sumY) / denom : null;
     }
 
-    // Determine Trend based on slope percentage relative to price
-    const slopePctPerStep = currentPrice > 0 ? (slope / currentPrice) * 100 : 0;
-    let trend: MarketTrend = 'LATERAL';
-    if (slopePctPerStep > 0.025) {
-      trend = 'ALCISTA';
-    } else if (slopePctPerStep < -0.025) {
-      trend = 'BAJISTA';
-    } else {
-      trend = 'LATERAL';
+    // Trend from the slope as a percentage of price. Fewer than 3 points means
+    // there is no slope to speak of, so trend and strength stay null.
+    const slopePctPerStep = slope !== null ? (slope / currentPrice) * 100 : null;
+
+    let trend: MarketTrend | null = null;
+    let trendStrength: number | null = null;
+    if (slopePctPerStep !== null) {
+      trend =
+        slopePctPerStep > 0.025 ? 'ALCISTA' : slopePctPerStep < -0.025 ? 'BAJISTA' : 'LATERAL';
+      // C2: no artificial floor. A flat slope is strength 0, which is the
+      // truth, not 35.
+      trendStrength = Math.min(100, Math.round(Math.abs(slopePctPerStep) * 600));
     }
 
-    const trendStrength = Math.min(100, Math.round(Math.abs(slopePctPerStep) * 600) + 35);
-
-    // 2. Volatility (Sample Standard Deviation over rolling window)
-    let variance = 0;
-    for (const p of recentBuyPrices) {
-      variance += Math.pow(p - sma, 2);
+    // 2. Volatility. A single sample has no dispersion to measure.
+    let stdDev: number | null = null;
+    if (recentBuyPrices.length > 1) {
+      let variance = 0;
+      for (const p of recentBuyPrices) variance += Math.pow(p - sma, 2);
+      stdDev = Math.sqrt(variance / (recentBuyPrices.length - 1));
     }
-    const stdDev = recentBuyPrices.length > 1 ? Math.sqrt(variance / (recentBuyPrices.length - 1)) : currentPrice * 0.003;
-    const volatilityPct = currentPrice > 0 ? Number(((stdDev / currentPrice) * 100).toFixed(2)) : 0.4;
+    const volatilityPct =
+      stdDev !== null ? Number(((stdDev / currentPrice) * 100).toFixed(2)) : null;
 
-    let volatility: VolatilityLevel = 'MEDIA';
-    if (volatilityPct < 0.35) {
-      volatility = 'BAJA';
-    } else if (volatilityPct > 1.1) {
-      volatility = 'ALTA';
+    let volatility: VolatilityLevel | null = null;
+    if (volatilityPct !== null) {
+      volatility = volatilityPct < 0.35 ? 'BAJA' : volatilityPct > 1.1 ? 'ALTA' : 'MEDIA';
     }
 
-    // 3. Momentum (Rate of Change vs lookback period)
+    // 3. Momentum. Needs an earlier point that is actually earlier.
     const lookbackIndex = Math.max(0, len - 6);
-    const oldPrice = buyPrices[lookbackIndex] || currentPrice;
-    const rocPct = oldPrice > 0 ? ((currentPrice - oldPrice) / oldPrice) * 100 : 0;
+    const oldPrice = len > 1 ? buyPrices[lookbackIndex] : null;
+    const rocPct =
+      oldPrice !== null && oldPrice > 0 ? ((currentPrice - oldPrice) / oldPrice) * 100 : null;
 
-    let momentum: MomentumLevel = 'NEUTRO';
-    if (rocPct > 0.15) momentum = 'ALTO';
-    else if (rocPct > 0.03) momentum = 'MODERADO';
-    else if (rocPct < -0.15) momentum = 'NEGATIVO';
+    let momentum: MomentumLevel | null = null;
+    if (rocPct !== null) {
+      momentum =
+        rocPct > 0.15 ? 'ALTO' : rocPct > 0.03 ? 'MODERADO' : rocPct < -0.15 ? 'NEGATIVO' : 'NEUTRO';
+    }
 
-    // 4. RSI (Relative Strength Index)
+    // 4. RSI - undefined when the series never moves.
     const rsi = this.calculateRSI(buyPrices, 14);
 
     // 5. Price vs SMA
-    const priceVsSmaPct = sma > 0 ? Number((((currentPrice - sma) / sma) * 100).toFixed(2)) : 0;
+    const priceVsSmaPct = sma > 0 ? Number((((currentPrice - sma) / sma) * 100).toFixed(2)) : null;
 
-    // Support and Resistance Levels
+    // Support and resistance. The 1.6-sigma band is a hand-picked multiplier,
+    // hence HEURISTIC; without a sigma there is no band at all.
     const recentMin = Math.min(...recentBuyPrices);
     const recentMax = Math.max(...recentBuyPrices);
-    const supportLevel = Number((recentMin > 0 ? Math.min(recentMin, currentPrice - stdDev * 1.6) : currentPrice * 0.985).toFixed(2));
-    const resistanceLevel = Number((recentMax > 0 ? Math.max(recentMax, currentPrice + stdDev * 1.6) : currentPrice * 1.015).toFixed(2));
+    const supportLevel =
+      stdDev !== null ? Number(Math.min(recentMin, currentPrice - stdDev * 1.6).toFixed(2)) : null;
+    const resistanceLevel =
+      stdDev !== null ? Number(Math.max(recentMax, currentPrice + stdDev * 1.6).toFixed(2)) : null;
 
-    // Reasoning bullets explaining factors
     const reasons: string[] = [];
-    reasons.push(`Tendencia ${trend.toLowerCase()}: pendiente de regresión ${slope >= 0 ? '+' : ''}${slope.toFixed(3)} VES/muestra.`);
-    reasons.push(`Momentum ${momentum.toLowerCase()}: variación reciente ${rocPct >= 0 ? '+' : ''}${rocPct.toFixed(2)}%.`);
-    reasons.push(`Volatilidad ${volatility.toLowerCase()} (${volatilityPct}%): desviación estándar estimada en ±${stdDev.toFixed(2)} VES.`);
-    reasons.push(`Posición relativa: precio ${priceVsSmaPct >= 0 ? '+' : ''}${priceVsSmaPct}% respecto a la media móvil (SMA ${sma.toFixed(2)} VES).`);
-    
-    if (rsi < 35) {
-      reasons.push(`RSI en zona de sobreventa (${rsi.toFixed(1)}): alta probabilidad de rebote técnico.`);
-    } else if (rsi > 65) {
-      reasons.push(`RSI en zona de sobrecompra (${rsi.toFixed(1)}): resistencia cercana.`);
+    if (slope !== null && trend !== null) {
+      reasons.push(
+        `Tendencia ${trend.toLowerCase()}: pendiente de regresión ${slope >= 0 ? '+' : ''}${slope.toFixed(3)} VES/muestra.`
+      );
+    } else {
+      reasons.push('Tendencia no calculable: se requieren al menos 3 observaciones.');
     }
+    if (momentum !== null && rocPct !== null) {
+      reasons.push(
+        `Momentum ${momentum.toLowerCase()}: variación reciente ${rocPct >= 0 ? '+' : ''}${rocPct.toFixed(2)}%.`
+      );
+    }
+    if (volatility !== null && stdDev !== null) {
+      reasons.push(
+        `Volatilidad ${volatility.toLowerCase()} (${volatilityPct}%): desviación estándar ±${stdDev.toFixed(2)} VES.`
+      );
+    } else {
+      reasons.push('Volatilidad no calculable: se requiere más de una observación.');
+    }
+    if (priceVsSmaPct !== null) {
+      reasons.push(
+        `Posición relativa: precio ${priceVsSmaPct >= 0 ? '+' : ''}${priceVsSmaPct}% respecto a la media móvil (SMA ${sma.toFixed(2)} VES).`
+      );
+    }
+    if (rsi === null) {
+      reasons.push('RSI no calculable: la serie no registra ninguna variación de precio.');
+    } else if (rsi < 35) {
+      reasons.push(`RSI en zona de sobreventa (${rsi.toFixed(1)}).`);
+    } else if (rsi > 65) {
+      reasons.push(`RSI en zona de sobrecompra (${rsi.toFixed(1)}).`);
+    }
+
+    const summaryText =
+      trend !== null && momentum !== null && volatility !== null
+        ? `Mercado ${trend} con momentum ${momentum.toLowerCase()} y volatilidad ${volatility.toLowerCase()}.`
+        : 'Análisis parcial: faltan observaciones para clasificar el mercado por completo.';
 
     return {
       trend,
@@ -165,11 +251,13 @@ export class ProjectionEngine {
       volatility,
       volatilityPct,
       priceVsSmaPct,
-      rsi: Number(rsi.toFixed(1)),
+      rsi: rsi === null ? null : Number(rsi.toFixed(1)),
       supportLevel,
       resistanceLevel,
-      summaryText: `Mercado ${trend} con momentum ${momentum.toLowerCase()} y volatilidad ${volatility.toLowerCase()}.`,
+      summaryText,
       reasons,
+      provenance,
+      dataWindow,
     };
   }
 
@@ -182,12 +270,18 @@ export class ProjectionEngine {
     const totalVolume = buyVolumeUsdt + sellVolumeUsdt;
 
     if (totalVolume <= 0) {
+      // C2: an empty book is a real observation - Binance answered and there
+      // was nothing there. The volumes are null; nothing is invented.
+      const noLiquidity =
+        'El libro de ordenes no contiene liquidez publicada. No hay volumen que medir.';
       return {
-        buyVolumeUsdt: 15000,
-        sellVolumeUsdt: 15000,
-        buyPressurePct: 50,
-        sellPressurePct: 50,
-        dominantSide: 'EQUILIBRADO',
+        buyVolumeUsdt: null,
+        sellVolumeUsdt: null,
+        buyPressurePct: null,
+        sellPressurePct: null,
+        dominantSide: null,
+        buyVolume: { value: null, provenance: 'REAL', reason: noLiquidity },
+        sellVolume: { value: null, provenance: 'REAL', reason: noLiquidity },
       };
     }
 
@@ -198,12 +292,17 @@ export class ProjectionEngine {
     if (buyPressurePct >= 58) dominantSide = 'COMPRA';
     else if (sellPressurePct >= 58) dominantSide = 'VENTA';
 
+    const buy = Number(buyVolumeUsdt.toFixed(2));
+    const sell = Number(sellVolumeUsdt.toFixed(2));
+
     return {
-      buyVolumeUsdt: Number(buyVolumeUsdt.toFixed(2)),
-      sellVolumeUsdt: Number(sellVolumeUsdt.toFixed(2)),
+      buyVolumeUsdt: buy,
+      sellVolumeUsdt: sell,
       buyPressurePct,
       sellPressurePct,
       dominantSide,
+      buyVolume: { value: buy, provenance: 'AGGREGATED' },
+      sellVolume: { value: sell, provenance: 'AGGREGATED' },
     };
   }
 
@@ -215,67 +314,160 @@ export class ProjectionEngine {
     history: HistoryRecord[],
     analysis: MarketAnalysis
   ): MarketProjections {
-    const currentBuy = snapshot.bestBuyPrice > 0 ? snapshot.bestBuyPrice : 918;
-    const currentSell = snapshot.bestSellPrice > 0 ? snapshot.bestSellPrice : 918.04;
+    const currentBuy = snapshot.bestBuyPrice;
+    const currentSell = snapshot.bestSellPrice;
     const currentVetHour = this.getVenezuelaHour();
-
-    // Order book pressure
     const orderBookPressure = this.computeOrderBookPressure(snapshot);
+    const dataWindow = this.describeWindow(history);
 
-    // Intraday Volatility Band (Estimated 0.6% - 1.8% standard session range in VES)
-    const baseVolPct = Math.max(0.65, analysis.volatilityPct);
-    const dailyDrift = analysis.trend === 'ALCISTA' ? 0.007 : analysis.trend === 'BAJISTA' ? -0.007 : 0.001;
+    const provenance = {
+      daily: 'PROJECTED' as const,
+      probabilities: 'HEURISTIC' as const,
+      confidence: 'HEURISTIC' as const,
+      seasonality: 'HEURISTIC' as const,
+      merchantAdvice: 'HEURISTIC' as const,
+      risk: 'HEURISTIC' as const,
+    };
 
-    // Floor and Ceiling for Venezuelan daily session
-    const expectedFloor = Number((currentBuy * (1 - (baseVolPct / 100) * 1.5 + Math.min(0, dailyDrift))).toFixed(2));
-    const expectedCeiling = Number((currentBuy * (1 + (baseVolPct / 100) * 1.6 + Math.max(0, dailyDrift))).toFixed(2));
+    // C2: no hardcoded 918 / 918.04 stand-in. A missing price is null.
+    const currentBuyValued: Valued<number | null> = {
+      value: currentBuy,
+      provenance: snapshot.bestBuy.provenance,
+      reason: snapshot.bestBuy.reason,
+    };
+    const currentSellValued: Valued<number | null> = {
+      value: currentSell,
+      provenance: snapshot.bestSell.provenance,
+      reason: snapshot.bestSell.reason,
+    };
 
-    // Directional Probabilities
-    let upScore = 33.3;
-    let neutralScore = 33.4;
-    let downScore = 33.3;
+    let insufficientDataReason: string | undefined;
+    if (currentBuy === null || currentSell === null) {
+      insufficientDataReason =
+        'No hay un precio de mercado valido: el snapshot de Binance llego sin precio en al ' +
+        'menos uno de los dos lados.';
+    } else if (history.length < this.MIN_SAMPLES_FOR_PROJECTION) {
+      insufficientDataReason =
+        `Solo hay ${history.length} observaciones almacenadas (ventana: ` +
+        `${dataWindow.spanMinutes ?? 0} min). Se requieren al menos ` +
+        `${this.MIN_SAMPLES_FOR_PROJECTION} para que estas proyecciones tengan alguna base.`;
+    }
+    const hasSufficientData = insufficientDataReason === undefined;
 
-    if (analysis.trend === 'ALCISTA') {
-      upScore += 26 + (analysis.trendStrength / 100) * 15;
-      downScore -= 20;
-      neutralScore -= 10;
-    } else if (analysis.trend === 'BAJISTA') {
-      downScore += 26 + (analysis.trendStrength / 100) * 15;
-      upScore -= 20;
-      neutralScore -= 10;
-    } else {
-      neutralScore += 22;
-      upScore -= 11;
-      downScore -= 11;
+    // Without a live price nothing downstream can be computed. Everything is
+    // null and the timeline is built from stored ticks alone.
+    if (currentBuy === null || currentSell === null) {
+      return {
+        hasSufficientData,
+        insufficientDataReason,
+        currentBuyPrice: currentBuy,
+        currentSellPrice: currentSell,
+        currentBuy: currentBuyValued,
+        currentSell: currentSellValued,
+        dataWindow,
+        provenance,
+        daily: {
+          floor: null,
+          ceiling: null,
+          rangeText: null,
+          direction: analysis.trend,
+          confidencePct: null,
+          spreadMaxExpected: null,
+          reasons: analysis.reasons,
+        },
+        intradayHorizons: [],
+        probabilities: { up: null, neutral: null, down: null },
+        hourlyTimeline: this.buildHourlyTimeline(
+          snapshot,
+          history,
+          null,
+          null,
+          analysis,
+          currentVetHour
+        ),
+        merchantAdvice: this.buildMerchantAdvice(
+          snapshot,
+          analysis,
+          orderBookPressure,
+          null,
+          null,
+          currentVetHour
+        ),
+        risk: { level: null, factors: ['Sin precio de mercado: no se puede evaluar el riesgo.'] },
+      };
     }
 
-    // Order Book Imbalance contribution
-    if (orderBookPressure.dominantSide === 'COMPRA') {
-      upScore += 8;
-      downScore -= 8;
-    } else if (orderBookPressure.dominantSide === 'VENTA') {
-      downScore += 8;
-      upScore -= 8;
+    // Volatility band. C2: no 0.65% floor - without a measured volatility
+    // there is no band, and therefore no floor/ceiling.
+    const baseVolPct = analysis.volatilityPct;
+    const dailyDrift =
+      analysis.trend === 'ALCISTA' ? 0.007 : analysis.trend === 'BAJISTA' ? -0.007 : 0.001;
+
+    const expectedFloor =
+      baseVolPct !== null
+        ? Number((currentBuy * (1 - (baseVolPct / 100) * 1.5 + Math.min(0, dailyDrift))).toFixed(2))
+        : null;
+    const expectedCeiling =
+      baseVolPct !== null
+        ? Number((currentBuy * (1 + (baseVolPct / 100) * 1.6 + Math.max(0, dailyDrift))).toFixed(2))
+        : null;
+
+    // Directional probabilities. Still a hand-written point system (labelled
+    // HEURISTIC), but it needs a classified trend to run at all.
+    let pUp: number | null = null;
+    let pDown: number | null = null;
+    let pNeutral: number | null = null;
+
+    if (analysis.trend !== null) {
+      let upScore = 33.3;
+      let neutralScore = 33.4;
+      let downScore = 33.3;
+
+      if (analysis.trend === 'ALCISTA') {
+        upScore += 26 + ((analysis.trendStrength ?? 0) / 100) * 15;
+        downScore -= 20;
+        neutralScore -= 10;
+      } else if (analysis.trend === 'BAJISTA') {
+        downScore += 26 + ((analysis.trendStrength ?? 0) / 100) * 15;
+        upScore -= 20;
+        neutralScore -= 10;
+      } else {
+        neutralScore += 22;
+        upScore -= 11;
+        downScore -= 11;
+      }
+
+      if (orderBookPressure.dominantSide === 'COMPRA') {
+        upScore += 8;
+        downScore -= 8;
+      } else if (orderBookPressure.dominantSide === 'VENTA') {
+        downScore += 8;
+        upScore -= 8;
+      }
+
+      // A null RSI contributes nothing instead of tilting the result.
+      if (analysis.rsi !== null && analysis.rsi < 35) {
+        upScore += 6;
+        downScore -= 6;
+      } else if (analysis.rsi !== null && analysis.rsi > 65) {
+        downScore += 6;
+        upScore -= 6;
+      }
+
+      const totalScore = Math.max(1, upScore + neutralScore + downScore);
+      pUp = Math.min(88, Math.max(8, Math.round((upScore / totalScore) * 100)));
+      pDown = Math.min(88, Math.max(8, Math.round((downScore / totalScore) * 100)));
+      pNeutral = Math.max(0, 100 - pUp - pDown);
     }
 
-    // RSI contribution
-    if (analysis.rsi < 35) {
-      upScore += 6;
-      downScore -= 6;
-    } else if (analysis.rsi > 65) {
-      downScore += 6;
-      upScore -= 6;
-    }
+    /*
+     * C2: confidence is null. It used to be 62 + min(25, n * 0.35), a function
+     * of row count rather than of accuracy. A real value requires the backtest
+     * to measure this engine's own error (phase 8). It is NOT replaced by
+     * another arbitrary number.
+     */
+    const confidencePct: number | null = null;
 
-    const totalScore = Math.max(1, upScore + neutralScore + downScore);
-    const pUp = Math.min(88, Math.max(8, Math.round((upScore / totalScore) * 100)));
-    const pDown = Math.min(88, Math.max(8, Math.round((downScore / totalScore) * 100)));
-    const pNeutral = Math.max(0, 100 - pUp - pDown);
-
-    // Confidence metric
-    const confidencePct = Math.min(94, Math.max(55, Math.round(62 + Math.min(25, history.length * 0.35))));
-
-    // Intraday Horizons (+1H, +2H, +4H, +6H, +12H, +24H)
     const horizons = [
       { label: '+1H', hours: 1, mult: 0.35 },
       { label: '+2H', hours: 2, mult: 0.55 },
@@ -288,83 +480,109 @@ export class ProjectionEngine {
     const now = Date.now();
     const intradayHorizons: HourlyProjectionItem[] = horizons.map((h) => {
       const targetTs = now + h.hours * 3600 * 1000;
-      const hourStr = this.formatVenezuelaTime(targetTs);
-      
-      // Seasonal hourly factor (Venezuelan commercial peak at 1-3 PM VET)
       const targetVetHour = this.getVenezuelaHour(targetTs);
-      let seasonalFactor = 0;
-      if (targetVetHour >= 13 && targetVetHour <= 15) {
-        seasonalFactor = 0.0035; // Afternoon peak surge
-      } else if (targetVetHour >= 8 && targetVetHour <= 10) {
-        seasonalFactor = -0.002; // Morning stabilization
-      }
 
-      const trendFactor = analysis.trend === 'ALCISTA' ? 0.0022 * h.hours : analysis.trend === 'BAJISTA' ? -0.0022 * h.hours : 0;
+      // Hand-tuned seasonal coefficients: HEURISTIC, kept and declared.
+      let seasonalFactor = 0;
+      if (targetVetHour >= 13 && targetVetHour <= 15) seasonalFactor = 0.0035;
+      else if (targetVetHour >= 8 && targetVetHour <= 10) seasonalFactor = -0.002;
+
+      const trendFactor =
+        analysis.trend === 'ALCISTA'
+          ? 0.0022 * h.hours
+          : analysis.trend === 'BAJISTA'
+          ? -0.0022 * h.hours
+          : 0;
+
       const expectedBuy = currentBuy * (1 + trendFactor + seasonalFactor);
       const expectedSell = currentSell * (1 + trendFactor + seasonalFactor);
-      const rangeMargin = currentBuy * ((baseVolPct / 100) * h.mult);
+      const rangeMargin = baseVolPct !== null ? currentBuy * ((baseVolPct / 100) * h.mult) : null;
 
       return {
         horizon: h.label,
-        targetTime: hourStr,
+        targetTime: this.formatVenezuelaTime(targetTs),
         projectedBuy: Number(expectedBuy.toFixed(2)),
         projectedSell: Number(expectedSell.toFixed(2)),
-        rangeMin: Number((expectedBuy - rangeMargin).toFixed(2)),
-        rangeMax: Number((expectedBuy + rangeMargin).toFixed(2)),
-        confidence: Math.max(45, Math.round(confidencePct - h.hours * 1.4)),
+        rangeMin: rangeMargin !== null ? Number((expectedBuy - rangeMargin).toFixed(2)) : null,
+        rangeMax: rangeMargin !== null ? Number((expectedBuy + rangeMargin).toFixed(2)) : null,
+        confidence: null,
       };
     });
 
-    // Build timeline chart matching Venezuelan session (8 AM - 8 PM VET)
-    const hourlyTimeline = this.buildHourlyTimeline(snapshot, history, expectedFloor, expectedCeiling, analysis, currentVetHour);
+    const hourlyTimeline = this.buildHourlyTimeline(
+      snapshot,
+      history,
+      expectedFloor,
+      expectedCeiling,
+      analysis,
+      currentVetHour
+    );
 
-    // Calculate Merchant Decision Advice
-    const merchantAdvice = this.buildMerchantAdvice(snapshot, analysis, orderBookPressure, expectedFloor, expectedCeiling, currentVetHour);
+    const merchantAdvice = this.buildMerchantAdvice(
+      snapshot,
+      analysis,
+      orderBookPressure,
+      expectedFloor,
+      expectedCeiling,
+      currentVetHour
+    );
 
-    // Risk Assessment
-    let riskLevel: RiskLevel = 'MEDIO';
+    // Risk. Fixed thresholds, hence HEURISTIC; a factor whose input is null is
+    // simply not evaluated rather than assumed benign.
+    let riskLevel: RiskLevel | null = 'MEDIO';
     const riskFactors: string[] = [];
 
     if (analysis.volatility === 'ALTA') {
       riskLevel = 'ALTO';
       riskFactors.push('Elevada dispersión de precios en anuncios P2P recientes.');
     }
-    if (snapshot.spreadPercentage > 1.8) {
-      riskFactors.push(`Spread amplio (${snapshot.spreadPercentage.toFixed(2)}%): mayor costo de fricción.`);
+    if (snapshot.spreadPercentage !== null && snapshot.spreadPercentage > 1.8) {
+      riskFactors.push(
+        `Spread amplio (${snapshot.spreadPercentage.toFixed(2)}%): mayor costo de fricción.`
+      );
     }
-    if (orderBookPressure.sellPressurePct > 70) {
+    if (orderBookPressure.sellPressurePct !== null && orderBookPressure.sellPressurePct > 70) {
       riskFactors.push('Fuerte acumulación de oferta vendedora en el libro de órdenes.');
     }
-    if (riskFactors.length === 0) {
+    if (analysis.volatility === null) {
+      // Cannot claim low risk when volatility was never measured.
+      riskLevel = null;
+      riskFactors.push('Riesgo no evaluable: la volatilidad no se ha podido calcular.');
+    } else if (riskFactors.length === 0) {
       riskLevel = 'BAJO';
       riskFactors.push('Volatilidad controlada y liquidez comercial equilibrada en USDT/VES.');
     }
 
     return {
-      hasSufficientData: true,
+      hasSufficientData,
+      insufficientDataReason,
       currentBuyPrice: currentBuy,
       currentSellPrice: currentSell,
+      currentBuy: currentBuyValued,
+      currentSell: currentSellValued,
+      dataWindow,
+      provenance,
       daily: {
         floor: expectedFloor,
         ceiling: expectedCeiling,
-        rangeText: `${expectedFloor} - ${expectedCeiling} VES`,
+        rangeText:
+          expectedFloor !== null && expectedCeiling !== null
+            ? `${expectedFloor} - ${expectedCeiling} VES`
+            : null,
         direction: analysis.trend,
         confidencePct,
-        spreadMaxExpected: Number((Math.max(snapshot.spreadPercentage, 1.2) * 1.15).toFixed(2)),
+        // C2: no 1.2% artificial floor. The real expected spread, or null.
+        spreadMaxExpected:
+          snapshot.spreadPercentage !== null
+            ? Number((snapshot.spreadPercentage * 1.15).toFixed(2))
+            : null,
         reasons: analysis.reasons,
       },
       intradayHorizons,
-      probabilities: {
-        up: pUp,
-        neutral: pNeutral,
-        down: pDown,
-      },
+      probabilities: { up: pUp, neutral: pNeutral, down: pDown },
       hourlyTimeline,
       merchantAdvice,
-      risk: {
-        level: riskLevel,
-        factors: riskFactors,
-      },
+      risk: { level: riskLevel, factors: riskFactors },
     };
   }
 
@@ -375,52 +593,98 @@ export class ProjectionEngine {
     snapshot: MarketSnapshot,
     analysis: MarketAnalysis,
     orderBookPressure: MerchantDecisionAdvice['orderBookPressure'],
-    floor: number,
-    ceiling: number,
+    floor: number | null,
+    ceiling: number | null,
     currentVetHour: number
   ): MerchantDecisionAdvice {
     const currentBuy = snapshot.bestBuyPrice;
     const currentSell = snapshot.bestSellPrice;
-    const spreadGross = currentSell - currentBuy;
-    const netProfitPer1000 = Number(((ceiling - floor) * 1000).toFixed(2));
+
+    /*
+     * C2 removals in this block:
+     *  - estimatedNetProfitPer1000UsdtVes was (ceiling - floor) * 1000. That
+     *    assumes buying the exact low and selling the exact high, and ignores
+     *    fees, slippage, liquidity and execution risk. There is no cost model
+     *    yet, so the honest value is null (project rule 7).
+     *  - optimalSellTimeWindow / optimalBuyTimeWindow were constant strings
+     *    returned for every market. Nothing computes them, so they are null.
+     */
+    const base: Pick<
+      MerchantDecisionAdvice,
+      | 'optimalSellTimeWindow'
+      | 'optimalBuyTimeWindow'
+      | 'projectedPeakRate'
+      | 'projectedTroughRate'
+      | 'estimatedNetProfitPer1000UsdtVes'
+      | 'orderBookPressure'
+    > = {
+      optimalSellTimeWindow: null,
+      optimalBuyTimeWindow: null,
+      projectedPeakRate: ceiling,
+      projectedTroughRate: floor,
+      estimatedNetProfitPer1000UsdtVes: null,
+      orderBookPressure,
+    };
+
+    if (currentBuy === null || currentSell === null) {
+      return {
+        action: 'ESPERAR_RETROCESO',
+        actionTitle: 'Sin datos de mercado suficientes',
+        actionExplanation:
+          'No hay precio vigente en al menos uno de los dos lados del libro. No es posible ' +
+          'recomendar ninguna acción sobre datos ausentes.',
+        ...base,
+      };
+    }
+
+    const rangeText =
+      floor !== null && ceiling !== null ? `entre ${floor} VES y ${ceiling} VES` : 'sin rango calculable';
 
     let action: MerchantDecisionAdvice['action'] = 'ARBITRAJE_RAPIDO';
     let actionTitle = 'Arbitraje Continuo con Spreads Ajustados';
-    let actionExplanation = `El mercado oscila en un canal lateral entre ${floor} VES y ${ceiling} VES. Se recomienda mantener anuncios activos de compra y venta rotando inventario rápidamente.`;
+    let actionExplanation =
+      `El mercado oscila en un canal lateral ${rangeText}. Se recomienda mantener anuncios ` +
+      'activos de compra y venta rotando inventario rápidamente.';
 
-    if (analysis.trend === 'ALCISTA' || orderBookPressure.buyPressurePct > 60) {
+    const buyPressure = orderBookPressure.buyPressurePct;
+    const sellPressure = orderBookPressure.sellPressurePct;
+
+    if (analysis.trend === 'ALCISTA' || (buyPressure !== null && buyPressure > 60)) {
       if (currentVetHour < 14) {
         action = 'MANTENER_INVENTARIO';
         actionTitle = 'Mantener USDT y Esperar Pico de la Tarde';
-        actionExplanation = `La presión compradora es alta (${orderBookPressure.buyPressurePct}%). Se proyecta un pico de venta hacia las 02:00 PM - 03:30 PM en ~${ceiling} VES. Conviene aguantar inventario para vender más caro.`;
+        actionExplanation =
+          `La presión compradora es alta (${buyPressure ?? 'n/d'}%). ` +
+          (ceiling !== null
+            ? `Se proyecta un pico de venta hacia ~${ceiling} VES. `
+            : 'No hay techo proyectado calculable. ') +
+          'Conviene aguantar inventario.';
       } else {
         action = 'VENDER_AHORA';
         actionTitle = 'Vender USDT en Rango Alto Proyectado';
-        actionExplanation = `Estamos en zona de pico vespertino (${currentSell.toFixed(2)} VES). Conviene publicar anuncios de venta de USDT para capturar el margen antes del cierre bancario.`;
+        actionExplanation =
+          `Estamos en zona de pico vespertino (${currentSell.toFixed(2)} VES). Conviene publicar ` +
+          'anuncios de venta de USDT para capturar el margen antes del cierre bancario.';
       }
-    } else if (analysis.trend === 'BAJISTA' || orderBookPressure.sellPressurePct > 60) {
-      if (currentBuy <= floor * 1.004) {
+    } else if (analysis.trend === 'BAJISTA' || (sellPressure !== null && sellPressure > 60)) {
+      if (floor !== null && currentBuy <= floor * 1.004) {
         action = 'RECOMPRAR_AHORA';
         actionTitle = 'Oportunidad de Recompra en Piso de Soporte';
-        actionExplanation = `El precio de compra (${currentBuy.toFixed(2)} VES) se encuentra cerca del piso proyectado (${floor} VES). Excelente momento para adquirir USDT a tasa de descuento.`;
+        actionExplanation =
+          `El precio de compra (${currentBuy.toFixed(2)} VES) se encuentra cerca del piso ` +
+          `proyectado (${floor} VES).`;
       } else {
         action = 'ESPERAR_RETROCESO';
         actionTitle = 'Esperar Retroceso para Recomprar USDT';
-        actionExplanation = `Tendencia a la baja en curso. No apresurar recompras por encima de ${((floor + currentBuy) / 2).toFixed(2)} VES; esperar confirmación de soporte.`;
+        actionExplanation =
+          'Tendencia a la baja en curso. ' +
+          (floor !== null
+            ? `No apresurar recompras por encima de ${((floor + currentBuy) / 2).toFixed(2)} VES.`
+            : 'No hay piso proyectado calculable; esperar confirmación de soporte.');
       }
     }
 
-    return {
-      action,
-      actionTitle,
-      actionExplanation,
-      optimalSellTimeWindow: '01:30 PM - 03:45 PM VET',
-      optimalBuyTimeWindow: '10:00 AM - 11:45 AM VET',
-      projectedPeakRate: ceiling,
-      projectedTroughRate: floor,
-      estimatedNetProfitPer1000UsdtVes: netProfitPer1000,
-      orderBookPressure,
-    };
+    return { action, actionTitle, actionExplanation, ...base };
   }
 
   /**
@@ -429,8 +693,8 @@ export class ProjectionEngine {
   private static buildHourlyTimeline(
     snapshot: MarketSnapshot,
     history: HistoryRecord[],
-    floor: number,
-    ceiling: number,
+    floor: number | null,
+    ceiling: number | null,
     analysis: MarketAnalysis,
     currentVetHour: number
   ): HourlyChartPoint[] {
@@ -462,12 +726,13 @@ export class ProjectionEngine {
       recordsByHour[recHour].push(rec);
     }
 
-    // Identify active session hour bounds
     const activeHour = Math.min(20, Math.max(8, currentVetHour));
 
-    const timeline: HourlyChartPoint[] = [];
-
-    // Session curve pattern: morning opening (8-10 AM) -> midday surge (11 AM-1 PM) -> afternoon peak (2-4 PM) -> evening close (5-8 PM)
+    /*
+     * Hand-tuned session shape. C2 keeps it ONLY for hours that have not
+     * happened yet, where it is declared HEURISTIC seasonality. It is no
+     * longer used to manufacture past observations.
+     */
     const sessionCurveMultipliers: Record<number, number> = {
       8: -0.0025,
       9: -0.0018,
@@ -477,53 +742,59 @@ export class ProjectionEngine {
       13: 0.0032,
       14: 0.0045, // Afternoon Peak
       15: 0.0038,
-      16: 0.0020,
+      16: 0.002,
       17: 0.0005,
       18: -0.0005,
       19: -0.0012,
       20: -0.0018,
     };
 
-    let maxSellSoFar = -Infinity;
-    let minBuySoFar = Infinity;
-    let peakHour = 14;
-    let troughHour = 8;
+    const timeline: HourlyChartPoint[] = [];
+
+    let maxSellSoFar: number | null = null;
+    let minBuySoFar: number | null = null;
+    let peakHour: number | null = null;
+    let troughHour: number | null = null;
 
     for (const h of hours) {
-      const isPastOrCurrent = h <= activeHour;
       const isProjected = h > activeHour;
       const label = hourLabels[h];
 
-      if (isPastOrCurrent) {
+      if (!isProjected) {
         const hourData = recordsByHour[h];
         let buyPrice: number | null = null;
         let sellPrice: number | null = null;
+        let provenanceReason: string | undefined;
 
         if (hourData && hourData.length > 0) {
-          // Use median or latest real tick in this hour
           buyPrice = hourData[hourData.length - 1].buyPrice;
           sellPrice = hourData[hourData.length - 1].sellPrice;
-        } else if (h === activeHour) {
+        } else if (h === activeHour && currentBuy !== null && currentSell !== null) {
           buyPrice = currentBuy;
           sellPrice = currentSell;
         } else {
-          // Reconstruct early morning session baseline smoothly anchored to live price
-          const curveOffset = (sessionCurveMultipliers[h] || 0) - (sessionCurveMultipliers[activeHour] || 0);
-          const spreadDiff = Math.max(0.04, currentSell - currentBuy);
-          buyPrice = Number((currentBuy * (1 + curveOffset)).toFixed(2));
-          sellPrice = Number((buyPrice + spreadDiff).toFixed(2));
+          /*
+           * C2 - audit finding B1 removed. This hour has no stored tick, so it
+           * is a real gap. Previously the session curve manufactured a price
+           * here and published it with isProjected: false, i.e. as a genuine
+           * observation. Now it stays null and the chart draws a hole.
+           */
+          provenanceReason = `No se capturó ningún tick a las ${h}:00 VET.`;
         }
 
-        if (sellPrice !== null && sellPrice > maxSellSoFar) {
+        if (sellPrice !== null && (maxSellSoFar === null || sellPrice > maxSellSoFar)) {
           maxSellSoFar = sellPrice;
           peakHour = h;
         }
-        if (buyPrice !== null && buyPrice < minBuySoFar) {
+        if (buyPrice !== null && (minBuySoFar === null || buyPrice < minBuySoFar)) {
           minBuySoFar = buyPrice;
           troughHour = h;
         }
 
-        const spreadPct = buyPrice && sellPrice ? Number((((sellPrice - buyPrice) / buyPrice) * 100).toFixed(2)) : null;
+        const spreadPct =
+          buyPrice !== null && sellPrice !== null && buyPrice > 0
+            ? Number((((sellPrice - buyPrice) / buyPrice) * 100).toFixed(2))
+            : null;
 
         timeline.push({
           hour: h,
@@ -536,33 +807,61 @@ export class ProjectionEngine {
           floor,
           ceiling,
           isProjected: false,
+          provenance: 'REAL',
+          provenanceReason,
         });
       } else {
-        // Future Projection forward from active live point
+        // Future hour. Needs a live anchor price to extrapolate from.
+        if (currentBuy === null || currentSell === null) {
+          timeline.push({
+            hour: h,
+            label,
+            sellPrice: null,
+            buyPrice: null,
+            spreadPct: null,
+            projectedSell: null,
+            projectedBuy: null,
+            floor,
+            ceiling,
+            isProjected: true,
+            provenance: 'PROJECTED',
+            provenanceReason: 'Sin precio vigente desde el que extrapolar.',
+          });
+          continue;
+        }
+
         const hoursAhead = h - activeHour;
-        const trendSlope = analysis.trend === 'ALCISTA' ? 0.0015 : analysis.trend === 'BAJISTA' ? -0.0015 : 0;
-        const curveOffset = (sessionCurveMultipliers[h] || 0) - (sessionCurveMultipliers[activeHour] || 0);
-        
+        const trendSlope =
+          analysis.trend === 'ALCISTA' ? 0.0015 : analysis.trend === 'BAJISTA' ? -0.0015 : 0;
+        const curveOffset =
+          (sessionCurveMultipliers[h] || 0) - (sessionCurveMultipliers[activeHour] || 0);
+
         const projectedBuy = Number((currentBuy * (1 + trendSlope * hoursAhead + curveOffset)).toFixed(2));
         const projectedSell = Number((currentSell * (1 + trendSlope * hoursAhead + curveOffset)).toFixed(2));
-        const spreadPct = Number((((projectedSell - projectedBuy) / projectedBuy) * 100).toFixed(2));
 
         timeline.push({
           hour: h,
           label,
           sellPrice: null,
           buyPrice: null,
-          spreadPct,
+          spreadPct: Number((((projectedSell - projectedBuy) / projectedBuy) * 100).toFixed(2)),
           projectedSell,
           projectedBuy,
           floor,
           ceiling,
           isProjected: true,
+          provenance: 'PROJECTED',
+          provenanceReason:
+            'Extrapolacion hacia una hora que aun no ha ocurrido, usando la pendiente de ' +
+            'tendencia y la curva horaria codificada a mano.',
         });
       }
     }
 
-    // Annotate peaks and troughs
+    /*
+     * Peak / trough annotations. C2: only a point with a real price can be a
+     * peak or a trough. A gap is never annotated.
+     */
     return timeline.map((pt) => {
       let isPeak = false;
       let isTrough = false;
@@ -579,21 +878,12 @@ export class ProjectionEngine {
           isTrough = true;
           notes = `RETROCESO ${pt.buyPrice.toFixed(2)}`;
         }
-      } else {
-        // Mark projected afternoon peak if in future
-        if (pt.hour === 14 && pt.projectedSell !== null && pt.projectedSell !== undefined) {
-          isPeak = true;
-          notes = `PICO PROYECTADO ${pt.projectedSell.toFixed(2)}`;
-        }
+      } else if (pt.hour === 14 && pt.projectedSell !== null && pt.projectedSell !== undefined) {
+        isPeak = true;
+        notes = `PICO PROYECTADO ${pt.projectedSell.toFixed(2)}`;
       }
 
-      return {
-        ...pt,
-        isPeak,
-        isTrough,
-        isCoincide,
-        notes,
-      };
+      return { ...pt, isPeak, isTrough, isCoincide, notes };
     });
   }
 
@@ -697,8 +987,16 @@ export class ProjectionEngine {
     };
   }
 
-  private static calculateRSI(prices: number[], period = 14): number {
-    if (prices.length < 2) return 50;
+  /**
+   * RSI over the last `period` changes.
+   *
+   * C2: returns null instead of a plausible number when RSI is undefined -
+   * fewer than two prices, or a series with no movement at all. The old code
+   * checked `losses === 0` first, so a perfectly flat market reported 100
+   * (extreme overbought), which then pushed the direction scoring downward.
+   */
+  private static calculateRSI(prices: number[], period = 14): number | null {
+    if (prices.length < 2) return null;
     const changes: number[] = [];
     for (let i = 1; i < prices.length; i++) {
       changes.push(prices[i] - prices[i - 1]);
@@ -712,6 +1010,7 @@ export class ProjectionEngine {
       else losses += Math.abs(chg);
     }
 
+    if (gains === 0 && losses === 0) return null; // no movement: RSI undefined
     if (losses === 0) return 100;
     if (gains === 0) return 0;
 

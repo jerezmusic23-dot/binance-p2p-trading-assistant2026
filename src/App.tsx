@@ -78,6 +78,21 @@ export default function App() {
     useState<string | null>(null);
 
   /*
+   * C1 / decision C.4(ii): cuando el análisis o las proyecciones no se pueden
+   * refrescar, conservamos el último valor válido pero anotamos CUÁNDO se
+   * obtuvo, para poder marcarlo como STALE con su antigüedad real. Nunca debe
+   * parecer un dato en tiempo real.
+   */
+  const [derivedUpdatedAt, setDerivedUpdatedAt] =
+    useState<number | null>(null);
+
+  const [derivedStale, setDerivedStale] =
+    useState<boolean>(false);
+
+  const [nowTick, setNowTick] =
+    useState<number>(() => Date.now());
+
+  /*
    * Refs para evitar closures obsoletas dentro
    * del polling automático.
    */
@@ -91,6 +106,23 @@ export default function App() {
   useEffect(() => {
     snapshotRef.current = snapshot;
   }, [snapshot]);
+
+  /*
+   * Sólo mientras el dato derivado esté rancio hace falta un reloj: es lo que
+   * permite mostrar su antigüedad real en lugar de un número congelado.
+   */
+  useEffect(() => {
+    if (!derivedStale) return;
+
+    setNowTick(Date.now());
+    const timer = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [derivedStale]);
+
+  const derivedAgeSeconds =
+    derivedStale && derivedUpdatedAt !== null
+      ? Math.max(0, (nowTick - derivedUpdatedAt) / 1000)
+      : 0;
 
   /*
    * Convierte el filtro actual en parámetros para la API.
@@ -215,6 +247,8 @@ export default function App() {
         /*
          * MARKET ANALYSIS
          */
+        let derivedOk = true;
+
         if (
           analysisResult.status === 'fulfilled' &&
           analysisResult.value?.analysis
@@ -222,15 +256,21 @@ export default function App() {
           setAnalysis(
             analysisResult.value.analysis
           );
-        } else if (
-          analysisResult.status === 'rejected'
-        ) {
-          hasError = true;
+        } else {
+          /*
+           * Rechazo o `analysis: null`. Conservamos el valor previo, pero
+           * deja de ser un dato fresco.
+           */
+          derivedOk = false;
 
-          console.warn(
-            '[Market] Analysis request failed:',
-            analysisResult.reason
-          );
+          if (analysisResult.status === 'rejected') {
+            hasError = true;
+
+            console.warn(
+              '[Market] Analysis request failed:',
+              analysisResult.reason
+            );
+          }
         }
 
         /*
@@ -243,15 +283,24 @@ export default function App() {
           setProjections(
             projectionsResult.value.projections
           );
-        } else if (
-          projectionsResult.status === 'rejected'
-        ) {
-          hasError = true;
+        } else {
+          derivedOk = false;
 
-          console.warn(
-            '[Market] Projections request failed:',
-            projectionsResult.reason
-          );
+          if (projectionsResult.status === 'rejected') {
+            hasError = true;
+
+            console.warn(
+              '[Market] Projections request failed:',
+              projectionsResult.reason
+            );
+          }
+        }
+
+        if (derivedOk) {
+          setDerivedUpdatedAt(Date.now());
+          setDerivedStale(false);
+        } else {
+          setDerivedStale(true);
         }
 
         /*
@@ -276,6 +325,8 @@ export default function App() {
         } else {
           setEffectiveStatus('OFFLINE');
         }
+
+        setDerivedStale(true);
 
         setErrorMessage(
           error instanceof Error
@@ -454,6 +505,9 @@ export default function App() {
             analysis={analysis}
             projections={projections}
             ageSeconds={ageSeconds}
+            effectiveStatus={effectiveStatus}
+            derivedStale={derivedStale}
+            derivedAgeSeconds={derivedAgeSeconds}
             onNavigateTab={handleNavigateTab}
           />
         )}

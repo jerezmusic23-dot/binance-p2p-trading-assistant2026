@@ -120,6 +120,10 @@ export function makeSnapshot(overrides: Partial<MarketSnapshot> = {}): MarketSna
     fetchDurationMs: 120,
     status: 'LIVE',
     lastError: null,
+    bestBuy: { value: 918.0, provenance: 'REAL' },
+    bestSell: { value: 921.0, provenance: 'REAL' },
+    aggregatesProvenance: 'AGGREGATED',
+    orderBookProvenance: 'REAL',
     ...overrides,
   };
 }

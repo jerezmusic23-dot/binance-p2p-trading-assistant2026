@@ -42,8 +42,10 @@ describe('analyzeMarket', () => {
 
     expect(Object.keys(analysis).sort()).toEqual(
       [
+        'dataWindow',
         'momentum',
         'priceVsSmaPct',
+        'provenance',
         'reasons',
         'resistanceLevel',
         'rsi',
@@ -65,12 +67,12 @@ describe('analyzeMarket', () => {
     expect(analysis.volatility).toBe('BAJA');
   });
 
-  it('BUG: a perfectly flat market reports RSI 100 (extreme overbought)', () => {
-    // calculateRSI checks `losses === 0` BEFORE `gains === 0`, so a series with
-    // no movement at all is indistinguishable from an uninterrupted rally.
-    // Downstream this adds +6 to downScore in generateProjections.
+  it('reports RSI null on a perfectly flat market - RSI is undefined there', () => {
+    // Was audit BUG: `losses === 0` was checked before `gains === 0`, so a
+    // motionless series reported 100 (extreme overbought) and tilted the
+    // direction scoring downward. Fixed in C2.
     const analysis = ProjectionEngine.analyzeMarket(makeSnapshot(), makeHistory(40, { drift: 0 }));
-    expect(analysis.rsi).toBe(100);
+    expect(analysis.rsi).toBeNull();
   });
 
   it('classifies a rising series as ALCISTA and a falling one as BAJISTA', () => {
@@ -104,18 +106,27 @@ describe('analyzeMarket', () => {
     expect(analysis.momentum).toBe('NEGATIVO');
   });
 
-  it('falls back to the live snapshot price when history is empty', () => {
+  it('returns a fully null analysis when there is no history at all', () => {
+    // Was: the live price was pushed into the series as a stand-in and every
+    // metric got an invented fallback. Fixed in C2.
     const analysis = ProjectionEngine.analyzeMarket(makeSnapshot({ bestBuyPrice: 918 }), []);
-    expect(analysis.priceVsSmaPct).toBe(0);
-    expect(analysis.trend).toBe('LATERAL');
-    expect(analysis.trendStrength).toBe(35); // the hardcoded floor
+    expect(analysis.trend).toBeNull();
+    expect(analysis.trendStrength).toBeNull();
+    expect(analysis.momentum).toBeNull();
+    expect(analysis.volatility).toBeNull();
+    expect(analysis.volatilityPct).toBeNull();
+    expect(analysis.priceVsSmaPct).toBeNull();
+    expect(analysis.rsi).toBeNull();
+    expect(analysis.supportLevel).toBeNull();
+    expect(analysis.resistanceLevel).toBeNull();
+    expect(analysis.dataWindow.sampleCount).toBe(0);
   });
 
-  it('BUG: trendStrength has a hardcoded floor of 35 even with zero evidence', () => {
-    // Audit: trendStrength = |slope%| * 600 + 35. The 600 and the 35 have no
-    // empirical basis, so "strength" is never allowed to report 0.
+  it('reports trendStrength 0 for a genuinely flat slope, with no artificial floor', () => {
+    // Was audit BUG: a hardcoded +35 floor. Fixed in C2.
     const analysis = ProjectionEngine.analyzeMarket(makeSnapshot(), makeHistory(40, { drift: 0 }));
-    expect(analysis.trendStrength).toBe(35);
+    expect(analysis.trend).toBe('LATERAL');
+    expect(analysis.trendStrength).toBe(0);
   });
 });
 
@@ -132,6 +143,8 @@ describe('computeOrderBookPressure', () => {
       buyPressurePct: 80,
       sellPressurePct: 20,
       dominantSide: 'COMPRA',
+      buyVolume: { value: 800, provenance: 'AGGREGATED' },
+      sellVolume: { value: 200, provenance: 'AGGREGATED' },
     });
   });
 
@@ -143,16 +156,21 @@ describe('computeOrderBookPressure', () => {
     expect(ProjectionEngine.computeOrderBookPressure(snapshot).dominantSide).toBe('EQUILIBRADO');
   });
 
-  it('BUG: invents 15000/15000 USDT of liquidity when the book is empty', () => {
-    // Audit B6 / project rule 1: absent liquidity must be reported as absent.
+  it('reports null liquidity when the book is empty, never an invented 15000', () => {
+    // Was audit B6. Fixed in C2: an empty book is a REAL observation with no
+    // volume to measure.
     const snapshot = makeSnapshot({ topBuyAds: [], topSellAds: [] });
-    expect(ProjectionEngine.computeOrderBookPressure(snapshot)).toEqual({
-      buyVolumeUsdt: 15000,
-      sellVolumeUsdt: 15000,
-      buyPressurePct: 50,
-      sellPressurePct: 50,
-      dominantSide: 'EQUILIBRADO',
-    });
+    const pressure = ProjectionEngine.computeOrderBookPressure(snapshot);
+
+    expect(pressure.buyVolumeUsdt).toBeNull();
+    expect(pressure.sellVolumeUsdt).toBeNull();
+    expect(pressure.buyPressurePct).toBeNull();
+    expect(pressure.sellPressurePct).toBeNull();
+    expect(pressure.dominantSide).toBeNull();
+
+    expect(pressure.buyVolume.provenance).toBe('REAL');
+    expect(pressure.buyVolume.value).toBeNull();
+    expect(pressure.buyVolume.reason).toMatch(/no contiene liquidez/i);
   });
 });
 
@@ -166,15 +184,20 @@ describe('generateProjections', () => {
     const p = project();
     expect(Object.keys(p).sort()).toEqual(
       [
+        'currentBuy',
+        'currentBuyPrice',
+        'currentSell',
+        'currentSellPrice',
         'daily',
+        'dataWindow',
         'hasSufficientData',
         'hourlyTimeline',
+        'insufficientDataReason',
         'intradayHorizons',
         'merchantAdvice',
         'probabilities',
+        'provenance',
         'risk',
-        'currentBuyPrice',
-        'currentSellPrice',
       ].sort()
     );
     expect(p.daily.rangeText).toMatch(/^\d+(\.\d+)? - \d+(\.\d+)? VES$/);
@@ -195,57 +218,87 @@ describe('generateProjections', () => {
   it('keeps probabilities summing to 100 and clamped to [8, 88]', () => {
     const p = project(makeHistory(40, { drift: 2 }));
     const { up, neutral, down } = p.probabilities;
-    expect(up + neutral + down).toBe(100);
-    expect(up).toBeLessThanOrEqual(88);
-    expect(down).toBeGreaterThanOrEqual(8);
+    expect(up).not.toBeNull();
+    expect(up! + neutral! + down!).toBe(100);
+    expect(up!).toBeLessThanOrEqual(88);
+    expect(down!).toBeGreaterThanOrEqual(8);
   });
 
-  it('BUG: hasSufficientData is always true, even with zero history', () => {
-    // Audit B4 / project rule 1: the field exists to signal missing data and
-    // never does. insufficientDataReason is never populated.
+  it('reports insufficient data, with a reason, when history is empty', () => {
+    // Was audit B4 (hardcoded true). Fixed in phase C1.
     const empty = project([], makeSnapshot());
-    expect(empty.hasSufficientData).toBe(true);
-    expect(empty.insufficientDataReason).toBeUndefined();
-  });
-
-  it('BUG: substitutes a hardcoded 918 / 918.04 when the snapshot has no price', () => {
-    // Audit B5 / project rule 6: a missing price must be null.
-    const dead = makeSnapshot({ bestBuyPrice: 0, bestSellPrice: 0, topBuyAds: [], topSellAds: [] });
-    const p = project([], dead);
-    expect(p.currentBuyPrice).toBe(918);
-    expect(p.currentSellPrice).toBe(918.04);
-  });
-
-  it('BUG: confidence is a function of sample count only, never of measured error', () => {
-    // Audit B4 / project rule 4: confidence = 62 + min(25, n * 0.35), clamped
-    // to [55, 94]. It rises with more rows regardless of accuracy.
-    expect(project([]).daily.confidencePct).toBe(62);
-    expect(project(makeHistory(20)).daily.confidencePct).toBe(69); // 62 + 7
-    expect(project(makeHistory(500)).daily.confidencePct).toBe(87); // 62 + 25
-  });
-
-  it('BUG: spreadMaxExpected applies an artificial 1.2% floor', () => {
-    const p = project(makeHistory(40), makeSnapshot({ spreadPercentage: 0.1 }));
-    expect(p.daily.spreadMaxExpected).toBe(1.38); // max(0.1, 1.2) * 1.15
-  });
-
-  it('BUG: the optimal trade windows are constant strings, never computed', () => {
-    // Audit: identical output for a rising, falling and flat market.
-    const rising = project(makeHistory(40, { drift: 2 }));
-    const falling = project(makeHistory(40, { startBuy: 950, drift: -2 }));
-    expect(rising.merchantAdvice.optimalSellTimeWindow).toBe('01:30 PM - 03:45 PM VET');
-    expect(rising.merchantAdvice.optimalBuyTimeWindow).toBe('10:00 AM - 11:45 AM VET');
-    expect(falling.merchantAdvice.optimalSellTimeWindow).toBe(
-      rising.merchantAdvice.optimalSellTimeWindow
+    expect(empty.hasSufficientData).toBe(false);
+    expect(empty.insufficientDataReason).toContain('0 observaciones');
+    expect(empty.insufficientDataReason).toContain(
+      String(ProjectionEngine.MIN_SAMPLES_FOR_PROJECTION)
     );
   });
 
-  it('BUG: estimatedNetProfitPer1000Usdt is the whole projected range x 1000', () => {
-    // Audit: assumes capturing the exact floor AND the exact ceiling, ignores
-    // fees, slippage and execution. Violates project rule 7.
-    const p = project();
-    const expected = Number(((p.daily.ceiling - p.daily.floor) * 1000).toFixed(2));
-    expect(p.merchantAdvice.estimatedNetProfitPer1000UsdtVes).toBe(expected);
+  it('reports insufficient data when there is no valid live price', () => {
+    const dead = makeSnapshot({ bestBuyPrice: null, bestSellPrice: null });
+    const p = project(makeHistory(100), dead);
+    expect(p.hasSufficientData).toBe(false);
+    expect(p.insufficientDataReason).toMatch(/precio de mercado valido/i);
+  });
+
+  it('reports sufficient data once the sample threshold is met', () => {
+    const p = project(makeHistory(ProjectionEngine.MIN_SAMPLES_FOR_PROJECTION));
+    expect(p.hasSufficientData).toBe(true);
+    expect(p.insufficientDataReason).toBeUndefined();
+  });
+
+  it('returns null prices when the snapshot has none, never a hardcoded 918', () => {
+    // Was audit B5. Fixed in C2.
+    const dead = makeSnapshot({
+      bestBuyPrice: null,
+      bestSellPrice: null,
+      topBuyAds: [],
+      topSellAds: [],
+    });
+    const p = project([], dead);
+    expect(p.currentBuyPrice).toBeNull();
+    expect(p.currentSellPrice).toBeNull();
+    expect(p.daily.floor).toBeNull();
+    expect(p.daily.ceiling).toBeNull();
+    expect(p.daily.rangeText).toBeNull();
+    expect(p.probabilities).toEqual({ up: null, neutral: null, down: null });
+    expect(p.intradayHorizons).toEqual([]);
+    expect(p.hasSufficientData).toBe(false);
+  });
+
+  it('reports confidence null - it is not derived from sample count any more', () => {
+    // Was audit B4: 62 + min(25, n * 0.35). Fixed in C2; a real figure needs
+    // the backtest to measure this engine's own error (phase 8).
+    expect(project([]).daily.confidencePct).toBeNull();
+    expect(project(makeHistory(20)).daily.confidencePct).toBeNull();
+    expect(project(makeHistory(500)).daily.confidencePct).toBeNull();
+    for (const h of project(makeHistory(500)).intradayHorizons) {
+      expect(h.confidence).toBeNull();
+    }
+  });
+
+  it('applies no artificial floor to spreadMaxExpected', () => {
+    // Was audit BUG: max(spread, 1.2) * 1.15. Fixed in C2.
+    const p = project(makeHistory(40), makeSnapshot({ spreadPercentage: 0.1 }));
+    expect(p.daily.spreadMaxExpected).toBe(0.11); // 0.1 * 1.15 = 0.115 -> 0.11
+
+    const noSpread = project(makeHistory(40), makeSnapshot({ spreadPercentage: null }));
+    expect(noSpread.daily.spreadMaxExpected).toBeNull();
+  });
+
+  it('reports null trade windows instead of constant strings', () => {
+    // Was audit BUG: the same two literals for every market. Nothing computes
+    // them, so C2 reports their absence.
+    const rising = project(makeHistory(40, { drift: 2 }));
+    expect(rising.merchantAdvice.optimalSellTimeWindow).toBeNull();
+    expect(rising.merchantAdvice.optimalBuyTimeWindow).toBeNull();
+  });
+
+  it('reports null net profit - there is no cost model yet', () => {
+    // Was audit BUG: (ceiling - floor) * 1000, i.e. the whole range presented
+    // as profit, ignoring fees, slippage, liquidity and execution risk
+    // (project rule 7). Fixed in C2.
+    expect(project().merchantAdvice.estimatedNetProfitPer1000UsdtVes).toBeNull();
   });
 });
 
@@ -275,28 +328,39 @@ describe('buildHourlyTimeline (via generateProjections)', () => {
     }
   });
 
-  it('BUG: synthesises past hours with a hardcoded curve and marks them isProjected: false', () => {
-    // Audit B1 - the most serious finding. History here contains no records in
-    // hours 8-11, so those points are generated from sessionCurveMultipliers
-    // and published as real observations.
+  it('leaves past hours without a stored tick as real gaps', () => {
+    // Was audit B1, the most serious finding: the session curve manufactured a
+    // price and published it with isProjected: false, i.e. as an observation.
+    // Fixed in C2 - the hour is simply empty.
     const timeline = timelineFor([]); // no history at all
     const past = timeline.filter((p) => p.hour < 12);
 
     expect(past).toHaveLength(4);
     for (const point of past) {
-      expect(point.isProjected).toBe(false); // <- claims to be a real observation
-      expect(point.buyPrice).not.toBeNull(); // <- but no such tick ever existed
+      expect(point.isProjected).toBe(false); // past, not future
+      expect(point.buyPrice).toBeNull();
+      expect(point.sellPrice).toBeNull();
+      expect(point.spreadPct).toBeNull();
       expect(point.projectedBuy).toBeNull();
+      expect(point.provenance).toBe('REAL');
+      expect(point.provenanceReason).toMatch(/No se capturó ningún tick/i);
     }
-    // 8 AM offset = (-0.0025 - 0.0018) applied to the live 918.00 price.
-    expect(past[0].buyPrice).toBe(914.05);
   });
 
-  it('BUG: annotates a fabricated point with a PICO/RETROCESO note', () => {
-    const notes = timelineFor([])
-      .filter((p) => !p.isProjected && p.notes)
-      .map((p) => p.notes);
-    expect(notes.join(' ')).toMatch(/PICO|RETROCESO/);
+  it('never annotates PICO / RETROCESO on an hour without a price', () => {
+    // With no history the only past point that has a price is the current
+    // hour, anchored to the live snapshot. Every other past hour is a gap and
+    // must carry no annotation.
+    const past = timelineFor([]).filter((p) => !p.isProjected);
+    for (const point of past) {
+      if (point.buyPrice === null && point.sellPrice === null) {
+        expect(point.notes).toBeUndefined();
+        expect(point.isPeak).toBe(false);
+        expect(point.isTrough).toBe(false);
+      }
+    }
+    expect(past.filter((p) => p.notes).every((p) => p.sellPrice !== null || p.buyPrice !== null))
+      .toBe(true);
   });
 
   it('uses the real tick when history does cover the hour', () => {

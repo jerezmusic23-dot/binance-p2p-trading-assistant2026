@@ -1,5 +1,14 @@
 import React, { useState } from 'react';
 import { MarketSnapshot, MarketProjections, MarketAnalysis, HourlyChartPoint } from './types';
+import { ProvenanceTag, InsufficientDataNotice } from './ProvenanceTag';
+import { fmt, fmtPct, fmtSignedPct, fmtText, NO_DATA } from './format';
+import {
+  CHART_GEOMETRY,
+  buildTimelinePaths,
+  computeScale,
+  getX as scaleX,
+  getY as scaleY,
+} from './chartPaths';
 import { Sparkles, Compass, TrendingUp, TrendingDown, Clock, DollarSign, Activity, AlertCircle, CheckCircle2 } from 'lucide-react';
 
 interface DailyFluctuationChartProps {
@@ -36,84 +45,75 @@ export const DailyFluctuationChart: React.FC<DailyFluctuationChartProps> = ({
   // Calculate percentage of day remaining based on timeline
   const pastPointsCount = timeline.filter((pt) => !pt.isProjected).length;
   const remainingPointsCount = timeline.filter((pt) => pt.isProjected).length;
+
+  /*
+   * C1: puntos que el motor presenta como observaciones pasadas pero que en
+   * realidad sintetizó con la curva horaria codificada a mano. Se cuentan y se
+   * declaran; C2 los convertirá en huecos reales del gráfico.
+   */
+  const observedPointsCount = timeline.filter(
+    (pt) => !pt.isProjected && pt.buyPrice !== null
+  ).length;
+  const missingPointsCount = timeline.filter(
+    (pt) => !pt.isProjected && pt.buyPrice === null
+  ).length;
   const quedaPorVenirPct = Math.round((remainingPointsCount / Math.max(1, timeline.length)) * 100);
 
   // Market status label
-  const marketStatus = `${analysis?.trend || 'LATERAL'} ${(analysis?.priceVsSmaPct || 0) >= 0 ? '+' : ''}${analysis?.priceVsSmaPct || 0}%`;
+  const marketStatus = `${fmtText(analysis?.trend)} ${fmtSignedPct(analysis?.priceVsSmaPct)}`;
 
-  // Scale calculations for custom SVG chart
-  const allPrices: number[] = [];
-  timeline.forEach((pt) => {
-    if (pt.sellPrice) allPrices.push(pt.sellPrice);
-    if (pt.buyPrice) allPrices.push(pt.buyPrice);
-    if (pt.projectedSell) allPrices.push(pt.projectedSell);
-    if (pt.projectedBuy) allPrices.push(pt.projectedBuy);
-  });
-  if (ceiling) allPrices.push(ceiling);
-  if (floor) allPrices.push(floor);
+  /*
+   * Geometry and path construction live in ./chartPaths as pure functions so
+   * the null handling is unit-testable without a DOM.
+   */
+  const scale = computeScale(timeline, floor, ceiling);
+  const { minVal, maxVal, valRange } = scale;
 
-  const minVal = allPrices.length > 0 ? Math.min(...allPrices) * 0.996 : 900;
-  const maxVal = allPrices.length > 0 ? Math.max(...allPrices) * 1.004 : 930;
-  const valRange = Math.max(0.5, maxVal - minVal);
+  const { svgWidth, svgHeight, paddingX, paddingY, chartW, chartH } = CHART_GEOMETRY;
 
-  const svgWidth = 960;
-  const svgHeight = 360;
-  const paddingX = 45;
-  const paddingY = 40;
-  const chartW = svgWidth - paddingX * 2;
-  const chartH = svgHeight - paddingY * 2;
+  const getX = (index: number) => scaleX(index, timeline.length, CHART_GEOMETRY);
+  const getY = (val: number | null | undefined) => scaleY(val, scale, CHART_GEOMETRY);
 
-  const getX = (index: number) => {
-    return paddingX + (index / Math.max(1, timeline.length - 1)) * chartW;
-  };
-
-  const getY = (val: number | null | undefined) => {
-    if (val === null || val === undefined) return chartH / 2 + paddingY;
-    const ratio = (val - minVal) / valRange;
-    return paddingY + chartH - ratio * chartH;
-  };
-
-  // Generate SVG path strings for Real Venta, Real Recompra, Projected Venta, Projected Recompra
-  let realVentaPath = '';
-  let realRecompraPath = '';
-  let projVentaPath = '';
-  let projRecompraPath = '';
-
-  let lastRealIndex = -1;
-  timeline.forEach((pt, i) => {
-    if (!pt.isProjected) {
-      lastRealIndex = i;
-      const x = getX(i);
-      const ySell = getY(pt.sellPrice);
-      const yBuy = getY(pt.buyPrice);
-
-      realVentaPath += realVentaPath === '' ? `M ${x} ${ySell}` : ` L ${x} ${ySell}`;
-      realRecompraPath += realRecompraPath === '' ? `M ${x} ${yBuy}` : ` L ${x} ${yBuy}`;
-    }
-  });
-
-  // Projection paths continuing from the last real point
-  if (lastRealIndex >= 0 && lastRealIndex < timeline.length - 1) {
-    const startX = getX(lastRealIndex);
-    const startSellY = getY(timeline[lastRealIndex].sellPrice);
-    const startBuyY = getY(timeline[lastRealIndex].buyPrice);
-
-    projVentaPath = `M ${startX} ${startSellY}`;
-    projRecompraPath = `M ${startX} ${startBuyY}`;
-
-    for (let i = lastRealIndex + 1; i < timeline.length; i++) {
-      const pt = timeline[i];
-      const x = getX(i);
-      const ySell = getY(pt.projectedSell);
-      const yBuy = getY(pt.projectedBuy);
-
-      projVentaPath += ` L ${x} ${ySell}`;
-      projRecompraPath += ` L ${x} ${yBuy}`;
-    }
-  }
+  const {
+    realVenta: realVentaPath,
+    realRecompra: realRecompraPath,
+    projVenta: projVentaPath,
+    projRecompra: projRecompraPath,
+  } = buildTimelinePaths(timeline, scale, CHART_GEOMETRY);
 
   return (
     <div id="daily-fluctuation-container" className="space-y-4">
+      {!projections.hasSufficientData && (
+        <InsufficientDataNotice reason={projections.insufficientDataReason} />
+      )}
+
+      {missingPointsCount > 0 && (
+        <InsufficientDataNotice
+          reason={
+            `${missingPointsCount} de las ${pastPointsCount} horas pasadas no tienen ningún tick ` +
+            `capturado. Aparecen como huecos en el gráfico, no como precios. Sólo ` +
+            `${observedPointsCount} hora(s) corresponden a observaciones reales.`
+          }
+        />
+      )}
+
+      <div className="flex flex-wrap items-center gap-3 text-[10px] font-mono text-[#848e9c]">
+        <span className="flex items-center gap-1">
+          <ProvenanceTag provenance="REAL" /> tick almacenado
+        </span>
+        <span className="flex items-center gap-1">
+          <ProvenanceTag provenance="PROJECTED" /> extrapolación
+        </span>
+        <span className="flex items-center gap-1">
+          {NO_DATA} hora sin captura (hueco real)
+        </span>
+        <span className="ml-auto">
+          Ventana: {projections.dataWindow.sampleCount} obs.
+          {projections.dataWindow.spanMinutes !== null &&
+            ` (${projections.dataWindow.spanMinutes} min)`}
+        </span>
+      </div>
+
       {/* Strategic Decision & Forward-Looking Forecast Banner */}
       {advice && (
         <div id="merchant-decision-banner" className="bg-[#181a20] border-2 border-[#FCD535]/40 rounded-lg p-5 relative overflow-hidden shadow-lg">
@@ -164,8 +164,13 @@ export const DailyFluctuationChart: React.FC<DailyFluctuationChartProps> = ({
             <div className="bg-[#111417] border border-[#2b2f36] p-3 rounded flex items-center justify-between">
               <div>
                 <span className="text-[10px] text-[#848e9c] uppercase tracking-wider block">Margen x $1,000 USDT</span>
-                <span className="text-base font-bold font-mono text-[#02c076]">
-                  +{advice.estimatedNetProfitPer1000UsdtVes.toLocaleString('es-VE', { minimumFractionDigits: 2 })} <span className="text-[10px] text-[#848e9c]">VES</span>
+                {/*
+                  * C2: the old figure was (techo - piso) * 1000, i.e. the whole
+                  * projected range presented as net profit, with no fees,
+                  * slippage or liquidity. There is no cost model yet.
+                  */}
+                <span className="text-base font-bold font-mono text-[#848e9c]" title="Requiere un modelo de costes: comisiones, slippage, liquidez y límites de la oferta.">
+                  {NO_DATA} <span className="text-[10px] text-[#848e9c]">VES</span>
                 </span>
               </div>
               <DollarSign className="w-6 h-6 text-[#02c076]/40" />
@@ -202,7 +207,7 @@ export const DailyFluctuationChart: React.FC<DailyFluctuationChartProps> = ({
           <div className="space-y-1">
             <span className="text-[10px] font-bold tracking-wider text-[#848e9c] uppercase">TECHO DEL DÍA</span>
             <div className="text-2xl font-bold font-mono text-[#FCD535]">
-              {ceiling.toFixed(2)}
+              {fmt(ceiling)}
             </div>
           </div>
 
@@ -210,7 +215,7 @@ export const DailyFluctuationChart: React.FC<DailyFluctuationChartProps> = ({
           <div className="space-y-1">
             <span className="text-[10px] font-bold tracking-wider text-[#848e9c] uppercase">PISO DEL DÍA</span>
             <div className="text-2xl font-bold font-mono text-[#02c076]">
-              {floor.toFixed(2)}
+              {fmt(floor)}
             </div>
           </div>
 
@@ -218,7 +223,7 @@ export const DailyFluctuationChart: React.FC<DailyFluctuationChartProps> = ({
           <div className="space-y-1">
             <span className="text-[10px] font-bold tracking-wider text-[#848e9c] uppercase">SPREAD MÁXIMO</span>
             <div className="text-2xl font-bold font-mono text-[#e0e0e0]">
-              {spreadMax.toFixed(2)}%
+              {fmtPct(spreadMax)}
             </div>
           </div>
 
@@ -270,8 +275,8 @@ export const DailyFluctuationChart: React.FC<DailyFluctuationChartProps> = ({
           {selectedPoint && (
             <div className="bg-[#111417] px-3 py-1 rounded border border-[#2b2f36] text-[#e0e0e0]">
               Hora: <strong className="text-[#FCD535]">{selectedPoint.label}</strong> |
-              Venta: <strong className="text-[#FCD535] font-mono">{(selectedPoint.sellPrice || selectedPoint.projectedSell)?.toFixed(2)}</strong> |
-              Recompra: <strong className="text-[#02c076] font-mono">{(selectedPoint.buyPrice || selectedPoint.projectedBuy)?.toFixed(2)}</strong>
+              Venta: <strong className="text-[#FCD535] font-mono">{fmt(selectedPoint.sellPrice ?? selectedPoint.projectedSell)}</strong> |
+              Recompra: <strong className="text-[#02c076] font-mono">{fmt(selectedPoint.buyPrice ?? selectedPoint.projectedBuy)}</strong>
             </div>
           )}
         </div>
@@ -396,28 +401,32 @@ export const DailyFluctuationChart: React.FC<DailyFluctuationChartProps> = ({
                     className="cursor-pointer transition hover:opacity-80"
                     onClick={() => setSelectedPoint(pt)}
                   >
-                    {/* Venta Node */}
-                    <circle
-                      cx={x}
-                      cy={sellY}
-                      r={isProjected ? 3.5 : 4.5}
-                      fill={isProjected ? '#181a20' : '#FCD535'}
-                      stroke="#FCD535"
-                      strokeWidth="2"
-                    />
+                    {/* Venta Node - C2: no circle where there is no price. */}
+                    {sellY !== null && (
+                      <circle
+                        cx={x}
+                        cy={sellY}
+                        r={isProjected ? 3.5 : 4.5}
+                        fill={isProjected ? '#181a20' : '#FCD535'}
+                        stroke="#FCD535"
+                        strokeWidth="2"
+                      />
+                    )}
 
                     {/* Recompra Node */}
-                    <circle
-                      cx={x}
-                      cy={buyY}
-                      r={isProjected ? 3.5 : 4.5}
-                      fill={isProjected ? '#181a20' : '#02c076'}
-                      stroke="#02c076"
-                      strokeWidth="2"
-                    />
+                    {buyY !== null && (
+                      <circle
+                        cx={x}
+                        cy={buyY}
+                        r={isProjected ? 3.5 : 4.5}
+                        fill={isProjected ? '#181a20' : '#02c076'}
+                        stroke="#02c076"
+                        strokeWidth="2"
+                      />
+                    )}
 
                     {/* Top Peak Badge */}
-                    {pt.isPeak && (
+                    {pt.isPeak && sellY !== null && (
                       <g>
                         <rect
                           x={x - 38}
@@ -438,13 +447,13 @@ export const DailyFluctuationChart: React.FC<DailyFluctuationChartProps> = ({
                           fontWeight="bold"
                           fontFamily="monospace"
                         >
-                          PICO {(pt.sellPrice || pt.projectedSell)?.toFixed(2)}
+                          PICO {fmt(pt.sellPrice ?? pt.projectedSell)}
                         </text>
                       </g>
                     )}
 
                     {/* Bottom Trough Badge */}
-                    {pt.isTrough && (
+                    {pt.isTrough && buyY !== null && (
                       <g>
                         <rect
                           x={x - 48}
@@ -465,13 +474,13 @@ export const DailyFluctuationChart: React.FC<DailyFluctuationChartProps> = ({
                           fontWeight="bold"
                           fontFamily="monospace"
                         >
-                          RETROCESO {(pt.buyPrice || pt.projectedBuy)?.toFixed(2)}
+                          RETROCESO {fmt(pt.buyPrice ?? pt.projectedBuy)}
                         </text>
                       </g>
                     )}
 
                     {/* Numeric Price Tag for projected hours */}
-                    {isProjected && (
+                    {isProjected && sellY !== null && (
                       <text
                         x={x}
                         y={sellY - 8}
@@ -480,7 +489,7 @@ export const DailyFluctuationChart: React.FC<DailyFluctuationChartProps> = ({
                         fontSize="9"
                         fontFamily="monospace"
                       >
-                        {pt.projectedSell?.toFixed(1)}
+                        {fmt(pt.projectedSell, 1)}
                       </text>
                     )}
 
@@ -512,27 +521,45 @@ export const DailyFluctuationChart: React.FC<DailyFluctuationChartProps> = ({
 
           <div className="grid grid-cols-13 gap-1 h-14 bg-[#111417] p-2 rounded border border-[#2b2f36] items-center">
             {timeline.map((pt, i) => {
-              const currentPrice = pt.sellPrice || pt.projectedSell || 918;
-              const prevPrice = (timeline[i - 1]?.sellPrice || timeline[i - 1]?.projectedSell || currentPrice);
-              const delta = ((currentPrice - prevPrice) / prevPrice) * 100;
+              /*
+               * C2: the old code was `pt.sellPrice || pt.projectedSell || 918`,
+               * which invented a price for every hour without data and then
+               * drew a variation bar from it. With no pair of consecutive
+               * prices there is no variation to draw.
+               */
+              const currentPrice = pt.sellPrice ?? pt.projectedSell ?? null;
+              const prev = timeline[i - 1];
+              const prevPrice = prev ? prev.sellPrice ?? prev.projectedSell ?? null : null;
 
-              const isPositive = delta >= 0;
-              const barHeight = Math.min(22, Math.max(4, Math.abs(delta) * 50));
+              const delta =
+                currentPrice !== null && prevPrice !== null && prevPrice !== 0
+                  ? ((currentPrice - prevPrice) / prevPrice) * 100
+                  : null;
+
+              const barHeight = delta === null ? 0 : Math.min(22, Math.max(4, Math.abs(delta) * 50));
+              const isPositive = delta !== null && delta >= 0;
 
               return (
                 <div key={i} className="flex flex-col items-center justify-center h-full">
                   <div className="w-full flex items-center justify-center h-8 relative">
-                    {isPositive ? (
+                    {delta === null ? (
+                      <span
+                        className="text-[9px] font-mono text-[#848e9c]"
+                        title={`${pt.label}: sin datos para calcular la variación.`}
+                      >
+                        {NO_DATA}
+                      </span>
+                    ) : isPositive ? (
                       <div
                         className="w-3 bg-[#FCD535] rounded-xs"
                         style={{ height: `${barHeight}px`, transform: 'translateY(-50%)' }}
-                        title={`${pt.label}: +${delta.toFixed(2)}%`}
+                        title={`${pt.label}: ${fmtSignedPct(delta)}`}
                       />
                     ) : (
                       <div
                         className="w-3 bg-[#02c076] rounded-xs"
                         style={{ height: `${barHeight}px`, transform: 'translateY(50%)' }}
-                        title={`${pt.label}: ${delta.toFixed(2)}%`}
+                        title={`${pt.label}: ${fmtSignedPct(delta)}`}
                       />
                     )}
                   </div>
@@ -548,7 +575,7 @@ export const DailyFluctuationChart: React.FC<DailyFluctuationChartProps> = ({
           <div className="flex items-center gap-2">
             <span className="text-[#FCD535]">▼ Vender USDT (Pico)</span>
             <span className="text-[#02c076]">▲ Recomprar USDT (Piso)</span>
-            <span>· Los puntos proyectados estiman la trayectoria intradía con intervalos de confianza del 95%.</span>
+            <span>· Los puntos proyectados son extrapolaciones heurísticas; su precisión no está medida todavía.</span>
           </div>
         </div>
       </div>

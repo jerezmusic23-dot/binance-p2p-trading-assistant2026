@@ -201,10 +201,12 @@ describe('pollMarket - failure path', () => {
     const { store } = await freshStore();
 
     const snapshot = await store.pollMarket();
+    // Was: a snapshot full of zeros, indistinguishable from a 0.00 VES market.
     expect(snapshot).toMatchObject({
       status: 'OFFLINE',
-      bestBuyPrice: 0,
-      bestSellPrice: 0,
+      bestBuyPrice: null,
+      bestSellPrice: null,
+      spreadPercentage: null,
       topBuyAds: [],
       topSellAds: [],
       lastError: 'Binance unreachable',
@@ -367,5 +369,218 @@ describe('analysis / projections window', () => {
     const metrics = store.getBacktestMetrics();
     expect(spy).toHaveBeenCalledWith();
     expect(metrics.hasSufficientData).toBe(false); // empty store
+  });
+});
+
+describe('provenance (phase C1)', () => {
+  it('marks a bank/amount cell REAL when an ad really covers that tier', async () => {
+    // Default fixture ad: min 1000, max 50000 VES.
+    stubBinance([makeAdItem({ price: '918.00' })], [makeAdItem({ price: '921.00' })]);
+    const { store } = await freshStore();
+
+    const matrix = await store.getBankMatrix('SELL', true);
+    const cell = matrix.rows[0].ratesByAmount['10K'];
+
+    expect(cell.provenance).toBe('REAL');
+    expect(cell.provenanceReason).toBeUndefined();
+  });
+
+  it('reports null for a tier no ad can cover, never another tier price', async () => {
+    // 100000 VES exceeds the ad's 50000 max. C2 removed the fallback that
+    // published the bank's top ad as if it were the rate for this amount.
+    stubBinance([makeAdItem({ price: '918.00' })], [makeAdItem({ price: '921.00' })]);
+    const { store } = await freshStore();
+
+    const matrix = await store.getBankMatrix('SELL', true);
+    const cell = matrix.rows[0].ratesByAmount['100K'];
+
+    expect(cell.leaderPrice).toBeNull();
+    expect(cell.suggestedPrice).toBeNull();
+    expect(cell.spreadPct).toBeNull();
+    expect(cell.adCount).toBe(0);
+    expect(cell.provenance).toBe('REAL');
+    expect(cell.provenanceReason).toMatch(/Ningun anuncio de venta .* cubre 100000/i);
+
+    // The tier that IS covered still reports a real rate.
+    expect(matrix.rows[0].ratesByAmount['10K'].leaderPrice).toBe(921);
+  });
+
+  it('marks an empty tier REAL - an absent rate is an honest observation', async () => {
+    stubBinance([], [makeAdItem({ price: '921.00' })]);
+    const { store } = await freshStore();
+
+    const matrix = await store.getBankMatrix('BUY', true);
+    const cell = matrix.rows[0].ratesByAmount['10K'];
+
+    expect(cell.leaderPrice).toBeNull();
+    expect(cell.provenance).toBe('REAL');
+  });
+
+  it('flags an unfiltered snapshot served in place of a filtered one', async () => {
+    // First poll succeeds so a central snapshot exists to fall back to.
+    stubBinance([makeAdItem({ price: '918.00' })], [makeAdItem({ price: '921.00' })]);
+    const { store } = await freshStore();
+    await store.pollMarket();
+
+    // Now the filtered query fails.
+    vi.stubGlobal('fetch', async () => {
+      throw new Error('bank query failed');
+    });
+    const filtered = await store.getFilteredSnapshot('BANESCO', 50000);
+
+    expect(filtered.snapshot?.bestBuyPrice).toBe(918); // unfiltered data
+    expect(filtered.snapshot?.filterFallbackReason).toMatch(/TODOS los bancos/i);
+  });
+
+  it('does not flag a snapshot whose filter was honoured', async () => {
+    stubBinance([makeAdItem({ price: '918.00' })], [makeAdItem({ price: '921.00' })]);
+    const { store } = await freshStore();
+
+    const filtered = await store.getFilteredSnapshot('BANESCO', 50000);
+    expect(filtered.snapshot?.filterFallbackReason).toBeUndefined();
+  });
+
+  it('reports the never-connected OFFLINE snapshot as null, not as 0', async () => {
+    vi.stubGlobal('fetch', async () => {
+      throw new Error('Binance unreachable');
+    });
+    const { store } = await freshStore();
+    const snapshot = await store.pollMarket();
+
+    expect(snapshot?.bestBuyPrice).toBeNull();
+    expect(snapshot?.bestBuy.value).toBeNull();
+    expect(snapshot?.bestBuy.provenance).toBe('REAL');
+    expect(snapshot?.bestBuy.reason).toMatch(/No se ha obtenido ningun snapshot valido/i);
+  });
+});
+
+describe('C2 - null contract', () => {
+  it('does NOT persist a history record when one side of the book is empty', async () => {
+    // Decision (b): the history only stores complete observations, so
+    // HistoryRecord and storage.ts stay unchanged.
+    stubBinance([], [makeAdItem({ price: '921.00' })]);
+    const { store } = await freshStore();
+
+    const snapshot = await store.pollMarket();
+    expect(snapshot?.bestSellPrice).toBe(921);
+    expect(snapshot?.bestBuyPrice).toBeNull();
+
+    expect(readData<HistoryRecord[]>('market_history.json')).toEqual([]);
+  });
+
+  it('persists again as soon as both sides are back', async () => {
+    stubBinance([], [makeAdItem({ price: '921.00' })]);
+    const { store } = await freshStore();
+    await store.pollMarket();
+    expect(readData<HistoryRecord[]>('market_history.json')).toHaveLength(0);
+
+    stubBinance([makeAdItem({ price: '918.00' })], [makeAdItem({ price: '921.00' })]);
+    await store.pollMarket();
+
+    const history = readData<HistoryRecord[]>('market_history.json');
+    expect(history).toHaveLength(1);
+    expect(history[0]).toMatchObject({ buyPrice: 918, sellPrice: 921 });
+  });
+
+  it('never writes a null price into the persisted schema', async () => {
+    stubBinance([makeAdItem({ price: '918.00' })], []);
+    const { store } = await freshStore();
+    await store.pollMarket();
+
+    for (const record of readData<HistoryRecord[]>('market_history.json')) {
+      expect(record.buyPrice).not.toBeNull();
+      expect(record.sellPrice).not.toBeNull();
+      expect(record.spreadPct).not.toBeNull();
+    }
+  });
+
+  it('does not fire a BELOW alert when the price is missing', async () => {
+    // Before C2 a missing side surfaced as 0, so every BELOW rule fired.
+    stubBinance([], [makeAdItem({ price: '921.00' })]);
+    const { store, StorageEngine } = await freshStore();
+    StorageEngine.deleteAlert('rule-spread-high');
+    StorageEngine.deleteAlert('rule-volatility-spike');
+    StorageEngine.saveAlert({
+      id: 'below-rule',
+      name: 'Precio por debajo de 900',
+      condition: 'BELOW',
+      targetValue: 900,
+      targetSide: 'BUY',
+      enabled: true,
+      createdAt: 1,
+    } satisfies AlertRule);
+
+    await store.pollMarket();
+    expect(fs.existsSync(path.join(tmpDir, 'data', 'alert_triggers.json'))).toBe(false);
+  });
+
+  it('does not fire a spread alert when the spread cannot be computed', async () => {
+    stubBinance([], [makeAdItem({ price: '921.00' })]);
+    const { store } = await freshStore();
+
+    await store.pollMarket();
+    expect(fs.existsSync(path.join(tmpDir, 'data', 'alert_triggers.json'))).toBe(false);
+  });
+
+  it('still fires a BELOW alert when the price does exist', async () => {
+    stubBinance([makeAdItem({ price: '890.00' })], [makeAdItem({ price: '895.00' })]);
+    const { store, StorageEngine } = await freshStore();
+    StorageEngine.deleteAlert('rule-spread-high');
+    StorageEngine.deleteAlert('rule-volatility-spike');
+    StorageEngine.saveAlert({
+      id: 'below-rule',
+      name: 'Precio por debajo de 900',
+      condition: 'BELOW',
+      targetValue: 900,
+      targetSide: 'BUY',
+      enabled: true,
+      createdAt: 1,
+    } satisfies AlertRule);
+
+    await store.pollMarket();
+    const triggers = readData<AlertTriggerLog[]>('alert_triggers.json');
+    expect(triggers).toHaveLength(1);
+    expect(triggers[0].price).toBe(890);
+  });
+});
+
+describe('C2 - LIVE / STALE / OFFLINE', () => {
+  it('reports LIVE for a fresh snapshot', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.parse('2026-08-23T16:00:00Z'));
+    stubBinance([makeAdItem({ price: '918.00' })], [makeAdItem({ price: '921.00' })]);
+    const { store } = await freshStore();
+    await store.pollMarket();
+
+    const current = store.getCurrentSnapshot();
+    expect(current.effectiveStatus).toBe('LIVE');
+    expect(current.ageSeconds).toBe(0);
+  });
+
+  it('reports STALE with a real age past the 35s threshold', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.parse('2026-08-23T16:00:00Z'));
+    stubBinance([makeAdItem({ price: '918.00' })], [makeAdItem({ price: '921.00' })]);
+    const { store } = await freshStore();
+    await store.pollMarket();
+
+    vi.setSystemTime(Date.parse('2026-08-23T16:02:00Z'));
+    const current = store.getCurrentSnapshot();
+    expect(current.effectiveStatus).toBe('STALE');
+    expect(current.ageSeconds).toBe(120);
+    // C.4(ii): the last good value is kept, but never as a live reading.
+    expect(current.snapshot?.bestBuyPrice).toBe(918);
+  });
+
+  it('reports OFFLINE with null prices when nothing was ever captured', async () => {
+    vi.stubGlobal('fetch', async () => {
+      throw new Error('down');
+    });
+    const { store } = await freshStore();
+    await store.pollMarket();
+
+    const current = store.getCurrentSnapshot();
+    expect(current.effectiveStatus).toBe('OFFLINE');
+    expect(current.snapshot?.bestBuyPrice).toBeNull();
   });
 });

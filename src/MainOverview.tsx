@@ -17,12 +17,19 @@ import {
   Scale,
 } from 'lucide-react';
 import { MarketSnapshot, MarketAnalysis, MarketProjections } from './types';
+import { ProvenanceTag, InsufficientDataNotice, StaleTag } from './ProvenanceTag';
+import { fmt, fmtPct, fmtSignedPct, fmtInt, fmtText, NO_DATA } from './format';
 
 interface MainOverviewProps {
   snapshot: MarketSnapshot | null;
   analysis: MarketAnalysis | null;
   projections: MarketProjections | null;
   ageSeconds: number;
+  /** Real freshness of the snapshot. The price card must never claim LIVE otherwise. */
+  effectiveStatus: 'LIVE' | 'STALE' | 'OFFLINE';
+  /** True when analysis/projections could not be refreshed and are the last known good values. */
+  derivedStale?: boolean;
+  derivedAgeSeconds?: number;
   onNavigateTab: (tab: 'projections' | 'matrix' | 'orderbook' | 'history') => void;
 }
 
@@ -31,9 +38,12 @@ export const MainOverview: React.FC<MainOverviewProps> = ({
   analysis,
   projections,
   ageSeconds,
+  effectiveStatus,
+  derivedStale = false,
+  derivedAgeSeconds = 0,
   onNavigateTab,
 }) => {
-  if (!snapshot || snapshot.bestBuyPrice <= 0) {
+  if (!snapshot || snapshot.bestBuyPrice === null) {
     return (
       <div id="overview-loading" className="p-8 text-center bg-[#181a20] rounded-lg border border-[#2b2f36]">
         <div className="w-10 h-10 border-3 border-[#FCD535] border-t-transparent rounded-full animate-spin mx-auto mb-4" />
@@ -43,7 +53,7 @@ export const MainOverview: React.FC<MainOverviewProps> = ({
     );
   }
 
-  const getTrendIcon = (trend?: string) => {
+  const getTrendIcon = (trend?: string | null) => {
     switch (trend) {
       case 'ALCISTA':
         return <TrendingUp className="w-4 h-4 text-[#02c076]" />;
@@ -54,7 +64,7 @@ export const MainOverview: React.FC<MainOverviewProps> = ({
     }
   };
 
-  const getTrendColor = (trend?: string) => {
+  const getTrendColor = (trend?: string | null) => {
     switch (trend) {
       case 'ALCISTA':
         return 'text-[#02c076] bg-[#02c076]/10 border-[#02c076]/30';
@@ -65,18 +75,33 @@ export const MainOverview: React.FC<MainOverviewProps> = ({
     }
   };
 
-  const probs = projections?.probabilities || { up: 33, neutral: 34, down: 33 };
   const advice = projections?.merchantAdvice;
-  const pressure = advice?.orderBookPressure || {
-    buyVolumeUsdt: 12000,
-    sellVolumeUsdt: 12000,
-    buyPressurePct: 50,
-    sellPressurePct: 50,
-    dominantSide: 'EQUILIBRADO' as const,
-  };
+  /*
+   * C2: the frontend invents nothing. When the server does not deliver a
+   * block, the UI shows a gap.
+   */
+  const probs = projections?.probabilities ?? { up: null, neutral: null, down: null };
+  const probsProvenance = projections?.provenance.probabilities ?? null;
+
+  const pressure = advice?.orderBookPressure ?? null;
 
   return (
     <div id="main-overview-panel" className="space-y-4">
+      {projections && !projections.hasSufficientData && (
+        <InsufficientDataNotice reason={projections.insufficientDataReason} />
+      )}
+
+      {snapshot.filterFallbackReason && (
+        <InsufficientDataNotice reason={snapshot.filterFallbackReason} />
+      )}
+
+      {derivedStale && (
+        <div className="flex items-center gap-2 text-[11px] text-[#848e9c] font-mono">
+          <StaleTag ageSeconds={derivedAgeSeconds} />
+          <span>Análisis y proyecciones no se han podido refrescar; se muestra el último valor válido.</span>
+        </div>
+      )}
+
       {/* Strategic Decision & Actionable Forecast Banner */}
       {advice && (
         <div id="card-forecast-action" className="bg-[#181a20] border-2 border-[#FCD535]/50 rounded-lg p-5 relative overflow-hidden shadow-lg">
@@ -105,11 +130,11 @@ export const MainOverview: React.FC<MainOverviewProps> = ({
             <div className="flex flex-wrap items-center gap-3 text-xs font-mono">
               <div className="bg-[#111417] border border-[#2b2f36] px-3.5 py-2 rounded">
                 <span className="text-[#848e9c] text-[10px] uppercase block font-semibold">Ventana Venta Óptima</span>
-                <span className="text-[#FCD535] font-bold text-sm">{advice.optimalSellTimeWindow}</span>
+                <span className="text-[#FCD535] font-bold text-sm">{fmtText(advice.optimalSellTimeWindow)}</span>
               </div>
               <div className="bg-[#111417] border border-[#2b2f36] px-3.5 py-2 rounded">
                 <span className="text-[#848e9c] text-[10px] uppercase block font-semibold">Ventana Recompra Óptima</span>
-                <span className="text-[#02c076] font-bold text-sm">{advice.optimalBuyTimeWindow}</span>
+                <span className="text-[#02c076] font-bold text-sm">{fmtText(advice.optimalBuyTimeWindow)}</span>
               </div>
             </div>
           </div>
@@ -123,9 +148,9 @@ export const MainOverview: React.FC<MainOverviewProps> = ({
                   {advice.actionExplanation}
                 </p>
                 <div className="flex items-center gap-4 mt-2 text-[11px] font-mono text-[#848e9c]">
-                  <span>Pico estimado: <strong className="text-[#FCD535]">{advice.projectedPeakRate.toFixed(2)} VES</strong></span>
+                  <span>Pico estimado: <strong className="text-[#FCD535]">{fmt(advice.projectedPeakRate)} VES</strong></span>
                   <span>·</span>
-                  <span>Piso estimado: <strong className="text-[#02c076]">{advice.projectedTroughRate.toFixed(2)} VES</strong></span>
+                  <span>Piso estimado: <strong className="text-[#02c076]">{fmt(advice.projectedTroughRate)} VES</strong></span>
                 </div>
               </div>
             </div>
@@ -137,30 +162,63 @@ export const MainOverview: React.FC<MainOverviewProps> = ({
                   <Scale className="w-3.5 h-3.5 text-[#FCD535]" />
                   Presión del Libro (Binance)
                 </span>
-                <span className={`text-[10px] font-bold uppercase font-mono ${pressure.dominantSide === 'COMPRA' ? 'text-[#02c076]' : pressure.dominantSide === 'VENTA' ? 'text-[#cf304a]' : 'text-[#FCD535]'}`}>
-                  {pressure.dominantSide}
+                <span className={`text-[10px] font-bold uppercase font-mono ${
+                  pressure?.dominantSide === 'COMPRA'
+                    ? 'text-[#02c076]'
+                    : pressure?.dominantSide === 'VENTA'
+                    ? 'text-[#cf304a]'
+                    : 'text-[#848e9c]'
+                }`}>
+                  {fmtText(pressure?.dominantSide)}
                 </span>
               </div>
 
-              {/* Progress bar */}
-              <div className="space-y-1.5">
-                <div className="w-full bg-[#cf304a]/30 h-2.5 rounded-full overflow-hidden flex">
-                  <div
-                    className="bg-[#02c076] h-full transition-all duration-500"
-                    style={{ width: `${pressure.buyPressurePct}%` }}
-                    title={`Compradores: ${pressure.buyPressurePct}%`}
-                  />
-                  <div
-                    className="bg-[#cf304a] h-full transition-all duration-500"
-                    style={{ width: `${pressure.sellPressurePct}%` }}
-                    title={`Vendedores: ${pressure.sellPressurePct}%`}
-                  />
+              {/*
+                * C2: with no published liquidity there are no bars to draw.
+                * The former 50/50 split over 12000 invented USDT is gone.
+                */}
+              {pressure && pressure.buyPressurePct !== null && pressure.sellPressurePct !== null ? (
+                <div className="space-y-1.5">
+                  <div className="w-full bg-[#cf304a]/30 h-2.5 rounded-full overflow-hidden flex">
+                    <div
+                      className="bg-[#02c076] h-full transition-all duration-500"
+                      style={{ width: `${pressure.buyPressurePct}%` }}
+                      title={`Compradores: ${pressure.buyPressurePct}%`}
+                    />
+                    <div
+                      className="bg-[#cf304a] h-full transition-all duration-500"
+                      style={{ width: `${pressure.sellPressurePct}%` }}
+                      title={`Vendedores: ${pressure.sellPressurePct}%`}
+                    />
+                  </div>
+                  <div className="flex items-center justify-between text-[10px] font-mono">
+                    <span className="text-[#02c076] font-bold flex items-center gap-1">
+                      Compra: {fmtPct(pressure.buyPressurePct, 0)} ({fmtInt(pressure.buyVolumeUsdt)} USDT)
+                      <ProvenanceTag
+                        provenance={pressure.buyVolume.provenance}
+                        reason={pressure.buyVolume.reason}
+                      />
+                    </span>
+                    <span className="text-[#cf304a] font-bold flex items-center gap-1">
+                      Venta: {fmtPct(pressure.sellPressurePct, 0)} ({fmtInt(pressure.sellVolumeUsdt)} USDT)
+                      <ProvenanceTag
+                        provenance={pressure.sellVolume.provenance}
+                        reason={pressure.sellVolume.reason}
+                      />
+                    </span>
+                  </div>
                 </div>
-                <div className="flex items-center justify-between text-[10px] font-mono">
-                  <span className="text-[#02c076] font-bold">Compra: {pressure.buyPressurePct}% ({pressure.buyVolumeUsdt.toLocaleString()} USDT)</span>
-                  <span className="text-[#cf304a] font-bold">Venta: {pressure.sellPressurePct}% ({pressure.sellVolumeUsdt.toLocaleString()} USDT)</span>
+              ) : (
+                <div className="text-[10px] font-mono text-[#848e9c] flex items-center gap-1.5">
+                  {NO_DATA} Sin liquidez publicada en el libro: no hay presión que medir.
+                  {pressure && (
+                    <ProvenanceTag
+                      provenance={pressure.buyVolume.provenance}
+                      reason={pressure.buyVolume.reason}
+                    />
+                  )}
                 </div>
-              </div>
+              )}
             </div>
           </div>
         </div>
@@ -172,22 +230,32 @@ export const MainOverview: React.FC<MainOverviewProps> = ({
         <div id="card-current-rate" className="bg-[#181a20] border border-[#2b2f36] p-5 rounded-lg relative overflow-hidden">
           <div className="flex items-center justify-between text-xs mb-3">
             <span className="text-[10px] uppercase text-[#848e9c] font-bold tracking-wider">1. Tasa Real Actual</span>
-            <span className="flex items-center gap-1 text-[10px] text-[#02c076] font-mono">
-              <span className="w-1.5 h-1.5 rounded-full bg-[#02c076] animate-pulse" />
-              P2P LIVE ({ageSeconds.toFixed(0)}s)
-            </span>
+            {/* C2: the card reports the real freshness, never a fixed "LIVE". */}
+            {effectiveStatus === 'LIVE' ? (
+              <span className="flex items-center gap-1 text-[10px] text-[#02c076] font-mono">
+                <span className="w-1.5 h-1.5 rounded-full bg-[#02c076] animate-pulse" />
+                P2P LIVE ({ageSeconds.toFixed(0)}s)
+              </span>
+            ) : effectiveStatus === 'STALE' ? (
+              <StaleTag ageSeconds={ageSeconds} />
+            ) : (
+              <span className="flex items-center gap-1 text-[10px] text-[#cf304a] font-mono font-bold">
+                <span className="w-1.5 h-1.5 rounded-full bg-[#cf304a]" />
+                OFFLINE
+              </span>
+            )}
           </div>
 
           <div className="mt-1">
             <div className="flex items-baseline gap-2">
               <span className="text-4xl font-black font-mono tracking-tight text-[#FCD535] leading-none">
-                {snapshot.bestBuyPrice.toFixed(2)}
+                {fmt(snapshot.bestBuyPrice)}
               </span>
               <span className="text-xs font-semibold text-[#848e9c]">VES/USDT</span>
             </div>
             <div className="flex items-center justify-between text-xs mt-4 pt-3 border-t border-[#2b2f36] text-[#848e9c]">
-              <span>Venta: <strong className="text-[#FCD535] font-mono">{snapshot.bestSellPrice.toFixed(2)}</strong></span>
-              <span>Spread: <strong className="text-[#e0e0e0] font-mono">{snapshot.spreadPercentage.toFixed(2)}%</strong></span>
+              <span>Venta: <strong className="text-[#FCD535] font-mono">{fmt(snapshot.bestSellPrice)}</strong></span>
+              <span>Spread: <strong className="text-[#e0e0e0] font-mono">{fmtPct(snapshot.spreadPercentage)}</strong></span>
             </div>
           </div>
         </div>
@@ -196,8 +264,15 @@ export const MainOverview: React.FC<MainOverviewProps> = ({
         <div id="card-trend" className="bg-[#181a20] border border-[#2b2f36] p-5 rounded-lg relative">
           <div className="flex items-center justify-between text-xs mb-3">
             <span className="text-[10px] uppercase text-[#848e9c] font-bold tracking-wider">2 & 3. Tendencia & Dirección</span>
-            <span className="text-[10px] text-[#848e9c] font-mono">
-              Fuerza: {analysis?.trendStrength || 50}%
+            <span className="text-[10px] text-[#848e9c] font-mono flex items-center gap-1">
+              Fuerza: {fmtPct(analysis?.trendStrength, 0)}
+              {analysis && (
+                <ProvenanceTag
+                  provenance={analysis.provenance.trendStrength}
+                  reason="trendStrength = |pendiente%| * 600 + 35. Ninguna de las dos constantes procede de los datos."
+                  dataWindow={analysis.dataWindow}
+                />
+              )}
             </span>
           </div>
 
@@ -205,16 +280,22 @@ export const MainOverview: React.FC<MainOverviewProps> = ({
             <div>
               <div className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-bold border ${getTrendColor(analysis?.trend)}`}>
                 {getTrendIcon(analysis?.trend)}
-                <span>{analysis?.trend || 'LATERAL'}</span>
+                <span>{fmtText(analysis?.trend)}</span>
               </div>
               <p className="text-xs text-[#848e9c] mt-3 font-mono">
-                Momentum: <strong className="text-[#e0e0e0]">{analysis?.momentum || 'NEUTRO'}</strong>
+                Momentum: <strong className="text-[#e0e0e0]">{fmtText(analysis?.momentum)}</strong>
               </p>
             </div>
             <div className="text-right text-xs">
               <span className="text-[10px] uppercase text-[#848e9c] block">vs Media SMA:</span>
-              <span className={`font-mono font-bold text-sm ${(analysis?.priceVsSmaPct || 0) >= 0 ? 'text-[#02c076]' : 'text-[#cf304a]'}`}>
-                {(analysis?.priceVsSmaPct || 0) >= 0 ? '+' : ''}{analysis?.priceVsSmaPct || 0}%
+              <span className={`font-mono font-bold text-sm ${
+                analysis?.priceVsSmaPct == null
+                  ? 'text-[#848e9c]'
+                  : analysis.priceVsSmaPct >= 0
+                  ? 'text-[#02c076]'
+                  : 'text-[#cf304a]'
+              }`}>
+                {fmtSignedPct(analysis?.priceVsSmaPct)}
               </span>
             </div>
           </div>
@@ -223,19 +304,33 @@ export const MainOverview: React.FC<MainOverviewProps> = ({
         {/* Card 3: 5 & 6. Rango Esperado del Día */}
         <div id="card-expected-range" className="bg-[#181a20] border border-[#2b2f36] p-5 rounded-lg relative">
           <div className="flex items-center justify-between text-xs mb-3">
-            <span className="text-[10px] uppercase text-[#848e9c] font-bold tracking-wider">5 & 6. Rango del Día (VES)</span>
-            <span className="text-[10px] text-[#FCD535] font-mono">
-              Confianza: {projections?.daily.confidencePct || 65}%
+            <span className="text-[10px] uppercase text-[#848e9c] font-bold tracking-wider flex items-center gap-1.5">
+              5 &amp; 6. Rango del Día (VES)
+              {projections && (
+                <ProvenanceTag
+                  provenance={projections.provenance.daily}
+                  dataWindow={projections.dataWindow}
+                />
+              )}
+            </span>
+            <span className="text-[10px] text-[#FCD535] font-mono flex items-center gap-1">
+              Confianza: {fmtPct(projections?.daily.confidencePct, 0)}
+              {projections && (
+                <ProvenanceTag
+                  provenance={projections.provenance.confidence}
+                  reason="La confianza es hoy una función del número de muestras (62 + n*0.35), no del error medido."
+                />
+              )}
             </span>
           </div>
 
           <div className="mt-1">
             <div className="text-xl font-bold font-mono text-[#FCD535] leading-tight">
-              {projections?.daily.floor.toFixed(2)} — {projections?.daily.ceiling.toFixed(2)} <span className="text-xs text-[#848e9c]">VES</span>
+              {fmt(projections?.daily.floor)} — {fmt(projections?.daily.ceiling)} <span className="text-xs text-[#848e9c]">VES</span>
             </div>
             <div className="flex items-center justify-between text-xs mt-4 pt-3 border-t border-[#2b2f36] text-[#848e9c]">
-              <span>Piso: <strong className="text-[#02c076] font-mono">{projections?.daily.floor.toFixed(2)}</strong></span>
-              <span>Techo: <strong className="text-[#FCD535] font-mono">{projections?.daily.ceiling.toFixed(2)}</strong></span>
+              <span>Piso: <strong className="text-[#02c076] font-mono">{fmt(projections?.daily.floor)}</strong></span>
+              <span>Techo: <strong className="text-[#FCD535] font-mono">{fmt(projections?.daily.ceiling)}</strong></span>
             </div>
           </div>
         </div>
@@ -243,8 +338,11 @@ export const MainOverview: React.FC<MainOverviewProps> = ({
         {/* Card 4: 7 & 8. Riesgo & Probabilidad */}
         <div id="card-risk-level" className="bg-[#181a20] border border-[#2b2f36] p-5 rounded-lg relative">
           <div className="flex items-center justify-between text-xs mb-3">
-            <span className="text-[10px] uppercase text-[#848e9c] font-bold tracking-wider">7 & 8. Riesgo & Probabilidad</span>
-            <span className="text-[10px] font-mono text-[#848e9c]">RSI: {analysis?.rsi || 50}</span>
+            <span className="text-[10px] uppercase text-[#848e9c] font-bold tracking-wider flex items-center gap-1.5">
+              7 &amp; 8. Riesgo &amp; Probabilidad
+              {probsProvenance && <ProvenanceTag provenance={probsProvenance} />}
+            </span>
+            <span className="text-[10px] font-mono text-[#848e9c]">RSI: {fmt(analysis?.rsi, 1)}</span>
           </div>
 
           <div className="mt-1 flex items-center justify-between">
@@ -255,19 +353,24 @@ export const MainOverview: React.FC<MainOverviewProps> = ({
                   projections?.risk.level === 'MEDIO' ? 'bg-[#FCD535]/15 border border-[#FCD535]/40 text-[#FCD535]' :
                   'bg-[#02c076]/15 border border-[#02c076]/40 text-[#02c076]'
                 }`}>
-                  RIESGO {projections?.risk.level || 'BAJO'}
+                  RIESGO {fmtText(projections?.risk.level)}
                 </span>
               </div>
               <p className="text-xs text-[#848e9c] mt-3 font-mono">
-                Volatilidad: <strong className="text-[#e0e0e0]">{analysis?.volatility || 'MEDIA'}</strong>
+                Volatilidad: <strong className="text-[#e0e0e0]">{fmtText(analysis?.volatility)}</strong>
               </p>
             </div>
 
             <div className="text-right text-xs">
               <span className="text-[10px] uppercase text-[#848e9c] block">Más Probable:</span>
               <span className="font-bold text-[#e0e0e0] font-mono">
-                {probs.up > probs.down && probs.up > probs.neutral ? '▲ SUBIR' :
-                 probs.down > probs.up && probs.down > probs.neutral ? '▼ BAJAR' : '■ MANTENER'}
+                {probs.up === null || probs.down === null || probs.neutral === null
+                  ? NO_DATA
+                  : probs.up > probs.down && probs.up > probs.neutral
+                  ? '▲ SUBIR'
+                  : probs.down > probs.up && probs.down > probs.neutral
+                  ? '▼ BAJAR'
+                  : '■ MANTENER'}
               </span>
             </div>
           </div>
@@ -300,44 +403,44 @@ export const MainOverview: React.FC<MainOverviewProps> = ({
           {/* 3-Column Probabilities Bar */}
           <div className="grid grid-cols-3 gap-3">
             {/* SUBIR */}
-            <div className={`p-3.5 rounded border transition ${probs.up >= 45 ? 'bg-[#111417] border-[#02c076]' : 'bg-[#111417] border-[#2b2f36]'}`}>
+            <div className={`p-3.5 rounded border transition ${(probs.up ?? 0) >= 45 ? 'bg-[#111417] border-[#02c076]' : 'bg-[#111417] border-[#2b2f36]'}`}>
               <div className="flex items-center justify-between text-xs text-[#848e9c] mb-1">
                 <span className="font-bold text-[#02c076] flex items-center gap-1 text-[11px]">
                   <ArrowUpRight className="w-3.5 h-3.5" /> SUBIR
                 </span>
                 <span className="text-[10px] uppercase font-mono">Alcista</span>
               </div>
-              <div className="text-2xl font-bold font-mono text-[#02c076]">{probs.up}%</div>
+              <div className="text-2xl font-bold font-mono text-[#02c076]">{fmtPct(probs.up, 0)}</div>
               <div className="w-full bg-[#2b2f36] h-1.5 rounded-full mt-2 overflow-hidden">
-                <div className="bg-[#02c076] h-full rounded-full transition-all duration-500" style={{ width: `${probs.up}%` }} />
+                <div className="bg-[#02c076] h-full rounded-full transition-all duration-500" style={{ width: `${probs.up ?? 0}%` }} />
               </div>
             </div>
 
             {/* MANTENER */}
-            <div className={`p-3.5 rounded border transition ${probs.neutral >= 45 ? 'bg-[#111417] border-[#FCD535]' : 'bg-[#111417] border-[#2b2f36]'}`}>
+            <div className={`p-3.5 rounded border transition ${(probs.neutral ?? 0) >= 45 ? 'bg-[#111417] border-[#FCD535]' : 'bg-[#111417] border-[#2b2f36]'}`}>
               <div className="flex items-center justify-between text-xs text-[#848e9c] mb-1">
                 <span className="font-bold text-[#FCD535] flex items-center gap-1 text-[11px]">
                   <Minus className="w-3.5 h-3.5" /> MANTENER
                 </span>
                 <span className="text-[10px] uppercase font-mono">Lateral</span>
               </div>
-              <div className="text-2xl font-bold font-mono text-[#FCD535]">{probs.neutral}%</div>
+              <div className="text-2xl font-bold font-mono text-[#FCD535]">{fmtPct(probs.neutral, 0)}</div>
               <div className="w-full bg-[#2b2f36] h-1.5 rounded-full mt-2 overflow-hidden">
-                <div className="bg-[#FCD535] h-full rounded-full transition-all duration-500" style={{ width: `${probs.neutral}%` }} />
+                <div className="bg-[#FCD535] h-full rounded-full transition-all duration-500" style={{ width: `${probs.neutral ?? 0}%` }} />
               </div>
             </div>
 
             {/* BAJAR */}
-            <div className={`p-3.5 rounded border transition ${probs.down >= 45 ? 'bg-[#111417] border-[#cf304a]' : 'bg-[#111417] border-[#2b2f36]'}`}>
+            <div className={`p-3.5 rounded border transition ${(probs.down ?? 0) >= 45 ? 'bg-[#111417] border-[#cf304a]' : 'bg-[#111417] border-[#2b2f36]'}`}>
               <div className="flex items-center justify-between text-xs text-[#848e9c] mb-1">
                 <span className="font-bold text-[#cf304a] flex items-center gap-1 text-[11px]">
                   <ArrowDownRight className="w-3.5 h-3.5" /> BAJAR
                 </span>
                 <span className="text-[10px] uppercase font-mono">Bajista</span>
               </div>
-              <div className="text-2xl font-bold font-mono text-[#cf304a]">{probs.down}%</div>
+              <div className="text-2xl font-bold font-mono text-[#cf304a]">{fmtPct(probs.down, 0)}</div>
               <div className="w-full bg-[#2b2f36] h-1.5 rounded-full mt-2 overflow-hidden">
-                <div className="bg-[#cf304a] h-full rounded-full transition-all duration-500" style={{ width: `${probs.down}%` }} />
+                <div className="bg-[#cf304a] h-full rounded-full transition-all duration-500" style={{ width: `${probs.down ?? 0}%` }} />
               </div>
             </div>
           </div>
@@ -352,11 +455,14 @@ export const MainOverview: React.FC<MainOverviewProps> = ({
                 <div key={h.horizon} className="bg-[#111417] border border-[#2b2f36] p-2.5 rounded text-center">
                   <div className="text-[11px] font-bold text-[#FCD535]">{h.horizon}</div>
                   <div className="text-[10px] text-[#848e9c] font-mono">{h.targetTime}</div>
-                  <div className="font-mono text-xs font-bold text-[#e0e0e0] mt-1">{h.projectedBuy.toFixed(2)}</div>
+                  <div className="font-mono text-xs font-bold text-[#e0e0e0] mt-1">{fmt(h.projectedBuy)}</div>
                   <div className="text-[9px] text-[#848e9c] font-mono mt-0.5">
-                    {h.rangeMin.toFixed(1)} - {h.rangeMax.toFixed(1)}
+                    {fmt(h.rangeMin, 1)} - {fmt(h.rangeMax, 1)}
                   </div>
-                  <div className="text-[9px] text-[#02c076] font-medium mt-1 font-mono">Conf: {h.confidence}%</div>
+                  {/* C2: no sample-count confidence. Absent until the backtest measures it. */}
+                  <div className="text-[9px] text-[#848e9c] font-medium mt-1 font-mono">
+                    Conf: {fmtPct(h.confidence, 0)}
+                  </div>
                 </div>
               ))}
             </div>

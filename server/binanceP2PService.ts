@@ -3,7 +3,13 @@
  * Connects directly to Binance P2P public endpoints with validation and error handling.
  */
 
-import { BinanceAdItem, BinanceP2PResponse, NormalizedAd, MarketSnapshot } from './types.js';
+import {
+  BinanceAdItem,
+  BinanceP2PResponse,
+  NormalizedAd,
+  MarketSnapshot,
+  Valued,
+} from './types.js';
 
 export interface P2PSearchParams {
   asset?: string;
@@ -54,6 +60,26 @@ export const BANK_CODE_MAP: Record<string, { code: string; displayName: string; 
     apiPayTypes: ['PagoMovil'],
   },
 };
+
+/** Rounds to the 2 decimals this market quotes in. */
+function round2(value: number): number {
+  return Number(value.toFixed(2));
+}
+
+/**
+ * Liquidity-weighted average price of a side. null when the side is empty or
+ * when no ad reports any available amount - a weighted average with zero total
+ * weight is undefined, not zero.
+ */
+function weightedAverage(ads: NormalizedAd[]): number | null {
+  let totalVolume = 0;
+  let weightedSum = 0;
+  for (const ad of ads) {
+    totalVolume += ad.availableUsdt;
+    weightedSum += ad.price * ad.availableUsdt;
+  }
+  return totalVolume > 0 ? round2(weightedSum / totalVolume) : null;
+}
 
 export class BinanceP2PService {
   private static readonly ENDPOINT = 'https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search';
@@ -191,45 +217,59 @@ export class BinanceP2PService {
       throw new Error('No active P2P ads found for the specified criteria.');
     }
 
-    // Calculate real stats
-    // Buy side (Taker pays VES to buy USDT): Best price is lowest price among ads
+    // Calculate real stats.
+    // C2: a side with no ads yields null everywhere. Nothing is derived from
+    // the opposite side and nothing defaults to 0 - an absent price is absent.
     const buyPrices = topBuyAds.map((a) => a.price).sort((a, b) => a - b);
     const sellPrices = topSellAds.map((a) => a.price).sort((a, b) => b - a);
 
-    const bestBuyPrice = buyPrices[0] || (sellPrices[0] ? sellPrices[0] * 1.01 : 0);
-    const bestSellPrice = sellPrices[0] || (buyPrices[0] ? buyPrices[0] * 0.99 : 0);
+    const hasBuySide = buyPrices.length > 0;
+    const hasSellSide = sellPrices.length > 0;
 
-    const averageBuyPrice = buyPrices.length
-      ? buyPrices.reduce((acc, p) => acc + p, 0) / buyPrices.length
-      : bestBuyPrice;
+    // Buy side (Taker pays VES to buy USDT): best price is the lowest ask.
+    const bestBuyPrice = hasBuySide ? round2(buyPrices[0]) : null;
+    // Sell side: best price is the highest bid.
+    const bestSellPrice = hasSellSide ? round2(sellPrices[0]) : null;
 
-    const averageSellPrice = sellPrices.length
-      ? sellPrices.reduce((acc, p) => acc + p, 0) / sellPrices.length
-      : bestSellPrice;
+    const averageBuyPrice = hasBuySide
+      ? round2(buyPrices.reduce((acc, p) => acc + p, 0) / buyPrices.length)
+      : null;
+    const averageSellPrice = hasSellSide
+      ? round2(sellPrices.reduce((acc, p) => acc + p, 0) / sellPrices.length)
+      : null;
 
-    const medianBuyPrice = buyPrices.length ? buyPrices[Math.floor(buyPrices.length / 2)] : bestBuyPrice;
-    const medianSellPrice = sellPrices.length ? sellPrices[Math.floor(sellPrices.length / 2)] : bestSellPrice;
+    const medianBuyPrice = hasBuySide ? round2(buyPrices[Math.floor(buyPrices.length / 2)]) : null;
+    const medianSellPrice = hasSellSide
+      ? round2(sellPrices[Math.floor(sellPrices.length / 2)])
+      : null;
 
-    // Weighted averages by available USDT liquidity
-    let totalBuyVolume = 0;
-    let weightedBuySum = 0;
-    topBuyAds.forEach((ad) => {
-      totalBuyVolume += ad.availableUsdt;
-      weightedBuySum += ad.price * ad.availableUsdt;
-    });
-    const weightedBuyPrice = totalBuyVolume > 0 ? weightedBuySum / totalBuyVolume : averageBuyPrice;
+    const weightedBuyPrice = weightedAverage(topBuyAds);
+    const weightedSellPrice = weightedAverage(topSellAds);
 
-    let totalSellVolume = 0;
-    let weightedSellSum = 0;
-    topSellAds.forEach((ad) => {
-      totalSellVolume += ad.availableUsdt;
-      weightedSellSum += ad.price * ad.availableUsdt;
-    });
-    const weightedSellPrice = totalSellVolume > 0 ? weightedSellSum / totalSellVolume : averageSellPrice;
+    // A spread needs two prices. With one side missing there is no spread.
+    const spreadAbsolute =
+      bestBuyPrice !== null && bestSellPrice !== null
+        ? round2(Math.abs(bestBuyPrice - bestSellPrice))
+        : null;
+    const basePrice =
+      bestBuyPrice !== null && bestSellPrice !== null
+        ? Math.min(bestBuyPrice, bestSellPrice)
+        : null;
+    const spreadPercentage =
+      spreadAbsolute !== null && basePrice !== null && basePrice > 0
+        ? round2((spreadAbsolute / basePrice) * 100)
+        : null;
 
-    const spreadAbsolute = Math.abs(bestBuyPrice - bestSellPrice);
-    const basePrice = Math.min(bestBuyPrice, bestSellPrice);
-    const spreadPercentage = basePrice > 0 ? (spreadAbsolute / basePrice) * 100 : 0;
+    const missingSide = (side: 'BUY' | 'SELL') =>
+      `El lado ${side} no devolvio anuncios. No hay precio: la ausencia es el dato.`;
+
+    const bestBuy: Valued<number | null> = hasBuySide
+      ? { value: bestBuyPrice, provenance: 'REAL' }
+      : { value: null, provenance: 'REAL', reason: missingSide('BUY') };
+
+    const bestSell: Valued<number | null> = hasSellSide
+      ? { value: bestSellPrice, provenance: 'REAL' }
+      : { value: null, provenance: 'REAL', reason: missingSide('SELL') };
 
     const duration = Date.now() - startTime;
 
@@ -238,22 +278,26 @@ export class BinanceP2PService {
       isoDate: new Date().toISOString(),
       asset: 'USDT',
       fiat: 'VES',
-      bestBuyPrice: Number(bestBuyPrice.toFixed(2)),
-      bestSellPrice: Number(bestSellPrice.toFixed(2)),
-      averageBuyPrice: Number(averageBuyPrice.toFixed(2)),
-      averageSellPrice: Number(averageSellPrice.toFixed(2)),
-      medianBuyPrice: Number(medianBuyPrice.toFixed(2)),
-      medianSellPrice: Number(medianSellPrice.toFixed(2)),
-      weightedBuyPrice: Number(weightedBuyPrice.toFixed(2)),
-      weightedSellPrice: Number(weightedSellPrice.toFixed(2)),
-      spreadAbsolute: Number(spreadAbsolute.toFixed(2)),
-      spreadPercentage: Number(spreadPercentage.toFixed(2)),
+      bestBuyPrice,
+      bestSellPrice,
+      averageBuyPrice,
+      averageSellPrice,
+      medianBuyPrice,
+      medianSellPrice,
+      weightedBuyPrice,
+      weightedSellPrice,
+      spreadAbsolute,
+      spreadPercentage,
       topBuyAds: topBuyAds.slice(0, 10),
       topSellAds: topSellAds.slice(0, 10),
       source: 'BINANCE_P2P',
       fetchDurationMs: duration,
       status: 'LIVE',
       lastError: null,
+      bestBuy,
+      bestSell,
+      aggregatesProvenance: 'AGGREGATED',
+      orderBookProvenance: 'REAL',
     };
   }
 }
