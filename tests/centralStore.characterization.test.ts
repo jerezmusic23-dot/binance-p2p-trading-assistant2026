@@ -1,0 +1,586 @@
+/**
+ * CHARACTERIZATION TESTS - server/centralStore.ts
+ *
+ * The store is a module-level singleton that writes through StorageEngine to
+ * process.cwd()/data, so every test runs in a fresh temp cwd with a fresh
+ * module graph. start() is never called - the 6s interval stays off.
+ */
+
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { makeAdItem, makeBinanceResponse } from './helpers/fixtures.js';
+import type { AlertRule, AlertTriggerLog, HistoryRecord } from '../server/types.js';
+
+const originalCwd = process.cwd();
+let tmpDir: string;
+
+/** Reply to BUY with `buy`, to SELL with `sell`. */
+function stubBinance(buy: ReturnType<typeof makeAdItem>[], sell: ReturnType<typeof makeAdItem>[]) {
+  const mock = vi.fn(async (_url: string, init: RequestInit) => {
+    const body = JSON.parse(String(init.body));
+    return {
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      json: async () => makeBinanceResponse(body.tradeType === 'BUY' ? buy : sell),
+    } as unknown as Response;
+  });
+  vi.stubGlobal('fetch', mock);
+  return mock;
+}
+
+async function freshStore() {
+  vi.resetModules();
+  const { CentralMarketStore } = await import('../server/centralStore.js');
+  const { StorageEngine } = await import('../server/storage.js');
+  return { store: CentralMarketStore.getInstance(), StorageEngine };
+}
+
+function readData<T>(file: string): T {
+  return JSON.parse(fs.readFileSync(path.join(tmpDir, 'data', file), 'utf-8')) as T;
+}
+
+beforeEach(() => {
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'p2p-store-'));
+  process.chdir(tmpDir);
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
+  process.chdir(originalCwd);
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+describe('getInstance', () => {
+  it('returns the same singleton and initialises storage eagerly', async () => {
+    vi.resetModules();
+    const { CentralMarketStore } = await import('../server/centralStore.js');
+    expect(CentralMarketStore.getInstance()).toBe(CentralMarketStore.getInstance());
+    expect(fs.existsSync(path.join(tmpDir, 'data', 'alerts.json'))).toBe(true);
+  });
+});
+
+describe('getCurrentSnapshot before any poll', () => {
+  it('reports OFFLINE with the sentinel age of 9999s', async () => {
+    const { store } = await freshStore();
+    expect(store.getCurrentSnapshot()).toEqual({
+      snapshot: null,
+      ageSeconds: 9999,
+      effectiveStatus: 'OFFLINE',
+    });
+  });
+
+  it('returns null analysis and null projections without a snapshot', async () => {
+    const { store } = await freshStore();
+    expect(store.getMarketAnalysis()).toBeNull();
+    expect(store.getMarketProjections()).toBeNull();
+  });
+});
+
+describe('pollMarket - success path', () => {
+  it('stores a LIVE snapshot and appends exactly one history record', async () => {
+    stubBinance(
+      [makeAdItem({ advNo: 'b1', price: '918.00', nickName: 'CompradorLider' })],
+      [makeAdItem({ advNo: 's1', price: '921.00', nickName: 'VendedorLider' })]
+    );
+    const { store } = await freshStore();
+
+    const snapshot = await store.pollMarket();
+    expect(snapshot?.status).toBe('LIVE');
+    expect(snapshot?.bestBuyPrice).toBe(918);
+    expect(snapshot?.bestSellPrice).toBe(921);
+
+    const history = readData<HistoryRecord[]>('market_history.json');
+    expect(history).toHaveLength(1);
+    expect(history[0]).toMatchObject({
+      buyPrice: 918,
+      sellPrice: 921,
+      bestBuyMerchant: 'CompradorLider',
+      bestSellMerchant: 'VendedorLider',
+      activeBuyAds: 1,
+      activeSellAds: 1,
+      source: 'BINANCE_P2P',
+    });
+    expect(history[0].id).toBe(`tick-${history[0].timestamp}`);
+  });
+
+  it('BUG: the history record drops the entire order book', async () => {
+    // Depth loss #3 (audit) - the single most damaging gap for projections.
+    // 10 ads per side are fetched; two prices survive.
+    const buy = Array.from({ length: 10 }, (_, i) =>
+      makeAdItem({ advNo: `b${i}`, price: String(918 + i), tradable: '500' })
+    );
+    stubBinance(buy, [makeAdItem({ advNo: 's1', price: '930.00' })]);
+    const { store } = await freshStore();
+
+    const snapshot = await store.pollMarket();
+    expect(snapshot?.topBuyAds).toHaveLength(10);
+
+    const [record] = readData<HistoryRecord[]>('market_history.json');
+    expect(Object.keys(record).sort()).toEqual(
+      [
+        'activeBuyAds',
+        'activeSellAds',
+        'bestBuyMerchant',
+        'bestSellMerchant',
+        'buyPrice',
+        'dateStr',
+        'hour',
+        'id',
+        'sellPrice',
+        'source',
+        'spreadPct',
+        'timestamp',
+      ].sort()
+    );
+    // No liquidity, no per-ad prices, no payment methods, no merchant ratings.
+    expect(record).not.toHaveProperty('topBuyAds');
+    expect(record).not.toHaveProperty('availableUsdt');
+  });
+
+  it('BUG: filterBank and filterAmount are declared but never written', async () => {
+    // Audit B16 - the history has no bank or amount dimension at all.
+    stubBinance([makeAdItem({ price: '918.00' })], [makeAdItem({ price: '921.00' })]);
+    const { store } = await freshStore();
+    await store.pollMarket();
+
+    const [record] = readData<HistoryRecord[]>('market_history.json');
+    expect(record.filterBank).toBeUndefined();
+    expect(record.filterAmount).toBeUndefined();
+  });
+
+  it('BUG: dateStr is UTC while hour is VET, so the two disagree', async () => {
+    // Audit B17: grouping by dateStr and grouping by hour give different days.
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.parse('2026-08-23T02:00:00Z')); // 22:00 VET on Aug 22
+    stubBinance([makeAdItem({ price: '918.00' })], [makeAdItem({ price: '921.00' })]);
+    const { store } = await freshStore();
+    await store.pollMarket();
+
+    const [record] = readData<HistoryRecord[]>('market_history.json');
+    expect(record.dateStr).toBe('2026-08-23T02:00:00.000Z'); // 23rd in UTC
+    expect(record.hour).toBe(22); // 22:00 of the 22nd in VET
+  });
+
+  it('guards against re-entrant polling', async () => {
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const mock = vi.fn(async (_url: string, init: RequestInit) => {
+      await gate;
+      const body = JSON.parse(String(init.body));
+      return {
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        json: async () => makeBinanceResponse([makeAdItem({ price: body.tradeType === 'BUY' ? '918.00' : '921.00' })]),
+      } as unknown as Response;
+    });
+    vi.stubGlobal('fetch', mock);
+    const { store } = await freshStore();
+
+    const first = store.pollMarket();
+    const second = store.pollMarket(); // must short-circuit
+    release?.();
+    await Promise.all([first, second]);
+
+    expect(mock).toHaveBeenCalledTimes(2); // one BUY + one SELL, not four
+    expect(readData<HistoryRecord[]>('market_history.json')).toHaveLength(1);
+  });
+});
+
+describe('pollMarket - failure path', () => {
+  it('returns a zeroed OFFLINE snapshot when nothing valid was ever seen', async () => {
+    vi.stubGlobal('fetch', async () => {
+      throw new Error('Binance unreachable');
+    });
+    const { store } = await freshStore();
+
+    const snapshot = await store.pollMarket();
+    // Was: a snapshot full of zeros, indistinguishable from a 0.00 VES market.
+    expect(snapshot).toMatchObject({
+      status: 'OFFLINE',
+      bestBuyPrice: null,
+      bestSellPrice: null,
+      spreadPercentage: null,
+      topBuyAds: [],
+      topSellAds: [],
+      lastError: 'Binance unreachable',
+    });
+  });
+
+  it('does NOT append a history record on failure', async () => {
+    vi.stubGlobal('fetch', async () => {
+      throw new Error('boom');
+    });
+    const { store } = await freshStore();
+    await store.pollMarket();
+    expect(readData<HistoryRecord[]>('market_history.json')).toEqual([]);
+  });
+
+  it('degrades to STALE keeping the last valid price and its original timestamp', async () => {
+    stubBinance([makeAdItem({ price: '918.00' })], [makeAdItem({ price: '921.00' })]);
+    const { store } = await freshStore();
+    const good = await store.pollMarket();
+
+    vi.stubGlobal('fetch', async () => {
+      throw new Error('network down');
+    });
+    const stale = await store.pollMarket();
+
+    expect(stale?.status).toBe('STALE');
+    expect(stale?.bestBuyPrice).toBe(918);
+    expect(stale?.timestamp).toBe(good?.timestamp);
+    expect(stale?.lastError).toBe('network down');
+    expect(readData<HistoryRecord[]>('market_history.json')).toHaveLength(1);
+  });
+
+  it('rejects a non-positive price as a validation failure', async () => {
+    // normalizeAds already drops price<=0, so both sides come back empty and
+    // fetchFullMarketSnapshot throws before validation is reached.
+    stubBinance([makeAdItem({ price: '0' })], [makeAdItem({ price: '0' })]);
+    const { store } = await freshStore();
+    const snapshot = await store.pollMarket();
+    expect(snapshot?.status).toBe('OFFLINE');
+    expect(snapshot?.lastError).toContain('No active P2P ads found');
+  });
+});
+
+describe('snapshot ageing', () => {
+  it('flips LIVE to STALE once the snapshot is older than 35 seconds', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.parse('2026-08-23T16:00:00Z'));
+    stubBinance([makeAdItem({ price: '918.00' })], [makeAdItem({ price: '921.00' })]);
+    const { store } = await freshStore();
+    await store.pollMarket();
+
+    expect(store.getCurrentSnapshot().effectiveStatus).toBe('LIVE');
+    vi.setSystemTime(Date.parse('2026-08-23T16:00:36Z'));
+    const aged = store.getCurrentSnapshot();
+    expect(aged.ageSeconds).toBe(36);
+    expect(aged.effectiveStatus).toBe('STALE');
+  });
+});
+
+describe('evaluateAlerts', () => {
+  async function pollWithSpread(spreadBuy: string, spreadSell: string) {
+    stubBinance([makeAdItem({ price: spreadBuy })], [makeAdItem({ price: spreadSell })]);
+    return freshStore();
+  }
+
+  it('fires SPREAD_ABOVE and records a trigger log', async () => {
+    const { store, StorageEngine } = await pollWithSpread('918.00', '941.00'); // 2.51%
+    StorageEngine.deleteAlert('rule-volatility-spike');
+    await store.pollMarket();
+
+    const triggers = readData<AlertTriggerLog[]>('alert_triggers.json');
+    expect(triggers).toHaveLength(1);
+    expect(triggers[0].ruleId).toBe('rule-spread-high');
+    expect(triggers[0].message).toContain('2.51%');
+  });
+
+  it('applies the hardcoded 5-minute cooldown per rule', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.parse('2026-08-23T16:00:00Z'));
+    const { store, StorageEngine } = await pollWithSpread('918.00', '941.00');
+    StorageEngine.deleteAlert('rule-volatility-spike');
+
+    await store.pollMarket();
+    await store.pollMarket();
+    expect(readData<AlertTriggerLog[]>('alert_triggers.json')).toHaveLength(1);
+
+    vi.setSystemTime(Date.parse('2026-08-23T16:05:01Z'));
+    await store.pollMarket();
+    expect(readData<AlertTriggerLog[]>('alert_triggers.json')).toHaveLength(2);
+  });
+
+  it('does not fire when the spread stays under the threshold', async () => {
+    const { store } = await pollWithSpread('918.00', '921.00'); // 0.33%
+    await store.pollMarket();
+    expect(fs.existsSync(path.join(tmpDir, 'data', 'alert_triggers.json'))).toBe(false);
+  });
+
+  it('BUG: VOLATILITY_SPIKE actually measures the spread, not volatility', async () => {
+    // Audit B14: the rule compares snapshot.spreadPercentage > targetValue*1.5.
+    // A wide but perfectly stable spread reports a "volatility spike".
+    const { store, StorageEngine } = await pollWithSpread('918.00', '941.00'); // 2.51% > 1.5*1.5
+    StorageEngine.deleteAlert('rule-spread-high');
+    await store.pollMarket();
+
+    const triggers = readData<AlertTriggerLog[]>('alert_triggers.json');
+    expect(triggers).toHaveLength(1);
+    expect(triggers[0].ruleId).toBe('rule-volatility-spike');
+    expect(triggers[0].message).toContain('Alta volatilidad');
+  });
+
+  it('BUG: TREND_CHANGE is a declared condition with no implementation', async () => {
+    // Audit B15: no `case` in the switch, so such a rule can never fire.
+    const { store, StorageEngine } = await pollWithSpread('918.00', '941.00');
+    StorageEngine.deleteAlert('rule-spread-high');
+    StorageEngine.deleteAlert('rule-volatility-spike');
+    const rule: AlertRule = {
+      id: 'trend-rule',
+      name: 'Cambio de tendencia',
+      condition: 'TREND_CHANGE',
+      targetValue: 0,
+      targetSide: 'BUY',
+      enabled: true,
+      createdAt: 1,
+    };
+    StorageEngine.saveAlert(rule);
+
+    await store.pollMarket();
+    expect(fs.existsSync(path.join(tmpDir, 'data', 'alert_triggers.json'))).toBe(false);
+  });
+
+  it('skips disabled rules', async () => {
+    const { store, StorageEngine } = await pollWithSpread('918.00', '941.00');
+    for (const rule of StorageEngine.getAlerts()) {
+      StorageEngine.saveAlert({ ...rule, enabled: false });
+    }
+    await store.pollMarket();
+    expect(fs.existsSync(path.join(tmpDir, 'data', 'alert_triggers.json'))).toBe(false);
+  });
+});
+
+describe('analysis / projections window', () => {
+  it('BUG: reads only the newest 100 history records (10 minutes at 6s)', async () => {
+    // Audit B7: daily floor/ceiling and +24H horizons are derived from a
+    // 10-minute window.
+    stubBinance([makeAdItem({ price: '918.00' })], [makeAdItem({ price: '921.00' })]);
+    const { store, StorageEngine } = await freshStore();
+    const spy = vi.spyOn(StorageEngine, 'getHistory');
+
+    await store.pollMarket();
+    store.getMarketProjections();
+
+    expect(spy).toHaveBeenCalledWith(100);
+  });
+
+  it('runs the backtest over the UNBOUNDED history', async () => {
+    stubBinance([makeAdItem({ price: '918.00' })], [makeAdItem({ price: '921.00' })]);
+    const { store, StorageEngine } = await freshStore();
+    const spy = vi.spyOn(StorageEngine, 'getHistory');
+
+    const metrics = store.getBacktestMetrics();
+    expect(spy).toHaveBeenCalledWith();
+    expect(metrics.hasSufficientData).toBe(false); // empty store
+  });
+});
+
+describe('provenance (phase C1)', () => {
+  it('marks a bank/amount cell REAL when an ad really covers that tier', async () => {
+    // Default fixture ad: min 1000, max 50000 VES.
+    stubBinance([makeAdItem({ price: '918.00' })], [makeAdItem({ price: '921.00' })]);
+    const { store } = await freshStore();
+
+    const matrix = await store.getBankMatrix('SELL', true);
+    const cell = matrix.rows[0].ratesByAmount['10K'];
+
+    expect(cell.provenance).toBe('REAL');
+    expect(cell.provenanceReason).toBeUndefined();
+  });
+
+  it('reports null for a tier no ad can cover, never another tier price', async () => {
+    // 100000 VES exceeds the ad's 50000 max. C2 removed the fallback that
+    // published the bank's top ad as if it were the rate for this amount.
+    stubBinance([makeAdItem({ price: '918.00' })], [makeAdItem({ price: '921.00' })]);
+    const { store } = await freshStore();
+
+    const matrix = await store.getBankMatrix('SELL', true);
+    const cell = matrix.rows[0].ratesByAmount['100K'];
+
+    expect(cell.leaderPrice).toBeNull();
+    expect(cell.suggestedPrice).toBeNull();
+    expect(cell.spreadPct).toBeNull();
+    expect(cell.adCount).toBe(0);
+    expect(cell.provenance).toBe('REAL');
+    expect(cell.provenanceReason).toMatch(/Ningun anuncio de venta .* cubre 100000/i);
+
+    // The tier that IS covered still reports a real rate.
+    expect(matrix.rows[0].ratesByAmount['10K'].leaderPrice).toBe(921);
+  });
+
+  it('marks an empty tier REAL - an absent rate is an honest observation', async () => {
+    stubBinance([], [makeAdItem({ price: '921.00' })]);
+    const { store } = await freshStore();
+
+    const matrix = await store.getBankMatrix('BUY', true);
+    const cell = matrix.rows[0].ratesByAmount['10K'];
+
+    expect(cell.leaderPrice).toBeNull();
+    expect(cell.provenance).toBe('REAL');
+  });
+
+  it('flags an unfiltered snapshot served in place of a filtered one', async () => {
+    // First poll succeeds so a central snapshot exists to fall back to.
+    stubBinance([makeAdItem({ price: '918.00' })], [makeAdItem({ price: '921.00' })]);
+    const { store } = await freshStore();
+    await store.pollMarket();
+
+    // Now the filtered query fails.
+    vi.stubGlobal('fetch', async () => {
+      throw new Error('bank query failed');
+    });
+    const filtered = await store.getFilteredSnapshot('BANESCO', 50000);
+
+    expect(filtered.snapshot?.bestBuyPrice).toBe(918); // unfiltered data
+    expect(filtered.snapshot?.filterFallbackReason).toMatch(/TODOS los bancos/i);
+  });
+
+  it('does not flag a snapshot whose filter was honoured', async () => {
+    stubBinance([makeAdItem({ price: '918.00' })], [makeAdItem({ price: '921.00' })]);
+    const { store } = await freshStore();
+
+    const filtered = await store.getFilteredSnapshot('BANESCO', 50000);
+    expect(filtered.snapshot?.filterFallbackReason).toBeUndefined();
+  });
+
+  it('reports the never-connected OFFLINE snapshot as null, not as 0', async () => {
+    vi.stubGlobal('fetch', async () => {
+      throw new Error('Binance unreachable');
+    });
+    const { store } = await freshStore();
+    const snapshot = await store.pollMarket();
+
+    expect(snapshot?.bestBuyPrice).toBeNull();
+    expect(snapshot?.bestBuy.value).toBeNull();
+    expect(snapshot?.bestBuy.provenance).toBe('REAL');
+    expect(snapshot?.bestBuy.reason).toMatch(/No se ha obtenido ningun snapshot valido/i);
+  });
+});
+
+describe('C2 - null contract', () => {
+  it('does NOT persist a history record when one side of the book is empty', async () => {
+    // Decision (b): the history only stores complete observations, so
+    // HistoryRecord and storage.ts stay unchanged.
+    stubBinance([], [makeAdItem({ price: '921.00' })]);
+    const { store } = await freshStore();
+
+    const snapshot = await store.pollMarket();
+    expect(snapshot?.bestSellPrice).toBe(921);
+    expect(snapshot?.bestBuyPrice).toBeNull();
+
+    expect(readData<HistoryRecord[]>('market_history.json')).toEqual([]);
+  });
+
+  it('persists again as soon as both sides are back', async () => {
+    stubBinance([], [makeAdItem({ price: '921.00' })]);
+    const { store } = await freshStore();
+    await store.pollMarket();
+    expect(readData<HistoryRecord[]>('market_history.json')).toHaveLength(0);
+
+    stubBinance([makeAdItem({ price: '918.00' })], [makeAdItem({ price: '921.00' })]);
+    await store.pollMarket();
+
+    const history = readData<HistoryRecord[]>('market_history.json');
+    expect(history).toHaveLength(1);
+    expect(history[0]).toMatchObject({ buyPrice: 918, sellPrice: 921 });
+  });
+
+  it('never writes a null price into the persisted schema', async () => {
+    stubBinance([makeAdItem({ price: '918.00' })], []);
+    const { store } = await freshStore();
+    await store.pollMarket();
+
+    for (const record of readData<HistoryRecord[]>('market_history.json')) {
+      expect(record.buyPrice).not.toBeNull();
+      expect(record.sellPrice).not.toBeNull();
+      expect(record.spreadPct).not.toBeNull();
+    }
+  });
+
+  it('does not fire a BELOW alert when the price is missing', async () => {
+    // Before C2 a missing side surfaced as 0, so every BELOW rule fired.
+    stubBinance([], [makeAdItem({ price: '921.00' })]);
+    const { store, StorageEngine } = await freshStore();
+    StorageEngine.deleteAlert('rule-spread-high');
+    StorageEngine.deleteAlert('rule-volatility-spike');
+    StorageEngine.saveAlert({
+      id: 'below-rule',
+      name: 'Precio por debajo de 900',
+      condition: 'BELOW',
+      targetValue: 900,
+      targetSide: 'BUY',
+      enabled: true,
+      createdAt: 1,
+    } satisfies AlertRule);
+
+    await store.pollMarket();
+    expect(fs.existsSync(path.join(tmpDir, 'data', 'alert_triggers.json'))).toBe(false);
+  });
+
+  it('does not fire a spread alert when the spread cannot be computed', async () => {
+    stubBinance([], [makeAdItem({ price: '921.00' })]);
+    const { store } = await freshStore();
+
+    await store.pollMarket();
+    expect(fs.existsSync(path.join(tmpDir, 'data', 'alert_triggers.json'))).toBe(false);
+  });
+
+  it('still fires a BELOW alert when the price does exist', async () => {
+    stubBinance([makeAdItem({ price: '890.00' })], [makeAdItem({ price: '895.00' })]);
+    const { store, StorageEngine } = await freshStore();
+    StorageEngine.deleteAlert('rule-spread-high');
+    StorageEngine.deleteAlert('rule-volatility-spike');
+    StorageEngine.saveAlert({
+      id: 'below-rule',
+      name: 'Precio por debajo de 900',
+      condition: 'BELOW',
+      targetValue: 900,
+      targetSide: 'BUY',
+      enabled: true,
+      createdAt: 1,
+    } satisfies AlertRule);
+
+    await store.pollMarket();
+    const triggers = readData<AlertTriggerLog[]>('alert_triggers.json');
+    expect(triggers).toHaveLength(1);
+    expect(triggers[0].price).toBe(890);
+  });
+});
+
+describe('C2 - LIVE / STALE / OFFLINE', () => {
+  it('reports LIVE for a fresh snapshot', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.parse('2026-08-23T16:00:00Z'));
+    stubBinance([makeAdItem({ price: '918.00' })], [makeAdItem({ price: '921.00' })]);
+    const { store } = await freshStore();
+    await store.pollMarket();
+
+    const current = store.getCurrentSnapshot();
+    expect(current.effectiveStatus).toBe('LIVE');
+    expect(current.ageSeconds).toBe(0);
+  });
+
+  it('reports STALE with a real age past the 35s threshold', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.parse('2026-08-23T16:00:00Z'));
+    stubBinance([makeAdItem({ price: '918.00' })], [makeAdItem({ price: '921.00' })]);
+    const { store } = await freshStore();
+    await store.pollMarket();
+
+    vi.setSystemTime(Date.parse('2026-08-23T16:02:00Z'));
+    const current = store.getCurrentSnapshot();
+    expect(current.effectiveStatus).toBe('STALE');
+    expect(current.ageSeconds).toBe(120);
+    // C.4(ii): the last good value is kept, but never as a live reading.
+    expect(current.snapshot?.bestBuyPrice).toBe(918);
+  });
+
+  it('reports OFFLINE with null prices when nothing was ever captured', async () => {
+    vi.stubGlobal('fetch', async () => {
+      throw new Error('down');
+    });
+    const { store } = await freshStore();
+    await store.pollMarket();
+
+    const current = store.getCurrentSnapshot();
+    expect(current.effectiveStatus).toBe('OFFLINE');
+    expect(current.snapshot?.bestBuyPrice).toBeNull();
+  });
+});

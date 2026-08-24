@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { MarketSnapshot, NormalizedAd } from './types';
 import { BookOpen, ArrowUpRight, ArrowDownRight } from 'lucide-react';
+import { fmt } from './format';
 
 interface OrderBookViewProps {
   snapshot: MarketSnapshot | null;
@@ -121,25 +122,25 @@ export const OrderBookView: React.FC<OrderBookViewProps> = ({ snapshot }) => {
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-4 text-xs font-mono">
           <div className="bg-[#111417] p-3 rounded border border-[#2b2f36]">
             <span className="text-[10px] text-[#848e9c] uppercase block">Promedio Compra</span>
-            <span className="text-sm font-bold text-[#02c076]">{snapshot.averageBuyPrice.toFixed(2)} VES</span>
+            <span className="text-sm font-bold text-[#02c076]">{fmt(snapshot.averageBuyPrice, 2)} VES</span>
             <span className="text-[9px] text-[#848e9c] block mt-0.5">Tasa agregada</span>
           </div>
 
           <div className="bg-[#111417] p-3 rounded border border-[#2b2f36]">
             <span className="text-[10px] text-[#848e9c] uppercase block">Promedio Venta</span>
-            <span className="text-sm font-bold text-[#FCD535]">{snapshot.averageSellPrice.toFixed(2)} VES</span>
+            <span className="text-sm font-bold text-[#FCD535]">{fmt(snapshot.averageSellPrice, 2)} VES</span>
             <span className="text-[9px] text-[#848e9c] block mt-0.5">Tasa agregada</span>
           </div>
 
           <div className="bg-[#111417] p-3 rounded border border-[#2b2f36]">
             <span className="text-[10px] text-[#848e9c] uppercase block">Mediana Compra</span>
-            <span className="text-sm font-bold text-[#02c076]">{snapshot.medianBuyPrice.toFixed(2)} VES</span>
+            <span className="text-sm font-bold text-[#02c076]">{fmt(snapshot.medianBuyPrice, 2)} VES</span>
             <span className="text-[9px] text-[#848e9c] block mt-0.5">Tasa agregada</span>
           </div>
 
           <div className="bg-[#111417] p-3 rounded border border-[#2b2f36]">
             <span className="text-[10px] text-[#848e9c] uppercase block">Ponderado Liquidez</span>
-            <span className="text-sm font-bold text-[#e0e0e0]">{snapshot.weightedBuyPrice.toFixed(2)} VES</span>
+            <span className="text-sm font-bold text-[#e0e0e0]">{fmt(snapshot.weightedBuyPrice, 2)} VES</span>
             <span className="text-[9px] text-[#848e9c] block mt-0.5">Volumen USDT</span>
           </div>
         </div>
@@ -156,7 +157,7 @@ export const OrderBookView: React.FC<OrderBookViewProps> = ({ snapshot }) => {
                 <h3 className="font-bold text-[#e0e0e0] text-xs uppercase tracking-wider">Anuncios de Recompra (Tú pagas VES)</h3>
               </div>
               <span className="text-xs font-mono font-bold text-[#02c076]">
-                Mejor: {snapshot.bestBuyPrice.toFixed(2)} VES
+                Mejor: {fmt(snapshot.bestBuyPrice, 2)} VES
               </span>
             </div>
 
@@ -175,7 +176,7 @@ export const OrderBookView: React.FC<OrderBookViewProps> = ({ snapshot }) => {
                 <h3 className="font-bold text-[#e0e0e0] text-xs uppercase tracking-wider">Anuncios de Venta (Tú recibes VES)</h3>
               </div>
               <span className="text-xs font-mono font-bold text-[#FCD535]">
-                Mejor: {snapshot.bestSellPrice.toFixed(2)} VES
+                Mejor: {fmt(snapshot.bestSellPrice, 2)} VES
               </span>
             </div>
 

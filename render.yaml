@@ -4,6 +4,15 @@ services:
     runtime: node
     buildCommand: npm install && npm run build
     startCommand: npm run start
+    # Without a disk the filesystem is ephemeral: every deploy, restart or
+    # container recycle wipes the captured market history. StorageEngine reads
+    # DATA_DIR, so the history now lives on the mounted volume instead.
+    disk:
+      name: market-data
+      mountPath: /var/data
+      sizeGB: 1
     envVars:
       - key: NODE_ENV
         value: production
+      - key: DATA_DIR
+        value: /var/data
