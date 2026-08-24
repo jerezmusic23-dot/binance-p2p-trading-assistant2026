@@ -188,11 +188,15 @@ describe('normalizeAds', () => {
       minAmountVes: 2000,
       maxAmountVes: 80000,
       availableUsdt: 250,
+      // FASE 4: additive. Distinguishes "no volume" from "volume unknown".
+      availableUsdtReported: 250,
       merchantName: 'Comerciante',
       userType: 'merchant',
       ordersCount: 120,
       finishRate: 0.98,
       paymentMethods: ['Banesco'],
+      // FASE 3: additive. The canonical code is kept alongside the label.
+      paymentOptions: [{ payType: 'Banesco', tradeMethodName: 'Banesco' }],
     });
   });
 
@@ -354,5 +358,150 @@ describe('fetchFullMarketSnapshot', () => {
     expect(snap.bestBuyPrice).toBe(918);
     // Zero total weight makes the weighted average undefined, not zero.
     expect(snap.weightedBuyPrice).toBeNull();
+  });
+});
+
+describe('FASE 2 - medians agree across both sides', () => {
+  /** Four ads at the given prices, all otherwise identical. */
+  const adsAt = (prices: number[]) =>
+    prices.map((p, i) => makeAdItem({ advNo: `a${i}`, price: p.toFixed(2), tradable: '100' }));
+
+  function stubSides(buy: number[], sell: number[]) {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init: RequestInit) => {
+        const body = JSON.parse(String(init.body));
+        return {
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+          json: async () =>
+            makeBinanceResponse(adsAt(body.tradeType === 'BUY' ? buy : sell)),
+        } as unknown as Response;
+      })
+    );
+  }
+
+  it('averages the two middle prices for an even number of ads', async () => {
+    // Was: BUY sorted ascending -> [floor(4/2)] = 3rd element = 923.
+    stubSides([921, 922, 923, 924], [921, 922, 923, 924]);
+    const snap = await BinanceP2PService.fetchFullMarketSnapshot();
+
+    expect(snap.medianBuyPrice).toBe(922.5);
+    expect(snap.medianSellPrice).toBe(922.5);
+  });
+
+  it('gives BOTH sides the same median for the same prices', async () => {
+    // Was: BUY ascending gave the upper-middle, SELL descending the
+    // lower-middle, so identical books reported different medians.
+    stubSides([921, 922, 923, 924], [924, 923, 922, 921]);
+    const snap = await BinanceP2PService.fetchFullMarketSnapshot();
+
+    expect(snap.medianBuyPrice).toBe(snap.medianSellPrice);
+    expect(snap.medianBuyPrice).toBe(922.5);
+  });
+
+  it('returns the middle price for an odd number of ads', async () => {
+    stubSides([921, 922, 923], [921, 922, 923]);
+    const snap = await BinanceP2PService.fetchFullMarketSnapshot();
+    expect(snap.medianBuyPrice).toBe(922);
+  });
+
+  it('the median ignores an extreme ad that dominates the extremes', async () => {
+    // The production incident, end to end through the capture layer.
+    const level = Array.from({ length: 19 }, (_, i) => 921 + i * 0.05);
+    stubSides(level, [...level, 980]);
+    const snap = await BinanceP2PService.fetchFullMarketSnapshot();
+
+    expect(snap.bestSellPrice).toBe(980); // raw extreme preserved for auditing
+    expect(snap.medianSellPrice).toBeCloseTo(921.48, 1); // strategic level intact
+    expect(snap.medianSellPrice! - snap.medianBuyPrice!).toBeLessThan(0.1);
+  });
+
+  it('keeps the aggregates null when a side is empty', async () => {
+    stubSides([], [921, 922]);
+    const snap = await BinanceP2PService.fetchFullMarketSnapshot();
+
+    expect(snap.medianBuyPrice).toBeNull();
+    expect(snap.averageBuyPrice).toBeNull();
+    expect(snap.medianSellPrice).toBe(921.5);
+  });
+});
+
+describe('FASE 2 - strategic prices', () => {
+  const adsAt = (prices: number[]) =>
+    prices.map((p, i) => makeAdItem({ advNo: `a${i}`, price: p.toFixed(2), tradable: '100' }));
+
+  function stubSides(buy: number[], sell: number[]) {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init: RequestInit) => {
+        const body = JSON.parse(String(init.body));
+        return {
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+          json: async () => makeBinanceResponse(adsAt(body.tradeType === 'BUY' ? buy : sell)),
+        } as unknown as Response;
+      })
+    );
+  }
+
+  it('takes RECOMPRA from the BUY side and VENTA from the SELL side', async () => {
+    stubSides([921.0, 921.4, 921.8], [922.0, 922.4, 922.8]);
+    const snap = await BinanceP2PService.fetchFullMarketSnapshot();
+
+    expect(snap.strategicBuyPrice).toBe(921.4);
+    expect(snap.strategicSellPrice).toBe(922.4);
+    expect(snap.strategicProvenance).toBe('STRATEGIC');
+    expect(snap.strategicReason).toBeNull();
+  });
+
+  it('divides by the repurchase price, never by whichever is smaller', async () => {
+    // A losing market: venta 918 under recompra 941. The raw formula picks
+    // min() as the denominator and takes the absolute value; the strategic
+    // one keeps the sign and always divides by the repurchase price.
+    stubSides([941.0], [918.0]);
+    const snap = await BinanceP2PService.fetchFullMarketSnapshot();
+
+    expect(snap.strategicSpreadPct).toBeCloseTo(((918 - 941) / 941) * 100, 2);
+    expect(snap.strategicSpreadPct!).toBeLessThan(0);
+  });
+
+  it('says which side is missing instead of producing a number', async () => {
+    stubSides([], [921.0, 921.5]);
+    const snap = await BinanceP2PService.fetchFullMarketSnapshot();
+
+    expect(snap.strategicBuyPrice).toBeNull();
+    expect(snap.strategicSpreadPct).toBeNull();
+    expect(snap.strategicReason).toContain('BUY');
+  });
+});
+
+describe('FASE 4 - liquidity absence survives normalization', () => {
+  const normalizeOne = (o: Parameters<typeof makeAdItem>[0]) =>
+    BinanceP2PService.normalizeAds([makeAdItem(o)])[0];
+
+  it('reports a published volume as published', () => {
+    const ad = normalizeOne({ tradable: '250' });
+    expect(ad.availableUsdtReported).toBe(250);
+    expect(ad.availableUsdt).toBe(250);
+  });
+
+  it('reports a published zero as zero, not as absent', () => {
+    const ad = normalizeOne({ tradable: '0', surplus: '0' });
+    expect(ad.availableUsdtReported).toBe(0);
+  });
+
+  it('reports an unpublished volume as null, not as zero', () => {
+    // The old `parseFloat(...) || 0` mapped this onto 0, making "unknown"
+    // indistinguishable from "none".
+    const ad = normalizeOne({ tradable: '', surplus: '' });
+    expect(ad.availableUsdtReported).toBeNull();
+    expect(ad.availableUsdt).toBe(0); // compatibility field, unchanged
+  });
+
+  it('falls back to surplusAmount when tradableQuantity is absent', () => {
+    expect(normalizeOne({ tradable: '', surplus: '77' }).availableUsdtReported).toBe(77);
   });
 });

@@ -90,6 +90,21 @@ export class ProjectionEngine {
     snapshot: MarketSnapshot,
     history: HistoryRecord[]
   ): MarketAnalysis {
+    /*
+     * PENDING - deliberately still RAW, and NOT substituted blindly.
+     *
+     * Classification: this is a MARKET analysis, so it should read
+     * strategicBuyPrice. It cannot yet, because `history` stores buyPrice =
+     * bestBuyPrice, the RAW minimum. Feeding a strategic median as the latest
+     * point of a series of raw minima would offset the last observation by
+     * the gap between them (~2.4 VES in the observed book) and manufacture a
+     * momentum signal out of a change of definition.
+     *
+     * The fix is to make HistoryRecord carry the strategic prices for NEW
+     * records (calculationVersion 'v2-strategic'; absent = v1), leaving old
+     * records untouched, and then switch both the series and this anchor
+     * together. That belongs to the history phase, not here.
+     */
     const buyPrices = history.map((h) => h.buyPrice).filter((p) => p > 0);
     const currentPrice = snapshot.bestBuyPrice;
     const dataWindow = this.describeWindow(history);
@@ -314,6 +329,7 @@ export class ProjectionEngine {
     history: HistoryRecord[],
     analysis: MarketAnalysis
   ): MarketProjections {
+    // PENDING - RAW anchor, same history-series dependency as analyzeMarket.
     const currentBuy = snapshot.bestBuyPrice;
     const currentSell = snapshot.bestSellPrice;
     const currentVetHour = this.getVenezuelaHour();
@@ -536,9 +552,18 @@ export class ProjectionEngine {
       riskLevel = 'ALTO';
       riskFactors.push('Elevada dispersión de precios en anuncios P2P recientes.');
     }
-    if (snapshot.spreadPercentage !== null && snapshot.spreadPercentage > 1.8) {
+    /*
+     * STRATEGIC, not RAW.
+     *
+     * spreadPercentage is |max(SELL) - min(BUY)| over the whole book: a single
+     * distant ad pushed it to 6.64% while the market sat at 0.14%, and this
+     * branch then declared a wide spread and higher friction that did not
+     * exist. Friction is a property of the market level, so the market level
+     * is what it must read.
+     */
+    if (snapshot.strategicSpreadPct !== null && snapshot.strategicSpreadPct > 1.8) {
       riskFactors.push(
-        `Spread amplio (${snapshot.spreadPercentage.toFixed(2)}%): mayor costo de fricción.`
+        `Spread amplio (${snapshot.strategicSpreadPct.toFixed(2)}%): mayor costo de fricción.`
       );
     }
     if (orderBookPressure.sellPressurePct !== null && orderBookPressure.sellPressurePct > 70) {
@@ -572,9 +597,11 @@ export class ProjectionEngine {
         direction: analysis.trend,
         confidencePct,
         // C2: no 1.2% artificial floor. The real expected spread, or null.
+        // STRATEGIC: projecting the market's expected spread from a raw
+        // extreme projected an outlier forward, not the market.
         spreadMaxExpected:
-          snapshot.spreadPercentage !== null
-            ? Number((snapshot.spreadPercentage * 1.15).toFixed(2))
+          snapshot.strategicSpreadPct !== null
+            ? Number((snapshot.strategicSpreadPct * 1.15).toFixed(2))
             : null,
         reasons: analysis.reasons,
       },
@@ -597,6 +624,13 @@ export class ProjectionEngine {
     ceiling: number | null,
     currentVetHour: number
   ): MerchantDecisionAdvice {
+    /*
+     * PENDING - target classification is OPPORTUNITY, not STRATEGIC: this is
+     * advice about an operation, so it should read the best executable
+     * quotes. The function has no opportunity input yet and its signature is
+     * part of the current contract, so the change waits for the wiring rather
+     * than being guessed at here.
+     */
     const currentBuy = snapshot.bestBuyPrice;
     const currentSell = snapshot.bestSellPrice;
 
@@ -715,6 +749,7 @@ export class ProjectionEngine {
       20: '8 PM',
     };
 
+    // PENDING - RAW anchor on a RAW history series, consistent as it stands.
     const currentBuy = snapshot.bestBuyPrice;
     const currentSell = snapshot.bestSellPrice;
 

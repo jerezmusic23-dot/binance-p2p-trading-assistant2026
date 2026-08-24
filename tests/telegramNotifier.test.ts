@@ -128,7 +128,7 @@ describe('TEST 1 - configured: the alert is sent', () => {
     const notifier = new TelegramNotifier(config());
 
     const result = await notifier.notifyAlert(makeTrigger(), spreadRule, makeSnapshot({
-      spreadPercentage: 6.52,
+      strategicSpreadPct: 6.52,
     }));
 
     expect(result.outcome).toBe('SENT');
@@ -435,11 +435,11 @@ describe('message formatting', () => {
     const text = formatAlertMessage(
       makeTrigger(),
       spreadRule,
-      makeSnapshot({ spreadPercentage: 6.52 })
+      makeSnapshot({ strategicSpreadPct: 6.52 })
     );
 
     expect(text).toContain('ALERTA P2P');
-    expect(text).toContain('Spread: <b>6.52%</b>');
+    expect(text).toContain('Spread estratégico: <b>6.52%</b>');
     expect(text).toContain('Umbral: 2.00%');
     expect(text).toContain('Mercado: USDT/VES');
     expect(text).toContain('Estado: ACTIVADO');
@@ -452,11 +452,11 @@ describe('message formatting', () => {
     const text = formatAlertMessage(
       makeTrigger({ message: 'Alta volatilidad detectada...' }),
       volatilityRule,
-      makeSnapshot({ spreadPercentage: 6.52 })
+      makeSnapshot({ strategicSpreadPct: 6.52 })
     );
 
     expect(text).toContain('ALTA VOLATILIDAD');
-    expect(text).toContain('Spread medido: <b>6.52%</b>');
+    expect(text).toContain('Spread estratégico medido: <b>6.52%</b>');
     expect(text).toContain('Umbral efectivo: 2.25%'); // 1.5 * 1.5
   });
 
@@ -464,9 +464,9 @@ describe('message formatting', () => {
     const text = formatAlertMessage(
       makeTrigger(),
       volatilityRule,
-      makeSnapshot({ spreadPercentage: null })
+      makeSnapshot({ strategicSpreadPct: null })
     );
-    expect(text).not.toContain('Spread medido');
+    expect(text).not.toContain('Spread estratégico medido');
     expect(text).toContain('ALTA VOLATILIDAD');
   });
 
@@ -475,8 +475,45 @@ describe('message formatting', () => {
     const text = formatAlertMessage(makeTrigger({ price: 918.35 }), rule, makeSnapshot());
 
     expect(text).toContain('ALERTA DE PRECIO');
-    expect(text).toContain('Precio BUY: <b>918.35 VES</b>');
+    expect(text).toContain('Precio estratégico BUY: <b>918.35 VES</b>');
     expect(text).toContain('Umbral: 900.00 VES');
+  });
+
+  it('FASE 2: reports the strategic spread, never the raw extreme spread', () => {
+    // The production incident: 19 ads at ~921 plus one at 980 VES. The raw
+    // spread |max(SELL) - min(BUY)| reads 6.64%; the market is at 0.14%.
+    // Reporting the raw figure is what made a single ad look like an
+    // opportunity worth notifying.
+    const text = formatAlertMessage(
+      makeTrigger(),
+      spreadRule,
+      makeSnapshot({ spreadPercentage: 6.64, strategicSpreadPct: 0.14 })
+    );
+
+    expect(text).toContain('Spread estratégico: <b>0.14%</b>');
+    expect(text).not.toContain('6.64');
+  });
+
+  it('FASE 2: prints where both sides of the operation actually are', () => {
+    const text = formatAlertMessage(
+      makeTrigger(),
+      spreadRule,
+      makeSnapshot({ strategicBuyPrice: 921.39, strategicSellPrice: 921.79 })
+    );
+
+    expect(text).toContain('Recompra (BUY): <b>921.39 VES</b>');
+    expect(text).toContain('Venta (SELL): <b>921.79 VES</b>');
+  });
+
+  it('FASE 2: omits both levels rather than inventing one when a side is empty', () => {
+    const text = formatAlertMessage(
+      makeTrigger(),
+      spreadRule,
+      makeSnapshot({ strategicBuyPrice: null, strategicSellPrice: 921.79 })
+    );
+
+    expect(text).not.toContain('Recompra (BUY)');
+    expect(text).not.toContain('Venta (SELL)');
   });
 
   it('escapes HTML so a crafted rule name cannot break the message', () => {
@@ -560,5 +597,88 @@ describe('integration - the alert engine keeps running when Telegram fails', () 
       fs.readFileSync(path.join(tmpDir, 'data', 'alert_triggers.json'), 'utf-8')
     );
     expect(triggers.length).toBeGreaterThan(0);
+  });
+});
+
+describe('BEST_OPPORTUNITY message', () => {
+  const opportunityRule: AlertRule = {
+    id: 'op-rule',
+    name: 'Oportunidad ejecutable',
+    condition: 'OPPORTUNITY_ABOVE',
+    targetValue: 0.05,
+    targetSide: 'BUY',
+    enabled: true,
+    createdAt: 1,
+  };
+
+  const opportunity = {
+    bank: 'BANESCO',
+    amountVes: 50_000,
+    buyPrice: 921.39,
+    sellPrice: 921.79,
+    buyAdvNo: 'b',
+    sellAdvNo: 's',
+    spreadAbsolute: 0.4,
+    spreadPct: 0.0434,
+    marginAbsolute: 0.4,
+    marginPct: 0.0434,
+    buyAvailableUsdt: 900,
+    sellAvailableUsdt: 480,
+    availableUsdt: 480,
+    verification: 'VERIFIED' as const,
+    provenance: 'EXECUTABLE' as const,
+    reason: null,
+  };
+
+  it('reports the operation: bank, amount, both prices, spread and liquidity', () => {
+    const text = formatAlertMessage(makeTrigger(), opportunityRule, makeSnapshot(), opportunity);
+
+    expect(text).toContain('BEST OPPORTUNITY');
+    expect(text).toContain('Banco: <b>BANESCO</b>');
+    expect(text).toContain('Recompra (BUY): <b>921.39 VES</b>');
+    expect(text).toContain('Venta (SELL): <b>921.79 VES</b>');
+    expect(text).toContain('0.0434%');
+    expect(text).toContain('480.00 USDT');
+    expect(text).toContain('VERIFIED');
+  });
+
+  it('calls the margin GROSS and says what it does not discount', () => {
+    const text = formatAlertMessage(makeTrigger(), opportunityRule, makeSnapshot(), opportunity);
+
+    expect(text).toContain('Margen BRUTO');
+    expect(text).toContain('NO es beneficio neto');
+    expect(text).not.toMatch(/beneficio neto:/i);
+  });
+
+  it('never reports a raw extreme, whatever the snapshot carries', () => {
+    const text = formatAlertMessage(
+      makeTrigger(),
+      opportunityRule,
+      makeSnapshot({ bestBuyPrice: 919, bestSellPrice: 980, spreadPercentage: 6.64 }),
+      opportunity
+    );
+
+    expect(text).not.toContain('980');
+    expect(text).not.toContain('6.64');
+  });
+
+  it('says liquidity is unverifiable instead of printing a number', () => {
+    const text = formatAlertMessage(makeTrigger(), opportunityRule, makeSnapshot(), {
+      ...opportunity,
+      availableUsdt: null,
+      sellAvailableUsdt: null,
+      verification: 'NOT_VERIFIABLE',
+      provenance: 'NOT_VERIFIABLE',
+    });
+
+    expect(text).toContain('Liquidez: no verificable');
+    expect(text).not.toMatch(/Liquidez: <b>0/);
+  });
+
+  it('fabricates no opportunity when there is none to report', () => {
+    const text = formatAlertMessage(makeTrigger(), opportunityRule, makeSnapshot(), null);
+
+    expect(text).toContain('ya no esta disponible');
+    expect(text).not.toContain('921');
   });
 });

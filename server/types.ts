@@ -20,7 +20,14 @@ export type TradeType = 'BUY' | 'SELL';
  * A value that would otherwise be unknown is HEURISTIC, never REAL. Phase C2
  * replaces those with null; C1 only labels them.
  */
-export type DataProvenance = 'REAL' | 'AGGREGATED' | 'PROJECTED' | 'HEURISTIC';
+export type DataProvenance =
+  | 'REAL'
+  | 'AGGREGATED'
+  | 'PROJECTED'
+  | 'HEURISTIC'
+  | 'STRATEGIC'
+  | 'EXECUTABLE'
+  | 'NOT_VERIFIABLE';
 
 /** The stored observations an AGGREGATED or PROJECTED value was derived from. */
 export interface DataWindow {
@@ -98,17 +105,55 @@ export interface BinanceP2PResponse {
   success: boolean;
 }
 
+/**
+ * One payment method as Binance published it, kept VERBATIM.
+ *
+ * `payType` is the canonical machine code ('BBVAProvincial', 'PagoMovil'...)
+ * and is the ONLY field bank verification is allowed to compare against.
+ * `tradeMethodName` is the human-readable label; it exists for display and
+ * for auditing what Binance actually sent, and matching on it would merge
+ * banks that share a label.
+ */
+export interface AdPaymentMethod {
+  payType: string | null;
+  tradeMethodName: string | null;
+}
+
+/**
+ * VERIFIED      - a payType matched a canonical bank code exactly.
+ * NOT_VERIFIED  - the ad declares codes, none of them this bank's.
+ * NOT_VERIFIABLE- the question cannot be answered: the ad carries no
+ *                 canonical code, or the bank declares none. Never treated
+ *                 as belonging to the bank.
+ */
+export type BankVerification = 'VERIFIED' | 'NOT_VERIFIED' | 'NOT_VERIFIABLE';
+
 export interface NormalizedAd {
   advNo: string;
   price: number;
   minAmountVes: number;
   maxAmountVes: number;
   availableUsdt: number;
+  /**
+   * The volume Binance actually published, or null when it published none.
+   * availableUsdt above collapses that null to 0 for backwards compatibility;
+   * only this field can distinguish "no liquidity" from "liquidity unknown".
+   */
+  availableUsdtReported: number | null;
   merchantName: string;
   userType: string;
   ordersCount: number;
   finishRate: number;
+  /**
+   * Human-readable labels. UNCHANGED: existing consumers (OrderBookView)
+   * still read this. Never used for bank verification.
+   */
   paymentMethods: string[];
+  /**
+   * Binance's payment methods verbatim, canonical code included. This is what
+   * bank verification compares against.
+   */
+  paymentOptions: AdPaymentMethod[];
 }
 
 export interface MarketSnapshot {
@@ -141,6 +186,32 @@ export interface MarketSnapshot {
   /** null unless BOTH sides are present - a spread needs two prices. */
   spreadAbsolute: number | null;
   spreadPercentage: number | null;
+
+  /**
+   * STRATEGIC PRICES - what the operator actually decides on.
+   *
+   * RECOMPRA = Binance BUY  : the price I pay to acquire USDT.
+   * VENTA    = Binance SELL : the price I receive when selling USDT.
+   *
+   * These are the robust central level of each side (the median), NOT the
+   * extremes. min(BUY) and max(SELL) estimate the tail of the ad population,
+   * not the market level, so a single distant ad moves them by tens of VES
+   * while leaving the real market untouched. bestBuyPrice / bestSellPrice are
+   * kept above as the RAW audit trail; every decision is taken on these.
+   */
+  strategicBuyPrice: number | null;
+  strategicSellPrice: number | null;
+  /**
+   * ((venta - recompra) / recompra) * 100.
+   *
+   * SIGNED - a negative value means selling below repurchase, i.e. a loss, and
+   * must stay distinguishable from a gain. The denominator is ALWAYS the
+   * repurchase price, never whichever of the two happens to be smaller.
+   * null unless both strategic prices exist.
+   */
+  strategicSpreadPct: number | null;
+  /** Why a strategic value is null, when it is. */
+  strategicReason: string | null;
   
   // Raw ad lists
   topBuyAds: NormalizedAd[];
@@ -164,6 +235,8 @@ export interface MarketSnapshot {
   aggregatesProvenance: DataProvenance;
   /** topBuyAds / topSellAds: always REAL, they are the ads as published. */
   orderBookProvenance: DataProvenance;
+  /** strategicBuyPrice / strategicSellPrice / strategicSpreadPct. */
+  strategicProvenance: DataProvenance;
   /**
    * Set when a bank/amount filter was requested but the filtered query failed
    * and unfiltered data was served instead. Absent means the filter was honoured.
@@ -367,10 +440,187 @@ export interface BacktestMetrics {
   lastEvaluatedAt: string;
 }
 
+/** How a bank's ad population splits across the three verification verdicts. */
+export interface BankVerificationCounts {
+  verified: number;
+  notVerified: number;
+  notVerifiable: number;
+}
+
+/**
+ * LIQUIDITY_VERIFIED      - Binance published a volume above zero.
+ * LIQUIDITY_ZERO          - Binance published a volume, and it is zero.
+ * LIQUIDITY_NOT_VERIFIABLE- Binance published no volume at all. This is a
+ *                           missing fact, NOT a fact about missing liquidity.
+ */
+export type LiquidityStatus =
+  | 'LIQUIDITY_VERIFIED'
+  | 'LIQUIDITY_ZERO'
+  | 'LIQUIDITY_NOT_VERIFIABLE';
+
+/** Why an ad is not executable for a given bank and amount. */
+export type ExecutabilityRejection =
+  | 'BANK_NOT_VERIFIED'
+  | 'BANK_NOT_VERIFIABLE'
+  | 'INVALID_PRICE'
+  | 'AMOUNT_BELOW_MIN'
+  | 'AMOUNT_ABOVE_MAX'
+  | 'LIQUIDITY_INSUFFICIENT'
+  | 'LIQUIDITY_NOT_VERIFIABLE';
+
+/** What the merchant's record says. Observed values only - no score. */
+export interface MerchantQuality {
+  ordersCount: number;
+  finishRate: number;
+  userType: string;
+}
+
+/**
+ * One ad evaluated against one concrete operation: this bank, this amount,
+ * this side.
+ *
+ * `provenance` is 'EXECUTABLE' only when every condition was positively met.
+ * Anything that could not be established - an unverifiable bank, an
+ * unpublished volume - yields 'NOT_VERIFIABLE'. Uncertainty never becomes
+ * executability.
+ */
+export interface ExecutableQuote {
+  bank: string;
+  bankVerification: BankVerification;
+  amountVes: number;
+  side: 'BUY' | 'SELL';
+  price: number;
+  advNo: string;
+  merchant: string;
+  /** Human-readable label of the payment method that matched, when it did. */
+  paymentMethod: string | null;
+  /** The canonical Binance code that matched exactly, when it did. */
+  payType: string | null;
+  minAmountVes: number;
+  maxAmountVes: number;
+  /** null when Binance published no volume. Never a fabricated number. */
+  availableUsdt: number | null;
+  liquidityStatus: LiquidityStatus;
+  merchantQuality: MerchantQuality;
+  provenance: DataProvenance;
+  /** Set when the quote is not executable. null when it is. */
+  rejection: ExecutabilityRejection | null;
+  reason: string | null;
+}
+
+/** Executability of one BANK x AMOUNT cell, both sides. */
+export interface BankAmountExecutability {
+  bank: string;
+  amountVes: number;
+  /** Only the quotes that are actually executable. */
+  buyQuotes: ExecutableQuote[];
+  sellQuotes: ExecutableQuote[];
+  /** Cheapest executable BUY: the repurchase price I would actually pay. */
+  bestExecutableBuy: ExecutableQuote | null;
+  /** Highest executable SELL: the sale price I would actually receive. */
+  bestExecutableSell: ExecutableQuote | null;
+  /** ((venta - recompra) / recompra) * 100. Signed. null unless both exist. */
+  spreadPct: number | null;
+  /** Why a side is null, when it is. */
+  buyReason: string | null;
+  sellReason: string | null;
+  /** How every evaluated ad was classified. Nothing is silently dropped. */
+  buyRejections: Record<string, number>;
+  sellRejections: Record<string, number>;
+}
+
+/**
+ * VERIFIED       - both sides executable AND both liquidities verifiable.
+ * NOT_VERIFIABLE - both sides executable, but a liquidity could not be
+ *                  established. Kept as context; never a usable operation.
+ */
+export type OpportunityVerification = 'VERIFIED' | 'NOT_VERIFIABLE';
+
+/**
+ * One concrete operation: buy USDT and sell them back, same bank, same amount.
+ *
+ * Built EXCLUSIVELY from EXECUTABLE quotes. The strategic median describes
+ * where the market is; an Opportunity describes a trade someone can actually
+ * place. They are different questions and never substitute for one another.
+ */
+export interface Opportunity {
+  bank: string;
+  amountVes: number;
+
+  /** Price paid to acquire USDT. From an EXECUTABLE BUY quote only. */
+  buyPrice: number;
+  /** Price received selling USDT. From an EXECUTABLE SELL quote only. */
+  sellPrice: number;
+  buyAdvNo: string;
+  sellAdvNo: string;
+
+  /** sellPrice - buyPrice. Signed. */
+  spreadAbsolute: number;
+  /** ((sellPrice - buyPrice) / buyPrice) * 100. Signed, denominator buyPrice. */
+  spreadPct: number;
+
+  /**
+   * GROSS margin of the operation, identical to the spread above.
+   *
+   * BEFORE commissions, transfers, banking costs, slippage, rounding and any
+   * other operating cost. This project does not model those yet, and none are
+   * invented here. This is NOT net profit.
+   */
+  marginAbsolute: number;
+  marginPct: number;
+
+  /** null only if a side's liquidity could not be established. Never 0 for absent. */
+  buyAvailableUsdt: number | null;
+  sellAvailableUsdt: number | null;
+  /** min(buy, sell) when both are known; null otherwise. Never invented. */
+  availableUsdt: number | null;
+
+  /**
+   * Verification of the OPERATION'S LIQUIDITY (the contract's
+   * `liquidityVerification`): VERIFIED only when both legs published a
+   * volume. Executability of each leg was already settled upstream.
+   */
+  verification: OpportunityVerification;
+  provenance: DataProvenance;
+  /** Why this is not VERIFIED, when it is not. */
+  reason: string | null;
+}
+
+/** Diagnostic context for one BANK x AMOUNT cell, kept even when no Opportunity exists. */
+export interface OpportunityContext {
+  bank: string;
+  amountVes: number;
+  buyReason: string | null;
+  sellReason: string | null;
+  buyRejections: Record<string, number>;
+  sellRejections: Record<string, number>;
+}
+
+export interface OpportunityEngineResult {
+  /** Every Opportunity found, VERIFIED and NOT_VERIFIABLE alike. */
+  opportunities: Opportunity[];
+  /** byBank[bank][amountKey] - null where no Opportunity exists. */
+  byBank: Record<string, Record<string, Opportunity | null>>;
+  /** Best operation overall. Chosen among VERIFIED opportunities ONLY. */
+  bestOpportunity: Opportunity | null;
+  /** Rejections preserved per cell. Nothing is silently dropped. */
+  context: Record<string, Record<string, OpportunityContext>>;
+}
+
 export interface BankMatrixRow {
   bankKey: string;
   bankDisplayName: string;
   iconName?: string;
+  /**
+   * FASE 3: how many of this bank's ads could be positively verified as
+   * belonging to it by exact canonical payType equality.
+   *
+   * Reported, NOT yet enforced. The rates below are still computed over every
+   * ad Binance returned for the bank filter. Once these counts confirm what
+   * Binance really sends in payType, FASE 4 can filter on them.
+   */
+  verificationBuy?: BankVerificationCounts;
+  verificationSell?: BankVerificationCounts;
   ratesByAmount: {
     [amountKey: string]: {
       leaderPrice: number | null;
@@ -393,7 +643,18 @@ export interface BankMatrixRow {
 export interface AlertRule {
   id: string;
   name: string;
-  condition: 'ABOVE' | 'BELOW' | 'SPREAD_ABOVE' | 'VOLATILITY_SPIKE' | 'TREND_CHANGE';
+  /**
+   * OPPORTUNITY_ABOVE fires on the gross margin of the BEST_OPPORTUNITY - a
+   * real operation at one bank for one amount - not on a spread between two
+   * unrelated ads. targetSide is ignored for it: an operation has both sides.
+   */
+  condition:
+    | 'ABOVE'
+    | 'BELOW'
+    | 'SPREAD_ABOVE'
+    | 'VOLATILITY_SPIKE'
+    | 'TREND_CHANGE'
+    | 'OPPORTUNITY_ABOVE';
   targetValue: number;
   targetSide: 'BUY' | 'SELL';
   enabled: boolean;

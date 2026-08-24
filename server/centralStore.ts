@@ -9,12 +9,19 @@ import {
   HistoryRecord,
   MarketAnalysis,
   MarketProjections,
+  BankAmountExecutability,
   BankMatrixRow,
+  Opportunity,
+  OpportunityEngineResult,
+  NormalizedAd,
   AlertRule,
   AlertTriggerLog,
   BacktestMetrics,
 } from './types.js';
 import { BinanceP2PService, BANK_CODE_MAP } from './binanceP2PService.js';
+import { countVerifications } from './bankMatching.js';
+import { AMOUNT_TIERS, evaluateBankTiers } from './executability.js';
+import { runOpportunityEngine } from './opportunityEngine.js';
 import { StorageEngine } from './storage.js';
 import { ProjectionEngine } from './projectionEngine.js';
 import { TelegramNotifier } from './telegramNotifier.js';
@@ -27,7 +34,31 @@ export class CentralMarketStore {
   private pollingIntervalMs = 6000; // 6 seconds for fast live updates
   private pollTimer: NodeJS.Timeout | null = null;
   private isPolling = false;
-  private bankMatrixCache: { timestamp: number; buyMatrix: BankMatrixRow[]; sellMatrix: BankMatrixRow[] } | null = null;
+  private bankMatrixCache: {
+    timestamp: number;
+    buyMatrix: BankMatrixRow[];
+    sellMatrix: BankMatrixRow[];
+    /*
+     * FASE 3: the normalized ads behind the matrix, kept per bank and side.
+     *
+     * refreshBankMatrix already issues exactly ONE query per bank per side and
+     * filters the amount tiers in memory. It used to throw the ads away and
+     * keep only leaderPrice/suggestedPrice, so anything needing the ads again
+     * (executability by bank x amount) would have had to re-query - turning
+     * 14 requests per cycle into 84. Retaining them here keeps the request
+     * budget flat while making BANK x AMOUNT x SIDE derivable in memory.
+     */
+    adsByBank: Record<string, { buy: NormalizedAd[]; sell: NormalizedAd[] }>;
+  } | null = null;
+  /*
+   * The opportunity engine's answer for the book the bank matrix last
+   * captured. Recomputed in refreshBankMatrix (every 45s at most), never on
+   * its own schedule, so nothing here adds a request to Binance.
+   *
+   * null means "not computed yet", which is NOT the same as "no opportunity
+   * exists" - the alert loop must not fire on either.
+   */
+  private lastOpportunities: OpportunityEngineResult | null = null;
   private matrixPollingInProgress = false;
   private filteredCache = new Map<
     string,
@@ -162,6 +193,10 @@ export class CentralMarketStore {
           weightedSellPrice: null,
           spreadAbsolute: null,
           spreadPercentage: null,
+          strategicBuyPrice: null,
+          strategicSellPrice: null,
+          strategicSpreadPct: null,
+          strategicReason: 'No se ha obtenido ningun snapshot valido de Binance todavia.',
           topBuyAds: [],
           topSellAds: [],
           source: 'BINANCE_P2P',
@@ -180,6 +215,7 @@ export class CentralMarketStore {
           },
           aggregatesProvenance: 'REAL',
           orderBookProvenance: 'REAL',
+          strategicProvenance: 'STRATEGIC',
         };
       }
       return this.currentSnapshot;
@@ -442,6 +478,79 @@ export class CentralMarketStore {
     };
   }
 
+  /**
+   * Executability for every BANK x AMOUNT x SIDE, derived from the ads the
+   * bank matrix already captured.
+   *
+   * Reads `adsByBank` and issues NO request of its own: the 6 amount tiers are
+   * filtered in memory from the same 14 responses per cycle. Refreshing the
+   * matrix when the cache is cold is the only thing that talks to Binance, and
+   * that is the refresh the matrix would have done anyway.
+   */
+  public async getExecutability(forceRefresh = false): Promise<{
+    timestamp: number;
+    byBank: Record<string, Record<string, BankAmountExecutability>>;
+    amountKeys: string[];
+  }> {
+    const isCacheFresh = this.bankMatrixCache && Date.now() - this.bankMatrixCache.timestamp < 45000;
+    if (forceRefresh || !isCacheFresh) {
+      await this.refreshBankMatrix();
+    }
+
+    const cache = this.bankMatrixCache;
+    const byBank = this.deriveExecutability(cache?.adsByBank ?? {});
+
+    return {
+      timestamp: cache?.timestamp ?? Date.now(),
+      byBank,
+      amountKeys: AMOUNT_TIERS.map((t) => t.key),
+    };
+  }
+
+  /**
+   * The best executable operation available right now, or null.
+   *
+   * Derived from the SAME captured book the bank matrix uses. Refreshing when
+   * the cache is cold is the refresh the matrix would have done anyway - no
+   * query is issued on behalf of opportunities.
+   */
+  public async getOpportunities(forceRefresh = false): Promise<{
+    timestamp: number;
+    result: OpportunityEngineResult;
+  }> {
+    const isCacheFresh = this.bankMatrixCache && Date.now() - this.bankMatrixCache.timestamp < 45000;
+    if (forceRefresh || !isCacheFresh || this.lastOpportunities === null) {
+      await this.refreshBankMatrix();
+    }
+
+    return {
+      timestamp: this.bankMatrixCache?.timestamp ?? Date.now(),
+      result: this.lastOpportunities ?? { opportunities: [], byBank: {}, bestOpportunity: null, context: {} },
+    };
+  }
+
+  /** Cached best opportunity. null when none exists OR none was computed yet. */
+  public getCachedBestOpportunity(): Opportunity | null {
+    return this.lastOpportunities?.bestOpportunity ?? null;
+  }
+
+  /** One executability evaluation, shared by the matrix and the opportunities. */
+  private deriveExecutability(
+    adsByBank: Record<string, { buy: NormalizedAd[]; sell: NormalizedAd[] }>
+  ): Record<string, Record<string, BankAmountExecutability>> {
+    const byBank: Record<string, Record<string, BankAmountExecutability>> = {};
+    for (const bankKey of Object.keys(BANK_CODE_MAP)) {
+      const ads = adsByBank[bankKey];
+      byBank[bankKey] = evaluateBankTiers({
+        bank: bankKey,
+        allowedCodes: BANK_CODE_MAP[bankKey].apiPayTypes,
+        buyAds: ads?.buy ?? [],
+        sellAds: ads?.sell ?? [],
+      });
+    }
+    return byBank;
+  }
+
   private async refreshBankMatrix(): Promise<void> {
     if (this.matrixPollingInProgress) return;
     this.matrixPollingInProgress = true;
@@ -459,6 +568,7 @@ export class CentralMarketStore {
 
       const buyRows: BankMatrixRow[] = [];
       const sellRows: BankMatrixRow[] = [];
+      const adsByBank: Record<string, { buy: NormalizedAd[]; sell: NormalizedAd[] }> = {};
 
       // Query banks in sequence or controlled chunks to avoid rate limits
       for (const bankKey of banks) {
@@ -479,20 +589,48 @@ export class CentralMarketStore {
         // Query both BUY and SELL for each amount or for the primary bank query
         try {
           const [rawBuyAds, rawSellAds] = await Promise.all([
+            /*
+             * FASE 4: 15 -> 50 rows per bank per side.
+             *
+             * The REQUEST COUNT is unchanged - still one query per bank per
+             * side, 14 per cycle - only each response carries more of the
+             * book. Depth matters now because an ad has to clear bank
+             * verification AND the amount limits AND liquidity before it
+             * counts, and 15 ads can leave the 50K/100K tiers empty purely
+             * for want of depth rather than for want of a real offer.
+             * 50 is Binance's page size, so no pagination is needed.
+             */
             BinanceP2PService.queryP2PAds({
               tradeType: 'BUY',
               payTypes: bankConfig.apiPayTypes,
-              rows: 15,
+              rows: 50,
             }),
             BinanceP2PService.queryP2PAds({
               tradeType: 'SELL',
               payTypes: bankConfig.apiPayTypes,
-              rows: 15,
+              rows: 50,
             }),
           ]);
 
           const normalizedBuy = BinanceP2PService.normalizeAds(rawBuyAds);
           const normalizedSell = BinanceP2PService.normalizeAds(rawSellAds);
+
+          // Reusable by FASE 4 without a single extra request to Binance.
+          adsByBank[bankKey] = { buy: normalizedBuy, sell: normalizedSell };
+
+          /*
+           * FASE 3: how many of these ads can be positively verified as this
+           * bank's by exact canonical payType equality.
+           *
+           * REPORTED, NOT ENFORCED. The rates below are still computed over
+           * every ad Binance returned for the payTypes filter. Filtering on
+           * this now would silently empty the matrix if Binance's real payType
+           * values differ from BANK_CODE_MAP.apiPayTypes - and this
+           * environment cannot reach Binance to check. Surfacing the counts
+           * makes the gap visible in Render instead of guessing at it.
+           */
+          buyRow.verificationBuy = countVerifications(normalizedBuy, bankConfig.apiPayTypes);
+          sellRow.verificationSell = countVerifications(normalizedSell, bankConfig.apiPayTypes);
 
           for (const amt of amounts) {
             // Find best matching ads within min-max limits for this amount
@@ -573,7 +711,17 @@ export class CentralMarketStore {
         timestamp: Date.now(),
         buyMatrix: buyRows,
         sellMatrix: sellRows,
+        adsByBank,
       };
+
+      /*
+       * EXECUTABLE -> OPPORTUNITY, from the book just captured. Pure
+       * computation over data already in memory: zero additional requests.
+       */
+      this.lastOpportunities = runOpportunityEngine({
+        byBank: this.deriveExecutability(adsByBank),
+        bankOrder: Object.keys(BANK_CODE_MAP),
+      });
     } catch (err) {
       console.error('[CentralStore] Error refreshing bank matrix:', err);
     } finally {
@@ -591,7 +739,28 @@ export class CentralMarketStore {
         continue;
       }
 
-      const targetPrice = rule.targetSide === 'BUY' ? snapshot.bestBuyPrice : snapshot.bestSellPrice;
+      /*
+       * FASE 2: alerts decide on the STRATEGIC price, never on the extremes.
+       *
+       * targetSide 'BUY' is the repurchase price (Binance BUY, what I pay);
+       * 'SELL' is the sale price (Binance SELL, what I receive). Reading
+       * bestBuyPrice / bestSellPrice here is what let a single 980 VES ad on
+       * one side of the book fire Telegram: max(SELL) tracks the furthest ad,
+       * not the market.
+       */
+      const targetPrice =
+        rule.targetSide === 'BUY' ? snapshot.strategicBuyPrice : snapshot.strategicSellPrice;
+      const spreadPct = snapshot.strategicSpreadPct;
+      /*
+       * Read from cache only. Computing it here would force a bank-matrix
+       * refresh on every 6s poll and multiply the request budget; the cached
+       * value is refreshed by refreshBankMatrix at most every 45s.
+       *
+       * null means "no verifiable opportunity right now" OR "not computed
+       * yet". Neither may fire an alert - a missing opportunity is never
+       * reported as one.
+       */
+      const opportunity = this.getCachedBestOpportunity();
       let triggered = false;
       let message = '';
 
@@ -603,34 +772,54 @@ export class CentralMarketStore {
       if (needsPrice && targetPrice === null) continue;
       if (
         (rule.condition === 'SPREAD_ABOVE' || rule.condition === 'VOLATILITY_SPIKE') &&
-        snapshot.spreadPercentage === null
+        spreadPct === null
       ) {
         continue;
       }
+      if (rule.condition === 'OPPORTUNITY_ABOVE' && opportunity === null) continue;
 
       switch (rule.condition) {
         case 'ABOVE':
           if (targetPrice !== null && targetPrice >= rule.targetValue) {
             triggered = true;
-            message = `Precio ${rule.targetSide} (${targetPrice.toFixed(2)} VES) superó el umbral de ${rule.targetValue} VES.`;
+            message = `Precio estratégico ${rule.targetSide} (${targetPrice.toFixed(2)} VES) superó el umbral de ${rule.targetValue} VES.`;
           }
           break;
         case 'BELOW':
           if (targetPrice !== null && targetPrice <= rule.targetValue) {
             triggered = true;
-            message = `Precio ${rule.targetSide} (${targetPrice.toFixed(2)} VES) cayó por debajo de ${rule.targetValue} VES.`;
+            message = `Precio estratégico ${rule.targetSide} (${targetPrice.toFixed(2)} VES) cayó por debajo de ${rule.targetValue} VES.`;
           }
           break;
         case 'SPREAD_ABOVE':
-          if (snapshot.spreadPercentage !== null && snapshot.spreadPercentage >= rule.targetValue) {
+          if (spreadPct !== null && spreadPct >= rule.targetValue) {
             triggered = true;
-            message = `Spread P2P (${snapshot.spreadPercentage.toFixed(2)}%) superó el umbral de ${rule.targetValue}%.`;
+            message = `Spread estratégico (${spreadPct.toFixed(2)}%) superó el umbral de ${rule.targetValue}%.`;
+          }
+          break;
+        case 'OPPORTUNITY_ABOVE':
+          /*
+           * Fires on a real operation: same bank, same amount, both legs
+           * executable, liquidity established on both. Never on a spread
+           * between two ads nobody can pair.
+           */
+          if (
+            opportunity !== null &&
+            opportunity.verification === 'VERIFIED' &&
+            opportunity.marginPct >= rule.targetValue
+          ) {
+            triggered = true;
+            message =
+              `Oportunidad ejecutable en ${opportunity.bank} para ` +
+              `${opportunity.amountVes} VES: recompra ${opportunity.buyPrice.toFixed(2)}, ` +
+              `venta ${opportunity.sellPrice.toFixed(2)}, margen bruto ` +
+              `${opportunity.marginPct.toFixed(4)}%.`;
           }
           break;
         case 'VOLATILITY_SPIKE':
-          if (snapshot.spreadPercentage !== null && snapshot.spreadPercentage > rule.targetValue * 1.5) {
+          if (spreadPct !== null && spreadPct > rule.targetValue * 1.5) {
             triggered = true;
-            message = `Alta volatilidad detectada en el libro de órdenes Binance P2P.`;
+            message = `Spread estratégico (${spreadPct.toFixed(2)}%) superó ${(rule.targetValue * 1.5).toFixed(2)}% en el libro Binance P2P.`;
           }
           break;
       }
@@ -642,7 +831,11 @@ export class CentralMarketStore {
          * spread implies both sides exist). The guard keeps the persisted
          * AlertTriggerLog schema free of nulls without touching storage.ts.
          */
-        if (targetPrice === null) continue;
+        // An opportunity alert logs the sale price of the operation it reports;
+        // every other condition already required a non-null strategic price.
+        const loggedPrice =
+          rule.condition === 'OPPORTUNITY_ABOVE' ? (opportunity?.sellPrice ?? null) : targetPrice;
+        if (loggedPrice === null) continue;
 
         rule.lastTriggeredAt = now;
         StorageEngine.saveAlert(rule);
@@ -652,7 +845,7 @@ export class CentralMarketStore {
           ruleId: rule.id,
           ruleName: rule.name,
           message,
-          price: targetPrice,
+          price: loggedPrice,
           timestamp: now,
         };
         StorageEngine.logTrigger(log);
@@ -663,7 +856,7 @@ export class CentralMarketStore {
          * throws and never rejects, so a Telegram outage cannot interrupt the
          * alert loop, the polling cycle or persistence.
          */
-        void TelegramNotifier.getInstance().notifyAlert(log, rule, snapshot);
+        void TelegramNotifier.getInstance().notifyAlert(log, rule, snapshot, opportunity);
       }
     }
   }

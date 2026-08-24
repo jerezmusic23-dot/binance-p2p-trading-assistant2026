@@ -279,11 +279,26 @@ describe('generateProjections', () => {
 
   it('applies no artificial floor to spreadMaxExpected', () => {
     // Was audit BUG: max(spread, 1.2) * 1.15. Fixed in C2.
-    const p = project(makeHistory(40), makeSnapshot({ spreadPercentage: 0.1 }));
+    // Source changed from spreadPercentage (RAW) to strategicSpreadPct: the
+    // raw figure is |max(SELL) - min(BUY)|, so projecting it forward
+    // projected an outlier rather than the market. Same formula, market-level
+    // input.
+    const p = project(makeHistory(40), makeSnapshot({ strategicSpreadPct: 0.1 }));
     expect(p.daily.spreadMaxExpected).toBe(0.11); // 0.1 * 1.15 = 0.115 -> 0.11
 
-    const noSpread = project(makeHistory(40), makeSnapshot({ spreadPercentage: null }));
+    const noSpread = project(makeHistory(40), makeSnapshot({ strategicSpreadPct: null }));
     expect(noSpread.daily.spreadMaxExpected).toBeNull();
+  });
+
+  it('never projects the spread of an isolated ad', () => {
+    // The production incident: raw 6.64%, market 0.14%.
+    const p = project(
+      makeHistory(40),
+      makeSnapshot({ spreadPercentage: 6.64, strategicSpreadPct: 0.14 })
+    );
+
+    expect(p.daily.spreadMaxExpected).toBeCloseTo(0.16, 2); // 0.14 * 1.15
+    expect(p.risk.factors.join(' ')).not.toContain('Spread amplio');
   });
 
   it('reports null trade windows instead of constant strings', () => {

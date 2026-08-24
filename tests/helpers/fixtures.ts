@@ -25,6 +25,8 @@ export function makeAdItem(overrides: {
   monthOrderCount?: number;
   monthFinishRate?: number;
   payTypes?: string[];
+  /** Full control over payType vs tradeMethodName, when they must differ. */
+  tradeMethods?: { payType: string; tradeMethodName: string }[];
   tradeType?: string;
 } = {}): BinanceAdItem {
   return {
@@ -38,11 +40,13 @@ export function makeAdItem(overrides: {
       tradeType: overrides.tradeType ?? 'BUY',
       asset: 'USDT',
       fiatUnit: 'VES',
-      tradeMethods: (overrides.payTypes ?? ['Banesco']).map((p, i) => ({
-        payType: p,
-        payMethodId: `pm-${i}`,
-        tradeMethodName: p,
-      })),
+      tradeMethods:
+        overrides.tradeMethods?.map((m, i) => ({ ...m, payMethodId: `pm-${i}` })) ??
+        (overrides.payTypes ?? ['Banesco']).map((p, i) => ({
+          payType: p,
+          payMethodId: `pm-${i}`,
+          tradeMethodName: p,
+        })),
     },
     advertiser: {
       userNo: 'user-1',
@@ -90,11 +94,13 @@ export function makeNormalizedAd(price: number, availableUsdt = 100): Normalized
     minAmountVes: 1000,
     maxAmountVes: 50000,
     availableUsdt,
+    availableUsdtReported: availableUsdt,
     merchantName: 'Comerciante',
     userType: 'merchant',
     ordersCount: 100,
     finishRate: 0.98,
     paymentMethods: ['Banesco'],
+    paymentOptions: [{ payType: 'Banesco', tradeMethodName: 'Banesco' }],
   };
 }
 
@@ -114,6 +120,11 @@ export function makeSnapshot(overrides: Partial<MarketSnapshot> = {}): MarketSna
     weightedSellPrice: 920.7,
     spreadAbsolute: 3.0,
     spreadPercentage: 0.33,
+    // Strategic = the medians above. signedSpreadPct(920.6, 918.4) = 0.2396...
+    strategicBuyPrice: 918.4,
+    strategicSellPrice: 920.6,
+    strategicSpreadPct: 0.24,
+    strategicReason: null,
     topBuyAds: [makeNormalizedAd(918.0), makeNormalizedAd(918.5)],
     topSellAds: [makeNormalizedAd(921.0), makeNormalizedAd(920.5)],
     source: 'BINANCE_P2P',
@@ -124,6 +135,7 @@ export function makeSnapshot(overrides: Partial<MarketSnapshot> = {}): MarketSna
     bestSell: { value: 921.0, provenance: 'REAL' },
     aggregatesProvenance: 'AGGREGATED',
     orderBookProvenance: 'REAL',
+    strategicProvenance: 'STRATEGIC',
     ...overrides,
   };
 }

@@ -116,14 +116,14 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
 
         {/* Center: Live Rates Summary */}
-        {snapshot && snapshot.bestBuyPrice !== null && (
+        {snapshot && snapshot.strategicBuyPrice !== null && (
           <div className="hidden lg:flex items-center gap-5 bg-[#181a20] border border-[#2b2f36] px-4 py-2 rounded-lg text-xs">
             <div className="flex items-center gap-2">
               <span className="text-[10px] uppercase text-[#848e9c] font-semibold">
                 {isFiltered ? `Venta (${globalFilter.bank}):` : 'Tasa Venta:'}
               </span>
               <span className="font-mono font-bold text-[#FCD535] text-sm">
-                {fmt(snapshot.bestSellPrice)} <span className="text-[10px] text-[#848e9c]">VES</span>
+                {fmt(snapshot.strategicSellPrice)} <span className="text-[10px] text-[#848e9c]">VES</span>
               </span>
             </div>
             <div className="w-px h-4 bg-[#2b2f36]" />
@@ -132,14 +132,14 @@ export const Header: React.FC<HeaderProps> = ({
                 {isFiltered ? `Recompra (${globalFilter.bank}):` : 'Tasa Recompra:'}
               </span>
               <span className="font-mono font-bold text-[#02c076] text-sm">
-                {fmt(snapshot.bestBuyPrice)} <span className="text-[10px] text-[#848e9c]">VES</span>
+                {fmt(snapshot.strategicBuyPrice)} <span className="text-[10px] text-[#848e9c]">VES</span>
               </span>
             </div>
             <div className="w-px h-4 bg-[#2b2f36]" />
             <div className="flex items-center gap-2">
               <span className="text-[10px] uppercase text-[#848e9c] font-semibold">Spread:</span>
               <span className="font-mono font-semibold text-[#e0e0e0]">
-                {fmtPct(snapshot.spreadPercentage)}
+                {fmtPct(snapshot.strategicSpreadPct)}
               </span>
             </div>
           </div>

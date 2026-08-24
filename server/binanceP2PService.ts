@@ -10,6 +10,7 @@ import {
   MarketSnapshot,
   Valued,
 } from './types.js';
+import { describeSide, round2, signedSpreadPct, weightedAverage } from './marketStatistics.js';
 
 export interface P2PSearchParams {
   asset?: string;
@@ -61,24 +62,11 @@ export const BANK_CODE_MAP: Record<string, { code: string; displayName: string; 
   },
 };
 
-/** Rounds to the 2 decimals this market quotes in. */
-function round2(value: number): number {
-  return Number(value.toFixed(2));
-}
-
-/**
- * Liquidity-weighted average price of a side. null when the side is empty or
- * when no ad reports any available amount - a weighted average with zero total
- * weight is undefined, not zero.
- */
-function weightedAverage(ads: NormalizedAd[]): number | null {
-  let totalVolume = 0;
-  let weightedSum = 0;
-  for (const ad of ads) {
-    totalVolume += ad.availableUsdt;
-    weightedSum += ad.price * ad.availableUsdt;
-  }
-  return totalVolume > 0 ? round2(weightedSum / totalVolume) : null;
+/** Liquidity-weighted average price of one side, or null when no ad reports volume. */
+function liquidityWeightedPrice(ads: NormalizedAd[]): number | null {
+  return round2(
+    weightedAverage(ads.map((ad) => ({ value: ad.price, weight: ad.availableUsdt })))
+  );
 }
 
 export class BinanceP2PService {
@@ -159,11 +147,37 @@ export class BinanceP2PService {
 
       const minAmountVes = parseFloat(item.adv.minSingleTransAmount) || 0;
       const maxAmountVes = parseFloat(item.adv.maxSingleTransAmount) || 0;
-      const availableUsdt = parseFloat(item.adv.tradableQuantity || item.adv.surplusAmount) || 0;
+      /*
+       * FASE 4: liquidity absence must survive normalization.
+       *
+       * `parseFloat(...) || 0` mapped "Binance published no volume" and
+       * "Binance published zero volume" onto the same 0, so an ad whose
+       * liquidity is simply unknown looked like an ad with none. The
+       * executability layer has to tell those apart: one is a fact, the other
+       * is a missing fact, and neither may be invented.
+       */
+      const reportedAvailable = parseFloat(item.adv.tradableQuantity || item.adv.surplusAmount);
+      const availableUsdtReported = Number.isFinite(reportedAvailable) ? reportedAvailable : null;
+      // UNCHANGED for existing consumers (liquidity-weighted average).
+      const availableUsdt = availableUsdtReported ?? 0;
 
-      const paymentMethods = Array.isArray(item.adv.tradeMethods)
-        ? item.adv.tradeMethods.map((m) => m.tradeMethodName || m.payType).filter(Boolean)
-        : [];
+      const tradeMethods = Array.isArray(item.adv.tradeMethods) ? item.adv.tradeMethods : [];
+
+      // UNCHANGED: the human-readable list existing consumers already read.
+      const paymentMethods = tradeMethods.map((m) => m.tradeMethodName || m.payType).filter(Boolean);
+
+      /*
+       * FASE 3: Binance's payment methods kept VERBATIM, canonical code
+       * included. paymentMethods above collapses payType into
+       * tradeMethodName, so the canonical code ('BBVAProvincial') was lost
+       * and only the label ('Provincial (BBVA)') survived - a label that does
+       * not equal any code in BANK_CODE_MAP.apiPayTypes. Bank verification
+       * compares against payType and nothing else.
+       */
+      const paymentOptions = tradeMethods.map((m) => ({
+        payType: m.payType ?? null,
+        tradeMethodName: m.tradeMethodName ?? null,
+      }));
 
       list.push({
         advNo: item.adv.advNo,
@@ -171,11 +185,13 @@ export class BinanceP2PService {
         minAmountVes,
         maxAmountVes,
         availableUsdt,
+        availableUsdtReported,
         merchantName: item.advertiser.nickName || 'Anónimo',
         userType: item.advertiser.userType || 'user',
         ordersCount: item.advertiser.monthOrderCount || 0,
         finishRate: item.advertiser.monthFinishRate || 0,
         paymentMethods,
+        paymentOptions,
       });
     }
 
@@ -220,33 +236,34 @@ export class BinanceP2PService {
     // Calculate real stats.
     // C2: a side with no ads yields null everywhere. Nothing is derived from
     // the opposite side and nothing defaults to 0 - an absent price is absent.
-    const buyPrices = topBuyAds.map((a) => a.price).sort((a, b) => a - b);
-    const sellPrices = topSellAds.map((a) => a.price).sort((a, b) => b - a);
+    //
+    // FASE 2: every descriptive statistic now comes from marketStatistics, so
+    // BUY and SELL use identical definitions. The previous code sorted BUY
+    // ascending and SELL descending and then indexed [floor(n/2)] on both,
+    // which returned a different middle element per side for an even count.
+    const buyStats = describeSide(topBuyAds.map((a) => a.price));
+    const sellStats = describeSide(topSellAds.map((a) => a.price));
 
-    const hasBuySide = buyPrices.length > 0;
-    const hasSellSide = sellPrices.length > 0;
+    const hasBuySide = buyStats.count > 0;
+    const hasSellSide = sellStats.count > 0;
 
     // Buy side (Taker pays VES to buy USDT): best price is the lowest ask.
-    const bestBuyPrice = hasBuySide ? round2(buyPrices[0]) : null;
+    const bestBuyPrice = round2(buyStats.min);
     // Sell side: best price is the highest bid.
-    const bestSellPrice = hasSellSide ? round2(sellPrices[0]) : null;
+    const bestSellPrice = round2(sellStats.max);
 
-    const averageBuyPrice = hasBuySide
-      ? round2(buyPrices.reduce((acc, p) => acc + p, 0) / buyPrices.length)
-      : null;
-    const averageSellPrice = hasSellSide
-      ? round2(sellPrices.reduce((acc, p) => acc + p, 0) / sellPrices.length)
-      : null;
+    const averageBuyPrice = round2(buyStats.mean);
+    const averageSellPrice = round2(sellStats.mean);
 
-    const medianBuyPrice = hasBuySide ? round2(buyPrices[Math.floor(buyPrices.length / 2)]) : null;
-    const medianSellPrice = hasSellSide
-      ? round2(sellPrices[Math.floor(sellPrices.length / 2)])
-      : null;
+    const medianBuyPrice = round2(buyStats.median);
+    const medianSellPrice = round2(sellStats.median);
 
-    const weightedBuyPrice = weightedAverage(topBuyAds);
-    const weightedSellPrice = weightedAverage(topSellAds);
+    const weightedBuyPrice = liquidityWeightedPrice(topBuyAds);
+    const weightedSellPrice = liquidityWeightedPrice(topSellAds);
 
     // A spread needs two prices. With one side missing there is no spread.
+    // NOTE: still the RAW extreme spread. FASE 3 replaces this with the signed
+    // strategic spread computed from the medians.
     const spreadAbsolute =
       bestBuyPrice !== null && bestSellPrice !== null
         ? round2(Math.abs(bestBuyPrice - bestSellPrice))
@@ -262,6 +279,32 @@ export class BinanceP2PService {
 
     const missingSide = (side: 'BUY' | 'SELL') =>
       `El lado ${side} no devolvio anuncios. No hay precio: la ausencia es el dato.`;
+
+    /*
+     * STRATEGIC PRICES.
+     *
+     * RECOMPRA = Binance BUY, VENTA = Binance SELL. Both are taken as the
+     * MEDIAN of their side, which is where the market actually is. The
+     * extremes above (min BUY / max SELL) estimate the tail of the ad
+     * population: one distant ad at 980 VES moves max(SELL) by 58 VES and
+     * leaves the median untouched. They stay in the snapshot as the raw audit
+     * trail, but nothing decides on them any more.
+     */
+    const strategicBuyPrice = medianBuyPrice;
+    const strategicSellPrice = medianSellPrice;
+
+    // Signed on purpose: venta below recompra is a LOSS and has to stay
+    // distinguishable from a gain. Denominator is always the repurchase price.
+    const strategicSpreadPct = round2(signedSpreadPct(strategicSellPrice, strategicBuyPrice));
+
+    const strategicReason =
+      strategicBuyPrice === null && strategicSellPrice === null
+        ? 'Ningun lado del libro devolvio anuncios: no hay precio estrategico.'
+        : strategicBuyPrice === null
+          ? missingSide('BUY')
+          : strategicSellPrice === null
+            ? missingSide('SELL')
+            : null;
 
     const bestBuy: Valued<number | null> = hasBuySide
       ? { value: bestBuyPrice, provenance: 'REAL' }
@@ -288,6 +331,10 @@ export class BinanceP2PService {
       weightedSellPrice,
       spreadAbsolute,
       spreadPercentage,
+      strategicBuyPrice,
+      strategicSellPrice,
+      strategicSpreadPct,
+      strategicReason,
       topBuyAds: topBuyAds.slice(0, 10),
       topSellAds: topSellAds.slice(0, 10),
       source: 'BINANCE_P2P',
@@ -298,6 +345,7 @@ export class BinanceP2PService {
       bestSell,
       aggregatesProvenance: 'AGGREGATED',
       orderBookProvenance: 'REAL',
+      strategicProvenance: 'STRATEGIC',
     };
   }
 }

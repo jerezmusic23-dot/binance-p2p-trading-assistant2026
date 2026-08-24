@@ -14,7 +14,7 @@
  *  - Starts disabled and silent when credentials are absent.
  */
 
-import { AlertRule, AlertTriggerLog, MarketSnapshot } from './types.js';
+import { AlertRule, AlertTriggerLog, MarketSnapshot, Opportunity } from './types.js';
 
 /**
  * Default gap between two Telegram messages for the same alert type.
@@ -126,6 +126,80 @@ function marketLabel(snapshot: MarketSnapshot | null): string {
 }
 
 /**
+ * The strategic level both sides of the operation sit at, when it is known.
+ *
+ * RECOMPRA is Binance BUY (what I pay), VENTA is Binance SELL (what I
+ * receive). Printed so the recipient can see WHERE the market is, not only
+ * that a threshold was crossed. Omitted entirely when a side is missing -
+ * an absent price is never shown as 0 or as a plausible number.
+ */
+function strategicLines(snapshot: MarketSnapshot | null): string[] {
+  const recompra = snapshot?.strategicBuyPrice;
+  const venta = snapshot?.strategicSellPrice;
+  if (recompra === null || recompra === undefined || venta === null || venta === undefined) {
+    return [];
+  }
+  return [
+    '',
+    `Recompra (BUY): <b>${escapeHtml(recompra.toFixed(2))} VES</b>`,
+    `Venta (SELL): <b>${escapeHtml(venta.toFixed(2))} VES</b>`,
+  ];
+}
+
+/**
+ * The BEST_OPPORTUNITY message.
+ *
+ * Reports ONE real operation: a bank, an amount, an executable repurchase and
+ * an executable sale. Nothing here comes from the raw extremes of the book, so
+ * an isolated 980 VES ad cannot produce this message.
+ *
+ * The margin is stated as GROSS on purpose. Binance commission, bank transfer
+ * fees, slippage and rounding are not modelled anywhere in this project, so
+ * calling it profit would be inventing a number.
+ */
+export function formatOpportunityMessage(
+  opportunity: Opportunity,
+  rule: AlertRule,
+  timestamp: number
+): string {
+  const n = (value: number, decimals = 2) => escapeHtml(value.toFixed(decimals));
+
+  const lines = [
+    '🚨 <b>BEST OPPORTUNITY</b>',
+    '',
+    `Banco: <b>${escapeHtml(opportunity.bank)}</b>`,
+    `Monto: <b>${escapeHtml(opportunity.amountVes.toLocaleString('es-VE'))} VES</b>`,
+    '',
+    `Recompra (BUY): <b>${n(opportunity.buyPrice)} VES</b>`,
+    `Venta (SELL): <b>${n(opportunity.sellPrice)} VES</b>`,
+    '',
+    `Spread: <b>${n(opportunity.spreadPct, 4)}%</b>`,
+    `Margen BRUTO: <b>${n(opportunity.marginAbsolute)} VES por USDT</b>`,
+  ];
+
+  // Absent liquidity is never printed as a number.
+  if (opportunity.availableUsdt !== null) {
+    lines.push(`Liquidez: <b>${n(opportunity.availableUsdt)} USDT</b>`);
+  } else {
+    lines.push('Liquidez: no verificable');
+  }
+
+  lines.push(
+    '',
+    `Umbral: ${escapeHtml(rule.targetValue.toFixed(4))}%`,
+    `Estado: ${escapeHtml(opportunity.verification)} / EXECUTABLE`,
+    '',
+    'MARGEN BRUTO: no descuenta comision de Binance,',
+    'transferencia bancaria, slippage, redondeos',
+    'ni otros costes operativos. NO es beneficio neto.',
+    '',
+    `Hora: ${formatVenezuelaClock(timestamp)}`
+  );
+
+  return lines.join('\n');
+}
+
+/**
  * Builds the message body.
  *
  * Only values that actually exist are printed. Nothing is invented, and no
@@ -136,22 +210,49 @@ function marketLabel(snapshot: MarketSnapshot | null): string {
 export function formatAlertMessage(
   trigger: AlertTriggerLog,
   rule: AlertRule,
-  snapshot: MarketSnapshot | null
+  snapshot: MarketSnapshot | null,
+  opportunity?: Opportunity | null
 ): string {
   const time = formatVenezuelaClock(trigger.timestamp);
+
+  /*
+   * An opportunity alert reports the operation, never the market aggregate.
+   * Without the opportunity there is nothing truthful to say, so no message
+   * is fabricated from the snapshot instead.
+   */
+  if (rule.condition === 'OPPORTUNITY_ABOVE') {
+    if (!opportunity) {
+      return [
+        '🚨 <b>BEST OPPORTUNITY</b>',
+        '',
+        'La alerta se disparo pero la oportunidad ya no esta disponible.',
+        'No se reporta ningun precio: el dato falta.',
+        '',
+        `Hora: ${time}`,
+      ].join('\n');
+    }
+    return formatOpportunityMessage(opportunity, rule, trigger.timestamp);
+  }
   const market = escapeHtml(marketLabel(snapshot));
-  const spread = snapshot?.spreadPercentage;
+  /*
+   * FASE 2: the STRATEGIC spread, the same number the rule was evaluated on.
+   * spreadPercentage is the raw |max(SELL) - min(BUY)| figure and is what
+   * reported 6.64% while the market sat at 0.14%. Reporting one number and
+   * deciding on another is how the 980 VES ad became an alert.
+   */
+  const spread = snapshot?.strategicSpreadPct;
 
   if (rule.condition === 'SPREAD_ABOVE') {
     return [
       '🔴 <b>ALERTA P2P</b>',
       '',
-      `Spread: <b>${spread !== null && spread !== undefined ? escapeHtml(spread.toFixed(2)) : '--'}%</b>`,
+      `Spread estratégico: <b>${spread !== null && spread !== undefined ? escapeHtml(spread.toFixed(2)) : '--'}%</b>`,
       `Umbral: ${escapeHtml(rule.targetValue.toFixed(2))}%`,
       '',
       `Mercado: ${market}`,
+      ...strategicLines(snapshot),
       '',
-      'Tipo: Spread P2P',
+      'Tipo: Spread estratégico (mediana VENTA vs mediana RECOMPRA)',
       'Estado: ACTIVADO',
       '',
       `Hora: ${time}`,
@@ -169,11 +270,11 @@ export function formatAlertMessage(
     // The rule compares the spread against targetValue * 1.5. Report exactly
     // that, so the number in the message matches what was measured.
     if (spread !== null && spread !== undefined) {
-      lines.push(`Spread medido: <b>${escapeHtml(spread.toFixed(2))}%</b>`);
+      lines.push(`Spread estratégico medido: <b>${escapeHtml(spread.toFixed(2))}%</b>`);
       lines.push(`Umbral efectivo: ${escapeHtml((rule.targetValue * 1.5).toFixed(2))}%`);
       lines.push('');
     }
-    lines.push(`Mercado: ${market}`, '', `Hora: ${time}`);
+    lines.push(`Mercado: ${market}`, ...strategicLines(snapshot), '', `Hora: ${time}`);
     return lines.join('\n');
   }
 
@@ -182,10 +283,11 @@ export function formatAlertMessage(
   return [
     `${above ? '🟢' : '🔻'} <b>ALERTA DE PRECIO</b>`,
     '',
-    `Precio ${escapeHtml(rule.targetSide)}: <b>${escapeHtml(trigger.price.toFixed(2))} VES</b>`,
+    `Precio estratégico ${escapeHtml(rule.targetSide)}: <b>${escapeHtml(trigger.price.toFixed(2))} VES</b>`,
     `Umbral: ${escapeHtml(rule.targetValue.toFixed(2))} VES`,
     '',
     `Mercado: ${market}`,
+    ...strategicLines(snapshot),
     '',
     `Tipo: ${above ? 'Precio por encima del umbral' : 'Precio por debajo del umbral'}`,
     'Estado: ACTIVADO',
@@ -244,7 +346,8 @@ export class TelegramNotifier {
   public async notifyAlert(
     trigger: AlertTriggerLog,
     rule: AlertRule,
-    snapshot: MarketSnapshot | null
+    snapshot: MarketSnapshot | null,
+    opportunity?: Opportunity | null
   ): Promise<TelegramResult> {
     try {
       if (!this.config) return { outcome: 'DISABLED' };
@@ -266,7 +369,7 @@ export class TelegramNotifier {
       this.lastSentAt.set(key, now);
       this.prune(now);
 
-      return await this.send(formatAlertMessage(trigger, rule, snapshot));
+      return await this.send(formatAlertMessage(trigger, rule, snapshot, opportunity));
     } catch (err) {
       // Belt and braces: nothing above should throw, and if it somehow does,
       // the alert loop still must not notice.

@@ -60,6 +60,33 @@ apiRouter.get('/market/matrix', async (req, res) => {
 });
 
 // 5. Historical Data & Summary
+/*
+ * Best executable operation right now, plus every bank x amount cell.
+ *
+ * A NEW endpoint rather than a field on /market/latest: that route returns a
+ * MarketSnapshot, whose shape the frontend types mirror exactly, and an
+ * opportunity is a different object with a different lifetime (it follows the
+ * 45s bank-matrix cache, not the 6s poll). Adding it there would change an
+ * existing contract for every consumer; a separate read-only route changes
+ * none of them.
+ *
+ * Reads the cached book. Issues no query to Binance of its own.
+ */
+apiRouter.get('/market/opportunities', async (_req, res) => {
+  try {
+    const { timestamp, result } = await centralStore.getOpportunities();
+    res.json({
+      timestamp,
+      bestOpportunity: result.bestOpportunity,
+      opportunities: result.opportunities,
+      byBank: result.byBank,
+      context: result.context,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Error computing opportunities' });
+  }
+});
+
 apiRouter.get('/market/history', (req, res) => {
   try {
     const range = (req.query.range as string) || '24h';
