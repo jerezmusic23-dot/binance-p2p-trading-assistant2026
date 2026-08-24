@@ -210,6 +210,60 @@ describe('TEST 8 / 24 - each amount has its own Opportunity', () => {
     expect(tiers['20K'].bestExecutableSell?.amountVes).toBe(20_000);
   });
 
+  it('CASO 3: a 20K BUY and a 30K SELL are never combined', () => {
+    /*
+     * Structurally impossible, not merely unchecked: an Opportunity is built
+     * from ONE cell, and a cell carries one amount. There is no code path
+     * that can reach across two of them.
+     *
+     * Here the 20K cell has a BUY at 919 and the 30K cell a SELL at 980. The
+     * cross would read +6.6%; each cell on its own reads what it really is.
+     */
+    const buyOnly20K = evaluateBankAmount({
+      bank: 'BANESCO',
+      allowedCodes: BANESCO,
+      amountVes: 20_000,
+      buyAds: [ad('BANESCO', { advNo: 'b20', price: 919, maxAmountVes: 25_000 })],
+      sellAds: [ad('BANESCO', { advNo: 's30', price: 980, minAmountVes: 26_000 })],
+    });
+    const sellOnly30K = evaluateBankAmount({
+      bank: 'BANESCO',
+      allowedCodes: BANESCO,
+      amountVes: 30_000,
+      buyAds: [ad('BANESCO', { advNo: 'b20', price: 919, maxAmountVes: 25_000 })],
+      sellAds: [ad('BANESCO', { advNo: 's30', price: 980, minAmountVes: 26_000 })],
+    });
+
+    // 20K: a BUY but no SELL. 30K: a SELL but no BUY.
+    expect(buyOnly20K.bestExecutableBuy?.price).toBe(919);
+    expect(buyOnly20K.bestExecutableSell).toBeNull();
+    expect(sellOnly30K.bestExecutableBuy).toBeNull();
+    expect(sellOnly30K.bestExecutableSell?.price).toBe(980);
+
+    // Neither cell yields an Opportunity, and nothing pairs them.
+    expect(buildOpportunity(buyOnly20K)).toBeNull();
+    expect(buildOpportunity(sellOnly30K)).toBeNull();
+
+    const result = runOpportunityEngine({
+      byBank: { BANESCO: { '20K': buyOnly20K, '30K': sellOnly30K } },
+      bankOrder: BANK_ORDER,
+    });
+    expect(result.opportunities).toEqual([]);
+    expect(result.bestOpportunity).toBeNull();
+  });
+
+  it('every Opportunity carries one amount, shared by both legs', () => {
+    const result = runOpportunityEngine({
+      byBank: { BANESCO: tiers },
+      bankOrder: BANK_ORDER,
+    });
+
+    for (const [key, opportunity] of Object.entries(result.byBank.BANESCO)) {
+      if (opportunity === null) continue;
+      expect(opportunity.amountVes).toBe(tiers[key].amountVes);
+    }
+  });
+
   it('TEST 24: a tier the ads cannot cover has no Opportunity of its own', () => {
     expect(buildOpportunity(tiers['40K'])).not.toBeNull();
     expect(buildOpportunity(tiers['50K'])).toBeNull();
@@ -655,8 +709,65 @@ describe('TEST 30 / 31 / 32 / 33 / 36 - purity of the engine', () => {
   it('TEST 31: does not reach the network or the disk', () => {
     expect(source).not.toContain('fetch(');
     expect(source).not.toMatch(/from 'node:fs'/);
+    expect(source).not.toContain('fs.');
     expect(source).not.toContain('queryP2PAds');
     expect(source).not.toContain('getExecutability');
+  });
+
+  it('carries none of the forbidden identifiers, in one sweep', () => {
+    // The contract's list, checked against the code with comments removed.
+    for (const forbidden of [
+      'Date.now',
+      'fetch(',
+      'fs.',
+      'bestBuyPrice',
+      'bestSellPrice',
+      'spreadPercentage',
+      'strategicBuyPrice',
+      'strategicSellPrice',
+      'medianBuyPrice',
+      'medianSellPrice',
+      'Math.abs',
+      'score',
+      'weight',
+      'confidence',
+      'rank',
+      'heuristicScore',
+    ]) {
+      expect(source, `engine must not contain ${forbidden}`).not.toContain(forbidden);
+    }
+  });
+
+  it('the Opportunity type declares no speculative field', () => {
+    const types = fs.readFileSync(path.join(process.cwd(), 'server', 'types.ts'), 'utf8');
+    const block = types.slice(
+      types.indexOf('export interface Opportunity {'),
+      types.indexOf('export interface OpportunityContext')
+    );
+    const fields = [...block.matchAll(/^\s{2}([a-zA-Z]+)[?]?:/gm)].map((m) => m[1]);
+
+    for (const forbidden of ['score', 'weight', 'confidence', 'rank', 'heuristicScore']) {
+      expect(fields, `Opportunity must not declare ${forbidden}`).not.toContain(forbidden);
+    }
+    // The contract's minimum contract, all present.
+    for (const required of [
+      'bank',
+      'amountVes',
+      'buyPrice',
+      'sellPrice',
+      'buyAdvNo',
+      'sellAdvNo',
+      'spreadAbsolute',
+      'spreadPct',
+      'marginAbsolute',
+      'marginPct',
+      'buyAvailableUsdt',
+      'sellAvailableUsdt',
+      'availableUsdt',
+      'verification',
+    ]) {
+      expect(fields, `Opportunity must declare ${required}`).toContain(required);
+    }
   });
 
   it('TEST 32: imports no stateful module', () => {

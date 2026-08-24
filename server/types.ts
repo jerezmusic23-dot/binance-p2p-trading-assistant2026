@@ -575,6 +575,11 @@ export interface Opportunity {
   /** min(buy, sell) when both are known; null otherwise. Never invented. */
   availableUsdt: number | null;
 
+  /**
+   * Verification of the OPERATION'S LIQUIDITY (the contract's
+   * `liquidityVerification`): VERIFIED only when both legs published a
+   * volume. Executability of each leg was already settled upstream.
+   */
   verification: OpportunityVerification;
   provenance: DataProvenance;
   /** Why this is not VERIFIED, when it is not. */

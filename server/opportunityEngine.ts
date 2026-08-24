@@ -134,7 +134,9 @@ export function selectBestOpportunity(
   opportunities: readonly Opportunity[],
   bankOrder: readonly string[] = []
 ): Opportunity | null {
-  const rank = (bank: string) => {
+  // Position in the canonical bank order - criterion 5. This is an index,
+  // not a score: it ranks nothing about the quality of the operation.
+  const bankOrderIndex = (bank: string) => {
     const i = bankOrder.indexOf(bank);
     return i === -1 ? bankOrder.length : i;
   };
@@ -147,7 +149,7 @@ export function selectBestOpportunity(
       best = candidate;
       continue;
     }
-    if (isBetter(candidate, best, rank)) best = candidate;
+    if (isBetter(candidate, best, bankOrderIndex)) best = candidate;
   }
 
   return best;
@@ -156,7 +158,7 @@ export function selectBestOpportunity(
 function isBetter(
   a: Opportunity,
   b: Opportunity,
-  rank: (bank: string) => number
+  bankOrderIndex: (bank: string) => number
 ): boolean {
   if (a.marginPct !== b.marginPct) return a.marginPct > b.marginPct;
 
@@ -168,9 +170,9 @@ function isBetter(
   if (a.buyPrice !== b.buyPrice) return a.buyPrice < b.buyPrice;
   if (a.sellPrice !== b.sellPrice) return a.sellPrice > b.sellPrice;
 
-  const aRank = rank(a.bank);
-  const bRank = rank(b.bank);
-  if (aRank !== bRank) return aRank < bRank;
+  const aOrder = bankOrderIndex(a.bank);
+  const bOrder = bankOrderIndex(b.bank);
+  if (aOrder !== bOrder) return aOrder < bOrder;
   if (a.bank !== b.bank) return a.bank < b.bank;
 
   return a.amountVes < b.amountVes;
