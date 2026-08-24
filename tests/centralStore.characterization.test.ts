@@ -600,6 +600,139 @@ describe('FASE 4 - executability from the captured book', () => {
   });
 });
 
+describe('FASE 6 - BEST_OPPORTUNITY end to end', () => {
+  /** A book where Banesco is the only bank whose payType actually matches. */
+  const liquidAd = (price: string, extra: Record<string, unknown> = {}) =>
+    makeAdItem({ price, tradable: '5000', min: '1000', max: '100000', ...extra });
+
+  it('exposes the best executable operation without extra requests', async () => {
+    const mock = stubBinance([liquidAd('919.00')], [liquidAd('921.50')]);
+    const { store } = await freshStore();
+
+    const { result } = await store.getOpportunities(true);
+
+    expect(mock).toHaveBeenCalledTimes(Object.keys(BANK_CODE_MAP).length * 2);
+    expect(result.bestOpportunity?.bank).toBe('BANESCO');
+    expect(result.bestOpportunity?.buyPrice).toBe(919);
+    expect(result.bestOpportunity?.sellPrice).toBe(921.5);
+    expect(result.bestOpportunity?.verification).toBe('VERIFIED');
+  });
+
+  it('a second read adds no request at all', async () => {
+    const mock = stubBinance([liquidAd('919.00')], [liquidAd('921.50')]);
+    const { store } = await freshStore();
+
+    await store.getOpportunities(true);
+    const after = mock.mock.calls.length;
+    await store.getOpportunities();
+
+    expect(mock.mock.calls.length).toBe(after);
+  });
+
+  it('an isolated 980 ad does not become the best opportunity', async () => {
+    // The production incident, through the whole pipeline.
+    const level = Array.from({ length: 5 }, (_, i) =>
+      liquidAd((921 + i * 0.1).toFixed(2), { advNo: `s${i}` })
+    );
+    stubBinance(
+      [liquidAd('919.00')],
+      [...level, liquidAd('980.00', { advNo: 'outlier', min: '500000', max: '900000' })]
+    );
+    const { store } = await freshStore();
+
+    const { result } = await store.getOpportunities(true);
+
+    expect(result.bestOpportunity?.sellPrice).toBe(921.4);
+    expect(result.bestOpportunity?.sellAdvNo).not.toBe('outlier');
+    expect(result.bestOpportunity!.marginPct).toBeLessThan(1);
+  });
+
+  it('reports no opportunity rather than inventing one', async () => {
+    // No liquidity published anywhere: nothing is executable.
+    stubBinance(
+      [makeAdItem({ price: '919.00', tradable: '', surplus: '' })],
+      [makeAdItem({ price: '921.50', tradable: '', surplus: '' })]
+    );
+    const { store } = await freshStore();
+
+    const { result } = await store.getOpportunities(true);
+
+    expect(result.bestOpportunity).toBeNull();
+    expect(result.opportunities).toEqual([]);
+  });
+
+  it('OPPORTUNITY_ABOVE fires on the operation, not on a raw spread', async () => {
+    stubBinance([liquidAd('919.00')], [liquidAd('921.50')]);
+    const { store, StorageEngine } = await freshStore();
+    StorageEngine.deleteAlert('rule-spread-high');
+    StorageEngine.deleteAlert('rule-volatility-spike');
+    StorageEngine.saveAlert({
+      id: 'op-rule',
+      name: 'Oportunidad',
+      condition: 'OPPORTUNITY_ABOVE',
+      targetValue: 0.1,
+      targetSide: 'BUY',
+      enabled: true,
+      createdAt: 1,
+    });
+
+    await store.getOpportunities(true); // warms the cache; no extra request later
+    await store.pollMarket();
+
+    const triggers = readData<AlertTriggerLog[]>('alert_triggers.json');
+    expect(triggers).toHaveLength(1);
+    expect(triggers[0].message).toContain('Oportunidad ejecutable en BANESCO');
+    expect(triggers[0].message).toContain('margen bruto');
+  });
+
+  it('does not fire an opportunity alert when no opportunity exists', async () => {
+    stubBinance(
+      [makeAdItem({ price: '919.00', tradable: '', surplus: '' })],
+      [makeAdItem({ price: '980.00', tradable: '', surplus: '' })]
+    );
+    const { store, StorageEngine } = await freshStore();
+    StorageEngine.deleteAlert('rule-spread-high');
+    StorageEngine.deleteAlert('rule-volatility-spike');
+    StorageEngine.saveAlert({
+      id: 'op-rule',
+      name: 'Oportunidad',
+      condition: 'OPPORTUNITY_ABOVE',
+      targetValue: 0.01,
+      targetSide: 'BUY',
+      enabled: true,
+      createdAt: 1,
+    });
+
+    await store.getOpportunities(true);
+    await store.pollMarket();
+
+    expect(fs.existsSync(path.join(tmpDir, 'data', 'alert_triggers.json'))).toBe(false);
+  });
+
+  it('never fires an opportunity alert before the opportunity was computed', async () => {
+    // The alert loop reads the cache only. A cold cache must stay silent
+    // rather than force a bank-matrix refresh on every 6s poll.
+    const mock = stubBinance([liquidAd('919.00')], [liquidAd('921.50')]);
+    const { store, StorageEngine } = await freshStore();
+    StorageEngine.deleteAlert('rule-spread-high');
+    StorageEngine.deleteAlert('rule-volatility-spike');
+    StorageEngine.saveAlert({
+      id: 'op-rule',
+      name: 'Oportunidad',
+      condition: 'OPPORTUNITY_ABOVE',
+      targetValue: 0.01,
+      targetSide: 'BUY',
+      enabled: true,
+      createdAt: 1,
+    });
+
+    await store.pollMarket(); // cache still cold
+
+    expect(fs.existsSync(path.join(tmpDir, 'data', 'alert_triggers.json'))).toBe(false);
+    expect(mock).toHaveBeenCalledTimes(2); // the snapshot's two queries, nothing more
+  });
+});
+
 describe('provenance (phase C1)', () => {
   it('marks a bank/amount cell REAL when an ad really covers that tier', async () => {
     // Default fixture ad: min 1000, max 50000 VES.

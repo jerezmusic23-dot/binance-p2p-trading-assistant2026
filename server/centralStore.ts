@@ -11,6 +11,8 @@ import {
   MarketProjections,
   BankAmountExecutability,
   BankMatrixRow,
+  Opportunity,
+  OpportunityEngineResult,
   NormalizedAd,
   AlertRule,
   AlertTriggerLog,
@@ -19,6 +21,7 @@ import {
 import { BinanceP2PService, BANK_CODE_MAP } from './binanceP2PService.js';
 import { countVerifications } from './bankMatching.js';
 import { AMOUNT_TIERS, evaluateBankTiers } from './executability.js';
+import { runOpportunityEngine } from './opportunityEngine.js';
 import { StorageEngine } from './storage.js';
 import { ProjectionEngine } from './projectionEngine.js';
 import { TelegramNotifier } from './telegramNotifier.js';
@@ -47,6 +50,15 @@ export class CentralMarketStore {
      */
     adsByBank: Record<string, { buy: NormalizedAd[]; sell: NormalizedAd[] }>;
   } | null = null;
+  /*
+   * The opportunity engine's answer for the book the bank matrix last
+   * captured. Recomputed in refreshBankMatrix (every 45s at most), never on
+   * its own schedule, so nothing here adds a request to Binance.
+   *
+   * null means "not computed yet", which is NOT the same as "no opportunity
+   * exists" - the alert loop must not fire on either.
+   */
+  private lastOpportunities: OpportunityEngineResult | null = null;
   private matrixPollingInProgress = false;
   private filteredCache = new Map<
     string,
@@ -486,10 +498,49 @@ export class CentralMarketStore {
     }
 
     const cache = this.bankMatrixCache;
-    const byBank: Record<string, Record<string, BankAmountExecutability>> = {};
+    const byBank = this.deriveExecutability(cache?.adsByBank ?? {});
 
+    return {
+      timestamp: cache?.timestamp ?? Date.now(),
+      byBank,
+      amountKeys: AMOUNT_TIERS.map((t) => t.key),
+    };
+  }
+
+  /**
+   * The best executable operation available right now, or null.
+   *
+   * Derived from the SAME captured book the bank matrix uses. Refreshing when
+   * the cache is cold is the refresh the matrix would have done anyway - no
+   * query is issued on behalf of opportunities.
+   */
+  public async getOpportunities(forceRefresh = false): Promise<{
+    timestamp: number;
+    result: OpportunityEngineResult;
+  }> {
+    const isCacheFresh = this.bankMatrixCache && Date.now() - this.bankMatrixCache.timestamp < 45000;
+    if (forceRefresh || !isCacheFresh || this.lastOpportunities === null) {
+      await this.refreshBankMatrix();
+    }
+
+    return {
+      timestamp: this.bankMatrixCache?.timestamp ?? Date.now(),
+      result: this.lastOpportunities ?? { opportunities: [], byBank: {}, bestOpportunity: null, context: {} },
+    };
+  }
+
+  /** Cached best opportunity. null when none exists OR none was computed yet. */
+  public getCachedBestOpportunity(): Opportunity | null {
+    return this.lastOpportunities?.bestOpportunity ?? null;
+  }
+
+  /** One executability evaluation, shared by the matrix and the opportunities. */
+  private deriveExecutability(
+    adsByBank: Record<string, { buy: NormalizedAd[]; sell: NormalizedAd[] }>
+  ): Record<string, Record<string, BankAmountExecutability>> {
+    const byBank: Record<string, Record<string, BankAmountExecutability>> = {};
     for (const bankKey of Object.keys(BANK_CODE_MAP)) {
-      const ads = cache?.adsByBank[bankKey];
+      const ads = adsByBank[bankKey];
       byBank[bankKey] = evaluateBankTiers({
         bank: bankKey,
         allowedCodes: BANK_CODE_MAP[bankKey].apiPayTypes,
@@ -497,12 +548,7 @@ export class CentralMarketStore {
         sellAds: ads?.sell ?? [],
       });
     }
-
-    return {
-      timestamp: cache?.timestamp ?? Date.now(),
-      byBank,
-      amountKeys: AMOUNT_TIERS.map((t) => t.key),
-    };
+    return byBank;
   }
 
   private async refreshBankMatrix(): Promise<void> {
@@ -667,6 +713,15 @@ export class CentralMarketStore {
         sellMatrix: sellRows,
         adsByBank,
       };
+
+      /*
+       * EXECUTABLE -> OPPORTUNITY, from the book just captured. Pure
+       * computation over data already in memory: zero additional requests.
+       */
+      this.lastOpportunities = runOpportunityEngine({
+        byBank: this.deriveExecutability(adsByBank),
+        bankOrder: Object.keys(BANK_CODE_MAP),
+      });
     } catch (err) {
       console.error('[CentralStore] Error refreshing bank matrix:', err);
     } finally {
@@ -696,6 +751,16 @@ export class CentralMarketStore {
       const targetPrice =
         rule.targetSide === 'BUY' ? snapshot.strategicBuyPrice : snapshot.strategicSellPrice;
       const spreadPct = snapshot.strategicSpreadPct;
+      /*
+       * Read from cache only. Computing it here would force a bank-matrix
+       * refresh on every 6s poll and multiply the request budget; the cached
+       * value is refreshed by refreshBankMatrix at most every 45s.
+       *
+       * null means "no verifiable opportunity right now" OR "not computed
+       * yet". Neither may fire an alert - a missing opportunity is never
+       * reported as one.
+       */
+      const opportunity = this.getCachedBestOpportunity();
       let triggered = false;
       let message = '';
 
@@ -711,6 +776,7 @@ export class CentralMarketStore {
       ) {
         continue;
       }
+      if (rule.condition === 'OPPORTUNITY_ABOVE' && opportunity === null) continue;
 
       switch (rule.condition) {
         case 'ABOVE':
@@ -731,6 +797,25 @@ export class CentralMarketStore {
             message = `Spread estratégico (${spreadPct.toFixed(2)}%) superó el umbral de ${rule.targetValue}%.`;
           }
           break;
+        case 'OPPORTUNITY_ABOVE':
+          /*
+           * Fires on a real operation: same bank, same amount, both legs
+           * executable, liquidity established on both. Never on a spread
+           * between two ads nobody can pair.
+           */
+          if (
+            opportunity !== null &&
+            opportunity.verification === 'VERIFIED' &&
+            opportunity.marginPct >= rule.targetValue
+          ) {
+            triggered = true;
+            message =
+              `Oportunidad ejecutable en ${opportunity.bank} para ` +
+              `${opportunity.amountVes} VES: recompra ${opportunity.buyPrice.toFixed(2)}, ` +
+              `venta ${opportunity.sellPrice.toFixed(2)}, margen bruto ` +
+              `${opportunity.marginPct.toFixed(4)}%.`;
+          }
+          break;
         case 'VOLATILITY_SPIKE':
           if (spreadPct !== null && spreadPct > rule.targetValue * 1.5) {
             triggered = true;
@@ -746,7 +831,11 @@ export class CentralMarketStore {
          * spread implies both sides exist). The guard keeps the persisted
          * AlertTriggerLog schema free of nulls without touching storage.ts.
          */
-        if (targetPrice === null) continue;
+        // An opportunity alert logs the sale price of the operation it reports;
+        // every other condition already required a non-null strategic price.
+        const loggedPrice =
+          rule.condition === 'OPPORTUNITY_ABOVE' ? (opportunity?.sellPrice ?? null) : targetPrice;
+        if (loggedPrice === null) continue;
 
         rule.lastTriggeredAt = now;
         StorageEngine.saveAlert(rule);
@@ -756,7 +845,7 @@ export class CentralMarketStore {
           ruleId: rule.id,
           ruleName: rule.name,
           message,
-          price: targetPrice,
+          price: loggedPrice,
           timestamp: now,
         };
         StorageEngine.logTrigger(log);
@@ -767,7 +856,7 @@ export class CentralMarketStore {
          * throws and never rejects, so a Telegram outage cannot interrupt the
          * alert loop, the polling cycle or persistence.
          */
-        void TelegramNotifier.getInstance().notifyAlert(log, rule, snapshot);
+        void TelegramNotifier.getInstance().notifyAlert(log, rule, snapshot, opportunity);
       }
     }
   }
