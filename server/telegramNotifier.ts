@@ -14,7 +14,7 @@
  *  - Starts disabled and silent when credentials are absent.
  */
 
-import { AlertRule, AlertTriggerLog, MarketSnapshot } from './types.js';
+import { AlertRule, AlertTriggerLog, MarketSnapshot, Opportunity } from './types.js';
 
 /**
  * Default gap between two Telegram messages for the same alert type.
@@ -147,6 +147,59 @@ function strategicLines(snapshot: MarketSnapshot | null): string[] {
 }
 
 /**
+ * The BEST_OPPORTUNITY message.
+ *
+ * Reports ONE real operation: a bank, an amount, an executable repurchase and
+ * an executable sale. Nothing here comes from the raw extremes of the book, so
+ * an isolated 980 VES ad cannot produce this message.
+ *
+ * The margin is stated as GROSS on purpose. Binance commission, bank transfer
+ * fees, slippage and rounding are not modelled anywhere in this project, so
+ * calling it profit would be inventing a number.
+ */
+export function formatOpportunityMessage(
+  opportunity: Opportunity,
+  rule: AlertRule,
+  timestamp: number
+): string {
+  const n = (value: number, decimals = 2) => escapeHtml(value.toFixed(decimals));
+
+  const lines = [
+    '🚨 <b>BEST OPPORTUNITY</b>',
+    '',
+    `Banco: <b>${escapeHtml(opportunity.bank)}</b>`,
+    `Monto: <b>${escapeHtml(opportunity.amountVes.toLocaleString('es-VE'))} VES</b>`,
+    '',
+    `Recompra (BUY): <b>${n(opportunity.buyPrice)} VES</b>`,
+    `Venta (SELL): <b>${n(opportunity.sellPrice)} VES</b>`,
+    '',
+    `Spread: <b>${n(opportunity.spreadPct, 4)}%</b>`,
+    `Margen BRUTO: <b>${n(opportunity.marginAbsolute)} VES por USDT</b>`,
+  ];
+
+  // Absent liquidity is never printed as a number.
+  if (opportunity.availableUsdt !== null) {
+    lines.push(`Liquidez: <b>${n(opportunity.availableUsdt)} USDT</b>`);
+  } else {
+    lines.push('Liquidez: no verificable');
+  }
+
+  lines.push(
+    '',
+    `Umbral: ${escapeHtml(rule.targetValue.toFixed(4))}%`,
+    `Estado: ${escapeHtml(opportunity.verification)} / EXECUTABLE`,
+    '',
+    'MARGEN BRUTO: no descuenta comision de Binance,',
+    'transferencia bancaria, slippage, redondeos',
+    'ni otros costes operativos. NO es beneficio neto.',
+    '',
+    `Hora: ${formatVenezuelaClock(timestamp)}`
+  );
+
+  return lines.join('\n');
+}
+
+/**
  * Builds the message body.
  *
  * Only values that actually exist are printed. Nothing is invented, and no
@@ -157,9 +210,29 @@ function strategicLines(snapshot: MarketSnapshot | null): string[] {
 export function formatAlertMessage(
   trigger: AlertTriggerLog,
   rule: AlertRule,
-  snapshot: MarketSnapshot | null
+  snapshot: MarketSnapshot | null,
+  opportunity?: Opportunity | null
 ): string {
   const time = formatVenezuelaClock(trigger.timestamp);
+
+  /*
+   * An opportunity alert reports the operation, never the market aggregate.
+   * Without the opportunity there is nothing truthful to say, so no message
+   * is fabricated from the snapshot instead.
+   */
+  if (rule.condition === 'OPPORTUNITY_ABOVE') {
+    if (!opportunity) {
+      return [
+        '🚨 <b>BEST OPPORTUNITY</b>',
+        '',
+        'La alerta se disparo pero la oportunidad ya no esta disponible.',
+        'No se reporta ningun precio: el dato falta.',
+        '',
+        `Hora: ${time}`,
+      ].join('\n');
+    }
+    return formatOpportunityMessage(opportunity, rule, trigger.timestamp);
+  }
   const market = escapeHtml(marketLabel(snapshot));
   /*
    * FASE 2: the STRATEGIC spread, the same number the rule was evaluated on.
@@ -273,7 +346,8 @@ export class TelegramNotifier {
   public async notifyAlert(
     trigger: AlertTriggerLog,
     rule: AlertRule,
-    snapshot: MarketSnapshot | null
+    snapshot: MarketSnapshot | null,
+    opportunity?: Opportunity | null
   ): Promise<TelegramResult> {
     try {
       if (!this.config) return { outcome: 'DISABLED' };
@@ -295,7 +369,7 @@ export class TelegramNotifier {
       this.lastSentAt.set(key, now);
       this.prune(now);
 
-      return await this.send(formatAlertMessage(trigger, rule, snapshot));
+      return await this.send(formatAlertMessage(trigger, rule, snapshot, opportunity));
     } catch (err) {
       // Belt and braces: nothing above should throw, and if it somehow does,
       // the alert loop still must not notice.

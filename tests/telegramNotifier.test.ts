@@ -599,3 +599,86 @@ describe('integration - the alert engine keeps running when Telegram fails', () 
     expect(triggers.length).toBeGreaterThan(0);
   });
 });
+
+describe('BEST_OPPORTUNITY message', () => {
+  const opportunityRule: AlertRule = {
+    id: 'op-rule',
+    name: 'Oportunidad ejecutable',
+    condition: 'OPPORTUNITY_ABOVE',
+    targetValue: 0.05,
+    targetSide: 'BUY',
+    enabled: true,
+    createdAt: 1,
+  };
+
+  const opportunity = {
+    bank: 'BANESCO',
+    amountVes: 50_000,
+    buyPrice: 921.39,
+    sellPrice: 921.79,
+    buyAdvNo: 'b',
+    sellAdvNo: 's',
+    spreadAbsolute: 0.4,
+    spreadPct: 0.0434,
+    marginAbsolute: 0.4,
+    marginPct: 0.0434,
+    buyAvailableUsdt: 900,
+    sellAvailableUsdt: 480,
+    availableUsdt: 480,
+    verification: 'VERIFIED' as const,
+    provenance: 'EXECUTABLE' as const,
+    reason: null,
+  };
+
+  it('reports the operation: bank, amount, both prices, spread and liquidity', () => {
+    const text = formatAlertMessage(makeTrigger(), opportunityRule, makeSnapshot(), opportunity);
+
+    expect(text).toContain('BEST OPPORTUNITY');
+    expect(text).toContain('Banco: <b>BANESCO</b>');
+    expect(text).toContain('Recompra (BUY): <b>921.39 VES</b>');
+    expect(text).toContain('Venta (SELL): <b>921.79 VES</b>');
+    expect(text).toContain('0.0434%');
+    expect(text).toContain('480.00 USDT');
+    expect(text).toContain('VERIFIED');
+  });
+
+  it('calls the margin GROSS and says what it does not discount', () => {
+    const text = formatAlertMessage(makeTrigger(), opportunityRule, makeSnapshot(), opportunity);
+
+    expect(text).toContain('Margen BRUTO');
+    expect(text).toContain('NO es beneficio neto');
+    expect(text).not.toMatch(/beneficio neto:/i);
+  });
+
+  it('never reports a raw extreme, whatever the snapshot carries', () => {
+    const text = formatAlertMessage(
+      makeTrigger(),
+      opportunityRule,
+      makeSnapshot({ bestBuyPrice: 919, bestSellPrice: 980, spreadPercentage: 6.64 }),
+      opportunity
+    );
+
+    expect(text).not.toContain('980');
+    expect(text).not.toContain('6.64');
+  });
+
+  it('says liquidity is unverifiable instead of printing a number', () => {
+    const text = formatAlertMessage(makeTrigger(), opportunityRule, makeSnapshot(), {
+      ...opportunity,
+      availableUsdt: null,
+      sellAvailableUsdt: null,
+      verification: 'NOT_VERIFIABLE',
+      provenance: 'NOT_VERIFIABLE',
+    });
+
+    expect(text).toContain('Liquidez: no verificable');
+    expect(text).not.toMatch(/Liquidez: <b>0/);
+  });
+
+  it('fabricates no opportunity when there is none to report', () => {
+    const text = formatAlertMessage(makeTrigger(), opportunityRule, makeSnapshot(), null);
+
+    expect(text).toContain('ya no esta disponible');
+    expect(text).not.toContain('921');
+  });
+});

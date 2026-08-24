@@ -638,7 +638,18 @@ export interface BankMatrixRow {
 export interface AlertRule {
   id: string;
   name: string;
-  condition: 'ABOVE' | 'BELOW' | 'SPREAD_ABOVE' | 'VOLATILITY_SPIKE' | 'TREND_CHANGE';
+  /**
+   * OPPORTUNITY_ABOVE fires on the gross margin of the BEST_OPPORTUNITY - a
+   * real operation at one bank for one amount - not on a spread between two
+   * unrelated ads. targetSide is ignored for it: an operation has both sides.
+   */
+  condition:
+    | 'ABOVE'
+    | 'BELOW'
+    | 'SPREAD_ABOVE'
+    | 'VOLATILITY_SPIKE'
+    | 'TREND_CHANGE'
+    | 'OPPORTUNITY_ABOVE';
   targetValue: number;
   targetSide: 'BUY' | 'SELL';
   enabled: boolean;
