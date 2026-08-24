@@ -17,6 +17,7 @@ import {
 import { BinanceP2PService, BANK_CODE_MAP } from './binanceP2PService.js';
 import { StorageEngine } from './storage.js';
 import { ProjectionEngine } from './projectionEngine.js';
+import { TelegramNotifier } from './telegramNotifier.js';
 
 export class CentralMarketStore {
   private static instance: CentralMarketStore;
@@ -56,6 +57,10 @@ export class CentralMarketStore {
     if (this.pollTimer) return;
 
     console.log('[CentralStore] Starting central market polling loop (every 6s)...');
+
+    // Notification layer: logs its enabled/disabled status once, here, so the
+    // warning appears at boot rather than whenever the first alert fires.
+    TelegramNotifier.getInstance();
     // Initial fetch immediately
     this.pollMarket();
 
@@ -652,6 +657,13 @@ export class CentralMarketStore {
         };
         StorageEngine.logTrigger(log);
         console.log(`[Alerts] TRIGGERED: ${message}`);
+
+        /*
+         * Notification only. Fire-and-forget by design: notifyAlert never
+         * throws and never rejects, so a Telegram outage cannot interrupt the
+         * alert loop, the polling cycle or persistence.
+         */
+        void TelegramNotifier.getInstance().notifyAlert(log, rule, snapshot);
       }
     }
   }
