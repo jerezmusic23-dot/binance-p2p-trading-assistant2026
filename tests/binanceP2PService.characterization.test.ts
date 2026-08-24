@@ -193,6 +193,8 @@ describe('normalizeAds', () => {
       ordersCount: 120,
       finishRate: 0.98,
       paymentMethods: ['Banesco'],
+      // FASE 3: additive. The canonical code is kept alongside the label.
+      paymentOptions: [{ payType: 'Banesco', tradeMethodName: 'Banesco' }],
     });
   });
 

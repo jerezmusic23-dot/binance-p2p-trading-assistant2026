@@ -10,11 +10,13 @@ import {
   MarketAnalysis,
   MarketProjections,
   BankMatrixRow,
+  NormalizedAd,
   AlertRule,
   AlertTriggerLog,
   BacktestMetrics,
 } from './types.js';
 import { BinanceP2PService, BANK_CODE_MAP } from './binanceP2PService.js';
+import { countVerifications } from './bankMatching.js';
 import { StorageEngine } from './storage.js';
 import { ProjectionEngine } from './projectionEngine.js';
 import { TelegramNotifier } from './telegramNotifier.js';
@@ -27,7 +29,22 @@ export class CentralMarketStore {
   private pollingIntervalMs = 6000; // 6 seconds for fast live updates
   private pollTimer: NodeJS.Timeout | null = null;
   private isPolling = false;
-  private bankMatrixCache: { timestamp: number; buyMatrix: BankMatrixRow[]; sellMatrix: BankMatrixRow[] } | null = null;
+  private bankMatrixCache: {
+    timestamp: number;
+    buyMatrix: BankMatrixRow[];
+    sellMatrix: BankMatrixRow[];
+    /*
+     * FASE 3: the normalized ads behind the matrix, kept per bank and side.
+     *
+     * refreshBankMatrix already issues exactly ONE query per bank per side and
+     * filters the amount tiers in memory. It used to throw the ads away and
+     * keep only leaderPrice/suggestedPrice, so anything needing the ads again
+     * (executability by bank x amount) would have had to re-query - turning
+     * 14 requests per cycle into 84. Retaining them here keeps the request
+     * budget flat while making BANK x AMOUNT x SIDE derivable in memory.
+     */
+    adsByBank: Record<string, { buy: NormalizedAd[]; sell: NormalizedAd[] }>;
+  } | null = null;
   private matrixPollingInProgress = false;
   private filteredCache = new Map<
     string,
@@ -464,6 +481,7 @@ export class CentralMarketStore {
 
       const buyRows: BankMatrixRow[] = [];
       const sellRows: BankMatrixRow[] = [];
+      const adsByBank: Record<string, { buy: NormalizedAd[]; sell: NormalizedAd[] }> = {};
 
       // Query banks in sequence or controlled chunks to avoid rate limits
       for (const bankKey of banks) {
@@ -498,6 +516,23 @@ export class CentralMarketStore {
 
           const normalizedBuy = BinanceP2PService.normalizeAds(rawBuyAds);
           const normalizedSell = BinanceP2PService.normalizeAds(rawSellAds);
+
+          // Reusable by FASE 4 without a single extra request to Binance.
+          adsByBank[bankKey] = { buy: normalizedBuy, sell: normalizedSell };
+
+          /*
+           * FASE 3: how many of these ads can be positively verified as this
+           * bank's by exact canonical payType equality.
+           *
+           * REPORTED, NOT ENFORCED. The rates below are still computed over
+           * every ad Binance returned for the payTypes filter. Filtering on
+           * this now would silently empty the matrix if Binance's real payType
+           * values differ from BANK_CODE_MAP.apiPayTypes - and this
+           * environment cannot reach Binance to check. Surfacing the counts
+           * makes the gap visible in Render instead of guessing at it.
+           */
+          buyRow.verificationBuy = countVerifications(normalizedBuy, bankConfig.apiPayTypes);
+          sellRow.verificationSell = countVerifications(normalizedSell, bankConfig.apiPayTypes);
 
           for (const amt of amounts) {
             // Find best matching ads within min-max limits for this amount
@@ -578,6 +613,7 @@ export class CentralMarketStore {
         timestamp: Date.now(),
         buyMatrix: buyRows,
         sellMatrix: sellRows,
+        adsByBank,
       };
     } catch (err) {
       console.error('[CentralStore] Error refreshing bank matrix:', err);

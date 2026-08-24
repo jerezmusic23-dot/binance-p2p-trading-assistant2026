@@ -25,6 +25,8 @@ export function makeAdItem(overrides: {
   monthOrderCount?: number;
   monthFinishRate?: number;
   payTypes?: string[];
+  /** Full control over payType vs tradeMethodName, when they must differ. */
+  tradeMethods?: { payType: string; tradeMethodName: string }[];
   tradeType?: string;
 } = {}): BinanceAdItem {
   return {
@@ -38,11 +40,13 @@ export function makeAdItem(overrides: {
       tradeType: overrides.tradeType ?? 'BUY',
       asset: 'USDT',
       fiatUnit: 'VES',
-      tradeMethods: (overrides.payTypes ?? ['Banesco']).map((p, i) => ({
-        payType: p,
-        payMethodId: `pm-${i}`,
-        tradeMethodName: p,
-      })),
+      tradeMethods:
+        overrides.tradeMethods?.map((m, i) => ({ ...m, payMethodId: `pm-${i}` })) ??
+        (overrides.payTypes ?? ['Banesco']).map((p, i) => ({
+          payType: p,
+          payMethodId: `pm-${i}`,
+          tradeMethodName: p,
+        })),
     },
     advertiser: {
       userNo: 'user-1',
@@ -95,6 +99,7 @@ export function makeNormalizedAd(price: number, availableUsdt = 100): Normalized
     ordersCount: 100,
     finishRate: 0.98,
     paymentMethods: ['Banesco'],
+    paymentOptions: [{ payType: 'Banesco', tradeMethodName: 'Banesco' }],
   };
 }
 

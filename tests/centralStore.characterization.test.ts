@@ -11,6 +11,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { makeAdItem, makeBinanceResponse } from './helpers/fixtures.js';
+import { BANK_CODE_MAP } from '../server/binanceP2PService.js';
 import type { AlertRule, AlertTriggerLog, HistoryRecord } from '../server/types.js';
 
 const originalCwd = process.cwd();
@@ -442,6 +443,76 @@ describe('analysis / projections window', () => {
     const metrics = store.getBacktestMetrics();
     expect(spy).toHaveBeenCalledWith();
     expect(metrics.hasSufficientData).toBe(false); // empty store
+  });
+});
+
+describe('FASE 3 - bank verification in the matrix', () => {
+  it('keeps the request budget flat: 1 query per bank per side, 6 amount tiers in memory', async () => {
+    /*
+     * 7 banks x 2 sides = 14 requests. Querying each of the 6 amount tiers
+     * separately would be 7 x 6 x 2 = 84. The tiers are filtered in memory
+     * from those same 14 responses, and FASE 3 does not add a single request.
+     */
+    const mock = stubBinance([makeAdItem({ price: '918.00' })], [makeAdItem({ price: '921.00' })]);
+    const { store } = await freshStore();
+
+    const matrix = await store.getBankMatrix('SELL', true);
+
+    const bankCount = Object.keys(BANK_CODE_MAP).length;
+    expect(mock).toHaveBeenCalledTimes(bankCount * 2);
+    // All six tiers were still produced, from those same responses.
+    expect(Object.keys(matrix.rows[0].ratesByAmount)).toEqual([
+      '10K',
+      '20K',
+      '30K',
+      '40K',
+      '50K',
+      '100K',
+    ]);
+  });
+
+  it('reports how many ads could be verified as the bank they were fetched for', async () => {
+    // The fixture ad carries payType 'Banesco' for every bank query, so only
+    // the Banesco row can verify. The rest are honestly NOT_VERIFIED.
+    stubBinance([makeAdItem({ price: '918.00' })], [makeAdItem({ price: '921.00' })]);
+    const { store } = await freshStore();
+
+    const matrix = await store.getBankMatrix('SELL', true);
+    const banesco = matrix.rows.find((r) => r.bankKey === 'BANESCO');
+    const provincial = matrix.rows.find((r) => r.bankKey === 'PROVINCIAL');
+
+    expect(banesco?.verificationSell).toEqual({ verified: 1, notVerified: 0, notVerifiable: 0 });
+    expect(provincial?.verificationSell).toEqual({ verified: 0, notVerified: 1, notVerifiable: 0 });
+  });
+
+  it('counts an ad with no canonical code as NOT_VERIFIABLE, never as the bank', async () => {
+    stubBinance(
+      [makeAdItem({ price: '918.00' })],
+      [makeAdItem({ price: '921.00', tradeMethods: [{ payType: '', tradeMethodName: 'Banesco' }] })]
+    );
+    const { store } = await freshStore();
+
+    const matrix = await store.getBankMatrix('SELL', true);
+    const banesco = matrix.rows.find((r) => r.bankKey === 'BANESCO');
+
+    expect(banesco?.verificationSell).toEqual({ verified: 0, notVerified: 0, notVerifiable: 1 });
+  });
+
+  it('reports verification without yet filtering the published rates', async () => {
+    /*
+     * Deliberate: this environment cannot reach Binance to confirm what its
+     * real payType values are. Filtering on an unconfirmed mapping would
+     * silently empty the matrix in production. The counts make the gap
+     * visible; FASE 4 enforces once they are confirmed in Render.
+     */
+    stubBinance([makeAdItem({ price: '918.00' })], [makeAdItem({ price: '921.00' })]);
+    const { store } = await freshStore();
+
+    const matrix = await store.getBankMatrix('SELL', true);
+    const provincial = matrix.rows.find((r) => r.bankKey === 'PROVINCIAL');
+
+    expect(provincial?.verificationSell?.verified).toBe(0);
+    expect(provincial?.ratesByAmount['10K'].leaderPrice).toBe(921); // still published
   });
 });
 

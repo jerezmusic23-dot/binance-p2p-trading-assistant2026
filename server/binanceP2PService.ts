@@ -149,9 +149,23 @@ export class BinanceP2PService {
       const maxAmountVes = parseFloat(item.adv.maxSingleTransAmount) || 0;
       const availableUsdt = parseFloat(item.adv.tradableQuantity || item.adv.surplusAmount) || 0;
 
-      const paymentMethods = Array.isArray(item.adv.tradeMethods)
-        ? item.adv.tradeMethods.map((m) => m.tradeMethodName || m.payType).filter(Boolean)
-        : [];
+      const tradeMethods = Array.isArray(item.adv.tradeMethods) ? item.adv.tradeMethods : [];
+
+      // UNCHANGED: the human-readable list existing consumers already read.
+      const paymentMethods = tradeMethods.map((m) => m.tradeMethodName || m.payType).filter(Boolean);
+
+      /*
+       * FASE 3: Binance's payment methods kept VERBATIM, canonical code
+       * included. paymentMethods above collapses payType into
+       * tradeMethodName, so the canonical code ('BBVAProvincial') was lost
+       * and only the label ('Provincial (BBVA)') survived - a label that does
+       * not equal any code in BANK_CODE_MAP.apiPayTypes. Bank verification
+       * compares against payType and nothing else.
+       */
+      const paymentOptions = tradeMethods.map((m) => ({
+        payType: m.payType ?? null,
+        tradeMethodName: m.tradeMethodName ?? null,
+      }));
 
       list.push({
         advNo: item.adv.advNo,
@@ -164,6 +178,7 @@ export class BinanceP2PService {
         ordersCount: item.advertiser.monthOrderCount || 0,
         finishRate: item.advertiser.monthFinishRate || 0,
         paymentMethods,
+        paymentOptions,
       });
     }
 

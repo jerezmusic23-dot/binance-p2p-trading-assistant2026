@@ -98,6 +98,29 @@ export interface BinanceP2PResponse {
   success: boolean;
 }
 
+/**
+ * One payment method as Binance published it, kept VERBATIM.
+ *
+ * `payType` is the canonical machine code ('BBVAProvincial', 'PagoMovil'...)
+ * and is the ONLY field bank verification is allowed to compare against.
+ * `tradeMethodName` is the human-readable label; it exists for display and
+ * for auditing what Binance actually sent, and matching on it would merge
+ * banks that share a label.
+ */
+export interface AdPaymentMethod {
+  payType: string | null;
+  tradeMethodName: string | null;
+}
+
+/**
+ * VERIFIED      - a payType matched a canonical bank code exactly.
+ * NOT_VERIFIED  - the ad declares codes, none of them this bank's.
+ * NOT_VERIFIABLE- the question cannot be answered: the ad carries no
+ *                 canonical code, or the bank declares none. Never treated
+ *                 as belonging to the bank.
+ */
+export type BankVerification = 'VERIFIED' | 'NOT_VERIFIED' | 'NOT_VERIFIABLE';
+
 export interface NormalizedAd {
   advNo: string;
   price: number;
@@ -108,7 +131,16 @@ export interface NormalizedAd {
   userType: string;
   ordersCount: number;
   finishRate: number;
+  /**
+   * Human-readable labels. UNCHANGED: existing consumers (OrderBookView)
+   * still read this. Never used for bank verification.
+   */
   paymentMethods: string[];
+  /**
+   * Binance's payment methods verbatim, canonical code included. This is what
+   * bank verification compares against.
+   */
+  paymentOptions: AdPaymentMethod[];
 }
 
 export interface MarketSnapshot {
@@ -395,10 +427,27 @@ export interface BacktestMetrics {
   lastEvaluatedAt: string;
 }
 
+/** How a bank's ad population splits across the three verification verdicts. */
+export interface BankVerificationCounts {
+  verified: number;
+  notVerified: number;
+  notVerifiable: number;
+}
+
 export interface BankMatrixRow {
   bankKey: string;
   bankDisplayName: string;
   iconName?: string;
+  /**
+   * FASE 3: how many of this bank's ads could be positively verified as
+   * belonging to it by exact canonical payType equality.
+   *
+   * Reported, NOT yet enforced. The rates below are still computed over every
+   * ad Binance returned for the bank filter. Once these counts confirm what
+   * Binance really sends in payType, FASE 4 can filter on them.
+   */
+  verificationBuy?: BankVerificationCounts;
+  verificationSell?: BankVerificationCounts;
   ratesByAmount: {
     [amountKey: string]: {
       leaderPrice: number | null;
