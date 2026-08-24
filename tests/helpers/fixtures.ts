@@ -114,6 +114,11 @@ export function makeSnapshot(overrides: Partial<MarketSnapshot> = {}): MarketSna
     weightedSellPrice: 920.7,
     spreadAbsolute: 3.0,
     spreadPercentage: 0.33,
+    // Strategic = the medians above. signedSpreadPct(920.6, 918.4) = 0.2396...
+    strategicBuyPrice: 918.4,
+    strategicSellPrice: 920.6,
+    strategicSpreadPct: 0.24,
+    strategicReason: null,
     topBuyAds: [makeNormalizedAd(918.0), makeNormalizedAd(918.5)],
     topSellAds: [makeNormalizedAd(921.0), makeNormalizedAd(920.5)],
     source: 'BINANCE_P2P',
@@ -124,6 +129,7 @@ export function makeSnapshot(overrides: Partial<MarketSnapshot> = {}): MarketSna
     bestSell: { value: 921.0, provenance: 'REAL' },
     aggregatesProvenance: 'AGGREGATED',
     orderBookProvenance: 'REAL',
+    strategicProvenance: 'STRATEGIC',
     ...overrides,
   };
 }

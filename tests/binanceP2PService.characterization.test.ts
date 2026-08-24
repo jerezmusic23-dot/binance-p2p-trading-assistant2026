@@ -423,3 +423,53 @@ describe('FASE 2 - medians agree across both sides', () => {
     expect(snap.medianSellPrice).toBe(921.5);
   });
 });
+
+describe('FASE 2 - strategic prices', () => {
+  const adsAt = (prices: number[]) =>
+    prices.map((p, i) => makeAdItem({ advNo: `a${i}`, price: p.toFixed(2), tradable: '100' }));
+
+  function stubSides(buy: number[], sell: number[]) {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init: RequestInit) => {
+        const body = JSON.parse(String(init.body));
+        return {
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+          json: async () => makeBinanceResponse(adsAt(body.tradeType === 'BUY' ? buy : sell)),
+        } as unknown as Response;
+      })
+    );
+  }
+
+  it('takes RECOMPRA from the BUY side and VENTA from the SELL side', async () => {
+    stubSides([921.0, 921.4, 921.8], [922.0, 922.4, 922.8]);
+    const snap = await BinanceP2PService.fetchFullMarketSnapshot();
+
+    expect(snap.strategicBuyPrice).toBe(921.4);
+    expect(snap.strategicSellPrice).toBe(922.4);
+    expect(snap.strategicProvenance).toBe('STRATEGIC');
+    expect(snap.strategicReason).toBeNull();
+  });
+
+  it('divides by the repurchase price, never by whichever is smaller', async () => {
+    // A losing market: venta 918 under recompra 941. The raw formula picks
+    // min() as the denominator and takes the absolute value; the strategic
+    // one keeps the sign and always divides by the repurchase price.
+    stubSides([941.0], [918.0]);
+    const snap = await BinanceP2PService.fetchFullMarketSnapshot();
+
+    expect(snap.strategicSpreadPct).toBeCloseTo(((918 - 941) / 941) * 100, 2);
+    expect(snap.strategicSpreadPct!).toBeLessThan(0);
+  });
+
+  it('says which side is missing instead of producing a number', async () => {
+    stubSides([], [921.0, 921.5]);
+    const snap = await BinanceP2PService.fetchFullMarketSnapshot();
+
+    expect(snap.strategicBuyPrice).toBeNull();
+    expect(snap.strategicSpreadPct).toBeNull();
+    expect(snap.strategicReason).toContain('BUY');
+  });
+});

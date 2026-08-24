@@ -43,7 +43,7 @@ export const MainOverview: React.FC<MainOverviewProps> = ({
   derivedAgeSeconds = 0,
   onNavigateTab,
 }) => {
-  if (!snapshot || snapshot.bestBuyPrice === null) {
+  if (!snapshot || snapshot.strategicBuyPrice === null) {
     return (
       <div id="overview-loading" className="p-8 text-center bg-[#181a20] rounded-lg border border-[#2b2f36]">
         <div className="w-10 h-10 border-3 border-[#FCD535] border-t-transparent rounded-full animate-spin mx-auto mb-4" />
@@ -249,13 +249,13 @@ export const MainOverview: React.FC<MainOverviewProps> = ({
           <div className="mt-1">
             <div className="flex items-baseline gap-2">
               <span className="text-4xl font-black font-mono tracking-tight text-[#FCD535] leading-none">
-                {fmt(snapshot.bestBuyPrice)}
+                {fmt(snapshot.strategicBuyPrice)}
               </span>
               <span className="text-xs font-semibold text-[#848e9c]">VES/USDT</span>
             </div>
             <div className="flex items-center justify-between text-xs mt-4 pt-3 border-t border-[#2b2f36] text-[#848e9c]">
-              <span>Venta: <strong className="text-[#FCD535] font-mono">{fmt(snapshot.bestSellPrice)}</strong></span>
-              <span>Spread: <strong className="text-[#e0e0e0] font-mono">{fmtPct(snapshot.spreadPercentage)}</strong></span>
+              <span>Venta: <strong className="text-[#FCD535] font-mono">{fmt(snapshot.strategicSellPrice)}</strong></span>
+              <span>Spread: <strong className="text-[#e0e0e0] font-mono">{fmtPct(snapshot.strategicSpreadPct)}</strong></span>
             </div>
           </div>
         </div>

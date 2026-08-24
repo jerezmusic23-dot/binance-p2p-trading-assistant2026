@@ -10,7 +10,7 @@ import {
   MarketSnapshot,
   Valued,
 } from './types.js';
-import { describeSide, round2, weightedAverage } from './marketStatistics.js';
+import { describeSide, round2, signedSpreadPct, weightedAverage } from './marketStatistics.js';
 
 export interface P2PSearchParams {
   asset?: string;
@@ -252,6 +252,32 @@ export class BinanceP2PService {
     const missingSide = (side: 'BUY' | 'SELL') =>
       `El lado ${side} no devolvio anuncios. No hay precio: la ausencia es el dato.`;
 
+    /*
+     * STRATEGIC PRICES.
+     *
+     * RECOMPRA = Binance BUY, VENTA = Binance SELL. Both are taken as the
+     * MEDIAN of their side, which is where the market actually is. The
+     * extremes above (min BUY / max SELL) estimate the tail of the ad
+     * population: one distant ad at 980 VES moves max(SELL) by 58 VES and
+     * leaves the median untouched. They stay in the snapshot as the raw audit
+     * trail, but nothing decides on them any more.
+     */
+    const strategicBuyPrice = medianBuyPrice;
+    const strategicSellPrice = medianSellPrice;
+
+    // Signed on purpose: venta below recompra is a LOSS and has to stay
+    // distinguishable from a gain. Denominator is always the repurchase price.
+    const strategicSpreadPct = round2(signedSpreadPct(strategicSellPrice, strategicBuyPrice));
+
+    const strategicReason =
+      strategicBuyPrice === null && strategicSellPrice === null
+        ? 'Ningun lado del libro devolvio anuncios: no hay precio estrategico.'
+        : strategicBuyPrice === null
+          ? missingSide('BUY')
+          : strategicSellPrice === null
+            ? missingSide('SELL')
+            : null;
+
     const bestBuy: Valued<number | null> = hasBuySide
       ? { value: bestBuyPrice, provenance: 'REAL' }
       : { value: null, provenance: 'REAL', reason: missingSide('BUY') };
@@ -277,6 +303,10 @@ export class BinanceP2PService {
       weightedSellPrice,
       spreadAbsolute,
       spreadPercentage,
+      strategicBuyPrice,
+      strategicSellPrice,
+      strategicSpreadPct,
+      strategicReason,
       topBuyAds: topBuyAds.slice(0, 10),
       topSellAds: topSellAds.slice(0, 10),
       source: 'BINANCE_P2P',
@@ -287,6 +317,7 @@ export class BinanceP2PService {
       bestSell,
       aggregatesProvenance: 'AGGREGATED',
       orderBookProvenance: 'REAL',
+      strategicProvenance: 'STRATEGIC',
     };
   }
 }

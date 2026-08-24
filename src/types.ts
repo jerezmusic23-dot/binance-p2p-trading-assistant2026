@@ -7,7 +7,7 @@ export type TradeType = 'BUY' | 'SELL';
  * PROJECTED  - an extrapolation about a moment that has not happened yet.
  * HEURISTIC  - a hand-written rule, hardcoded constant or invented fallback.
  */
-export type DataProvenance = 'REAL' | 'AGGREGATED' | 'PROJECTED' | 'HEURISTIC';
+export type DataProvenance = 'REAL' | 'AGGREGATED' | 'PROJECTED' | 'HEURISTIC' | 'STRATEGIC';
 
 export interface DataWindow {
   sampleCount: number;
@@ -66,6 +66,17 @@ export interface MarketSnapshot {
   weightedSellPrice: number | null;
   spreadAbsolute: number | null;
   spreadPercentage: number | null;
+
+  /**
+   * STRATEGIC PRICES - what the operator actually decides on.
+   * RECOMPRA = Binance BUY (what I pay), VENTA = Binance SELL (what I receive).
+   * Robust central level of each side, not the extremes.
+   */
+  strategicBuyPrice: number | null;
+  strategicSellPrice: number | null;
+  /** ((venta - recompra) / recompra) * 100. SIGNED; denominator always recompra. */
+  strategicSpreadPct: number | null;
+  strategicReason: string | null;
   topBuyAds: NormalizedAd[];
   topSellAds: NormalizedAd[];
   source: 'BINANCE_P2P';
@@ -77,6 +88,7 @@ export interface MarketSnapshot {
   bestSell: Valued<number | null>;
   aggregatesProvenance: DataProvenance;
   orderBookProvenance: DataProvenance;
+  strategicProvenance: DataProvenance;
   /** Set when a bank/amount filter was requested but unfiltered data was served. */
   filterFallbackReason?: string;
 }

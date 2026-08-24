@@ -126,6 +126,27 @@ function marketLabel(snapshot: MarketSnapshot | null): string {
 }
 
 /**
+ * The strategic level both sides of the operation sit at, when it is known.
+ *
+ * RECOMPRA is Binance BUY (what I pay), VENTA is Binance SELL (what I
+ * receive). Printed so the recipient can see WHERE the market is, not only
+ * that a threshold was crossed. Omitted entirely when a side is missing -
+ * an absent price is never shown as 0 or as a plausible number.
+ */
+function strategicLines(snapshot: MarketSnapshot | null): string[] {
+  const recompra = snapshot?.strategicBuyPrice;
+  const venta = snapshot?.strategicSellPrice;
+  if (recompra === null || recompra === undefined || venta === null || venta === undefined) {
+    return [];
+  }
+  return [
+    '',
+    `Recompra (BUY): <b>${escapeHtml(recompra.toFixed(2))} VES</b>`,
+    `Venta (SELL): <b>${escapeHtml(venta.toFixed(2))} VES</b>`,
+  ];
+}
+
+/**
  * Builds the message body.
  *
  * Only values that actually exist are printed. Nothing is invented, and no
@@ -140,18 +161,25 @@ export function formatAlertMessage(
 ): string {
   const time = formatVenezuelaClock(trigger.timestamp);
   const market = escapeHtml(marketLabel(snapshot));
-  const spread = snapshot?.spreadPercentage;
+  /*
+   * FASE 2: the STRATEGIC spread, the same number the rule was evaluated on.
+   * spreadPercentage is the raw |max(SELL) - min(BUY)| figure and is what
+   * reported 6.64% while the market sat at 0.14%. Reporting one number and
+   * deciding on another is how the 980 VES ad became an alert.
+   */
+  const spread = snapshot?.strategicSpreadPct;
 
   if (rule.condition === 'SPREAD_ABOVE') {
     return [
       '🔴 <b>ALERTA P2P</b>',
       '',
-      `Spread: <b>${spread !== null && spread !== undefined ? escapeHtml(spread.toFixed(2)) : '--'}%</b>`,
+      `Spread estratégico: <b>${spread !== null && spread !== undefined ? escapeHtml(spread.toFixed(2)) : '--'}%</b>`,
       `Umbral: ${escapeHtml(rule.targetValue.toFixed(2))}%`,
       '',
       `Mercado: ${market}`,
+      ...strategicLines(snapshot),
       '',
-      'Tipo: Spread P2P',
+      'Tipo: Spread estratégico (mediana VENTA vs mediana RECOMPRA)',
       'Estado: ACTIVADO',
       '',
       `Hora: ${time}`,
@@ -169,11 +197,11 @@ export function formatAlertMessage(
     // The rule compares the spread against targetValue * 1.5. Report exactly
     // that, so the number in the message matches what was measured.
     if (spread !== null && spread !== undefined) {
-      lines.push(`Spread medido: <b>${escapeHtml(spread.toFixed(2))}%</b>`);
+      lines.push(`Spread estratégico medido: <b>${escapeHtml(spread.toFixed(2))}%</b>`);
       lines.push(`Umbral efectivo: ${escapeHtml((rule.targetValue * 1.5).toFixed(2))}%`);
       lines.push('');
     }
-    lines.push(`Mercado: ${market}`, '', `Hora: ${time}`);
+    lines.push(`Mercado: ${market}`, ...strategicLines(snapshot), '', `Hora: ${time}`);
     return lines.join('\n');
   }
 
@@ -182,10 +210,11 @@ export function formatAlertMessage(
   return [
     `${above ? '🟢' : '🔻'} <b>ALERTA DE PRECIO</b>`,
     '',
-    `Precio ${escapeHtml(rule.targetSide)}: <b>${escapeHtml(trigger.price.toFixed(2))} VES</b>`,
+    `Precio estratégico ${escapeHtml(rule.targetSide)}: <b>${escapeHtml(trigger.price.toFixed(2))} VES</b>`,
     `Umbral: ${escapeHtml(rule.targetValue.toFixed(2))} VES`,
     '',
     `Mercado: ${market}`,
+    ...strategicLines(snapshot),
     '',
     `Tipo: ${above ? 'Precio por encima del umbral' : 'Precio por debajo del umbral'}`,
     'Estado: ACTIVADO',

@@ -162,6 +162,10 @@ export class CentralMarketStore {
           weightedSellPrice: null,
           spreadAbsolute: null,
           spreadPercentage: null,
+          strategicBuyPrice: null,
+          strategicSellPrice: null,
+          strategicSpreadPct: null,
+          strategicReason: 'No se ha obtenido ningun snapshot valido de Binance todavia.',
           topBuyAds: [],
           topSellAds: [],
           source: 'BINANCE_P2P',
@@ -180,6 +184,7 @@ export class CentralMarketStore {
           },
           aggregatesProvenance: 'REAL',
           orderBookProvenance: 'REAL',
+          strategicProvenance: 'STRATEGIC',
         };
       }
       return this.currentSnapshot;
@@ -591,7 +596,18 @@ export class CentralMarketStore {
         continue;
       }
 
-      const targetPrice = rule.targetSide === 'BUY' ? snapshot.bestBuyPrice : snapshot.bestSellPrice;
+      /*
+       * FASE 2: alerts decide on the STRATEGIC price, never on the extremes.
+       *
+       * targetSide 'BUY' is the repurchase price (Binance BUY, what I pay);
+       * 'SELL' is the sale price (Binance SELL, what I receive). Reading
+       * bestBuyPrice / bestSellPrice here is what let a single 980 VES ad on
+       * one side of the book fire Telegram: max(SELL) tracks the furthest ad,
+       * not the market.
+       */
+      const targetPrice =
+        rule.targetSide === 'BUY' ? snapshot.strategicBuyPrice : snapshot.strategicSellPrice;
+      const spreadPct = snapshot.strategicSpreadPct;
       let triggered = false;
       let message = '';
 
@@ -603,7 +619,7 @@ export class CentralMarketStore {
       if (needsPrice && targetPrice === null) continue;
       if (
         (rule.condition === 'SPREAD_ABOVE' || rule.condition === 'VOLATILITY_SPIKE') &&
-        snapshot.spreadPercentage === null
+        spreadPct === null
       ) {
         continue;
       }
@@ -612,25 +628,25 @@ export class CentralMarketStore {
         case 'ABOVE':
           if (targetPrice !== null && targetPrice >= rule.targetValue) {
             triggered = true;
-            message = `Precio ${rule.targetSide} (${targetPrice.toFixed(2)} VES) superó el umbral de ${rule.targetValue} VES.`;
+            message = `Precio estratégico ${rule.targetSide} (${targetPrice.toFixed(2)} VES) superó el umbral de ${rule.targetValue} VES.`;
           }
           break;
         case 'BELOW':
           if (targetPrice !== null && targetPrice <= rule.targetValue) {
             triggered = true;
-            message = `Precio ${rule.targetSide} (${targetPrice.toFixed(2)} VES) cayó por debajo de ${rule.targetValue} VES.`;
+            message = `Precio estratégico ${rule.targetSide} (${targetPrice.toFixed(2)} VES) cayó por debajo de ${rule.targetValue} VES.`;
           }
           break;
         case 'SPREAD_ABOVE':
-          if (snapshot.spreadPercentage !== null && snapshot.spreadPercentage >= rule.targetValue) {
+          if (spreadPct !== null && spreadPct >= rule.targetValue) {
             triggered = true;
-            message = `Spread P2P (${snapshot.spreadPercentage.toFixed(2)}%) superó el umbral de ${rule.targetValue}%.`;
+            message = `Spread estratégico (${spreadPct.toFixed(2)}%) superó el umbral de ${rule.targetValue}%.`;
           }
           break;
         case 'VOLATILITY_SPIKE':
-          if (snapshot.spreadPercentage !== null && snapshot.spreadPercentage > rule.targetValue * 1.5) {
+          if (spreadPct !== null && spreadPct > rule.targetValue * 1.5) {
             triggered = true;
-            message = `Alta volatilidad detectada en el libro de órdenes Binance P2P.`;
+            message = `Spread estratégico (${spreadPct.toFixed(2)}%) superó ${(rule.targetValue * 1.5).toFixed(2)}% en el libro Binance P2P.`;
           }
           break;
       }

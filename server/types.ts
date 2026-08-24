@@ -20,7 +20,7 @@ export type TradeType = 'BUY' | 'SELL';
  * A value that would otherwise be unknown is HEURISTIC, never REAL. Phase C2
  * replaces those with null; C1 only labels them.
  */
-export type DataProvenance = 'REAL' | 'AGGREGATED' | 'PROJECTED' | 'HEURISTIC';
+export type DataProvenance = 'REAL' | 'AGGREGATED' | 'PROJECTED' | 'HEURISTIC' | 'STRATEGIC';
 
 /** The stored observations an AGGREGATED or PROJECTED value was derived from. */
 export interface DataWindow {
@@ -141,6 +141,32 @@ export interface MarketSnapshot {
   /** null unless BOTH sides are present - a spread needs two prices. */
   spreadAbsolute: number | null;
   spreadPercentage: number | null;
+
+  /**
+   * STRATEGIC PRICES - what the operator actually decides on.
+   *
+   * RECOMPRA = Binance BUY  : the price I pay to acquire USDT.
+   * VENTA    = Binance SELL : the price I receive when selling USDT.
+   *
+   * These are the robust central level of each side (the median), NOT the
+   * extremes. min(BUY) and max(SELL) estimate the tail of the ad population,
+   * not the market level, so a single distant ad moves them by tens of VES
+   * while leaving the real market untouched. bestBuyPrice / bestSellPrice are
+   * kept above as the RAW audit trail; every decision is taken on these.
+   */
+  strategicBuyPrice: number | null;
+  strategicSellPrice: number | null;
+  /**
+   * ((venta - recompra) / recompra) * 100.
+   *
+   * SIGNED - a negative value means selling below repurchase, i.e. a loss, and
+   * must stay distinguishable from a gain. The denominator is ALWAYS the
+   * repurchase price, never whichever of the two happens to be smaller.
+   * null unless both strategic prices exist.
+   */
+  strategicSpreadPct: number | null;
+  /** Why a strategic value is null, when it is. */
+  strategicReason: string | null;
   
   // Raw ad lists
   topBuyAds: NormalizedAd[];
@@ -164,6 +190,8 @@ export interface MarketSnapshot {
   aggregatesProvenance: DataProvenance;
   /** topBuyAds / topSellAds: always REAL, they are the ads as published. */
   orderBookProvenance: DataProvenance;
+  /** strategicBuyPrice / strategicSellPrice / strategicSpreadPct. */
+  strategicProvenance: DataProvenance;
   /**
    * Set when a bank/amount filter was requested but the filtered query failed
    * and unfiltered data was served instead. Absent means the filter was honoured.

@@ -304,9 +304,11 @@ describe('evaluateAlerts', () => {
     expect(fs.existsSync(path.join(tmpDir, 'data', 'alert_triggers.json'))).toBe(false);
   });
 
-  it('BUG: VOLATILITY_SPIKE actually measures the spread, not volatility', async () => {
-    // Audit B14: the rule compares snapshot.spreadPercentage > targetValue*1.5.
-    // A wide but perfectly stable spread reports a "volatility spike".
+  it('VOLATILITY_SPIKE names the metric it actually measures: the spread', async () => {
+    // Audit B14 (FIXED in FASE 2): the rule compares the strategic spread
+    // against targetValue*1.5. It never measured volatility, and the message
+    // no longer claims it did - a wide but perfectly stable spread is
+    // reported as exactly that.
     const { store, StorageEngine } = await pollWithSpread('918.00', '941.00'); // 2.51% > 1.5*1.5
     StorageEngine.deleteAlert('rule-spread-high');
     await store.pollMarket();
@@ -314,7 +316,78 @@ describe('evaluateAlerts', () => {
     const triggers = readData<AlertTriggerLog[]>('alert_triggers.json');
     expect(triggers).toHaveLength(1);
     expect(triggers[0].ruleId).toBe('rule-volatility-spike');
-    expect(triggers[0].message).toContain('Alta volatilidad');
+    expect(triggers[0].message).toContain('Spread estratégico');
+    expect(triggers[0].message).toContain('2.51%');
+    expect(triggers[0].message).not.toContain('Alta volatilidad');
+  });
+
+  it('FASE 2: a single distant ad no longer fires a spread alert', async () => {
+    /*
+     * The production incident, end to end through the real decision path.
+     *
+     * 19 SELL ads sitting at ~921 VES plus ONE at 980. The raw spread
+     * |max(SELL) - min(BUY)| reads 6.64%, well over the 2% threshold, and
+     * that is what used to reach Telegram. The market never moved: the
+     * strategic spread is 0.06%, so nothing should fire.
+     */
+    const level = Array.from({ length: 19 }, (_, i) =>
+      makeAdItem({ advNo: `s${i}`, price: (921 + i * 0.05).toFixed(2) })
+    );
+    stubBinance(level, [...level, makeAdItem({ advNo: 'outlier', price: '980.00' })]);
+    const { store } = await freshStore();
+
+    const snapshot = await store.pollMarket();
+
+    // The raw extreme is preserved for auditing...
+    expect(snapshot?.bestSellPrice).toBe(980);
+    expect(snapshot?.spreadPercentage).toBeGreaterThan(6);
+    // ...but the strategic level is where the market actually is.
+    expect(snapshot?.strategicSpreadPct).toBeLessThan(0.2);
+    // ...and no alert was raised.
+    expect(fs.existsSync(path.join(tmpDir, 'data', 'alert_triggers.json'))).toBe(false);
+  });
+
+  it('FASE 2: a loss keeps its sign instead of being flattened by Math.abs', async () => {
+    // Venta BELOW recompra is a losing operation. The raw spread takes the
+    // absolute value, so a loss was indistinguishable from a gain.
+    stubBinance([makeAdItem({ price: '941.00' })], [makeAdItem({ price: '918.00' })]);
+    const { store } = await freshStore();
+    const snapshot = await store.pollMarket();
+
+    expect(snapshot?.spreadPercentage).toBeGreaterThan(0); // raw: sign destroyed
+    expect(snapshot?.strategicSpreadPct).toBeLessThan(0); // strategic: it is a loss
+  });
+
+  it('FASE 2: an ABOVE rule decides on the strategic price, not on the extreme', async () => {
+    /*
+     * min(BUY) is 900 - below a 910 threshold - while the market sits at 921.
+     * A BELOW rule at 910 used to fire on that single cheap ad.
+     */
+    const buy = [
+      makeAdItem({ advNo: 'cheap', price: '900.00' }),
+      ...Array.from({ length: 18 }, (_, i) =>
+        makeAdItem({ advNo: `b${i}`, price: (921 + i * 0.05).toFixed(2) })
+      ),
+    ];
+    stubBinance(buy, [makeAdItem({ price: '921.50' })]);
+    const { store, StorageEngine } = await freshStore();
+    StorageEngine.deleteAlert('rule-spread-high');
+    StorageEngine.deleteAlert('rule-volatility-spike');
+    StorageEngine.saveAlert({
+      id: 'below-910',
+      name: 'Recompra barata',
+      condition: 'BELOW',
+      targetValue: 910,
+      targetSide: 'BUY',
+      enabled: true,
+      createdAt: 1,
+    });
+
+    const snapshot = await store.pollMarket();
+
+    expect(snapshot?.bestBuyPrice).toBe(900); // the extreme is under the threshold
+    expect(snapshot?.strategicBuyPrice).toBeGreaterThan(910);
+    expect(fs.existsSync(path.join(tmpDir, 'data', 'alert_triggers.json'))).toBe(false);
   });
 
   it('BUG: TREND_CHANGE is a declared condition with no implementation', async () => {
