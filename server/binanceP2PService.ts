@@ -147,7 +147,19 @@ export class BinanceP2PService {
 
       const minAmountVes = parseFloat(item.adv.minSingleTransAmount) || 0;
       const maxAmountVes = parseFloat(item.adv.maxSingleTransAmount) || 0;
-      const availableUsdt = parseFloat(item.adv.tradableQuantity || item.adv.surplusAmount) || 0;
+      /*
+       * FASE 4: liquidity absence must survive normalization.
+       *
+       * `parseFloat(...) || 0` mapped "Binance published no volume" and
+       * "Binance published zero volume" onto the same 0, so an ad whose
+       * liquidity is simply unknown looked like an ad with none. The
+       * executability layer has to tell those apart: one is a fact, the other
+       * is a missing fact, and neither may be invented.
+       */
+      const reportedAvailable = parseFloat(item.adv.tradableQuantity || item.adv.surplusAmount);
+      const availableUsdtReported = Number.isFinite(reportedAvailable) ? reportedAvailable : null;
+      // UNCHANGED for existing consumers (liquidity-weighted average).
+      const availableUsdt = availableUsdtReported ?? 0;
 
       const tradeMethods = Array.isArray(item.adv.tradeMethods) ? item.adv.tradeMethods : [];
 
@@ -173,6 +185,7 @@ export class BinanceP2PService {
         minAmountVes,
         maxAmountVes,
         availableUsdt,
+        availableUsdtReported,
         merchantName: item.advertiser.nickName || 'Anónimo',
         userType: item.advertiser.userType || 'user',
         ordersCount: item.advertiser.monthOrderCount || 0,

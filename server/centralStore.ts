@@ -9,6 +9,7 @@ import {
   HistoryRecord,
   MarketAnalysis,
   MarketProjections,
+  BankAmountExecutability,
   BankMatrixRow,
   NormalizedAd,
   AlertRule,
@@ -17,6 +18,7 @@ import {
 } from './types.js';
 import { BinanceP2PService, BANK_CODE_MAP } from './binanceP2PService.js';
 import { countVerifications } from './bankMatching.js';
+import { AMOUNT_TIERS, evaluateBankTiers } from './executability.js';
 import { StorageEngine } from './storage.js';
 import { ProjectionEngine } from './projectionEngine.js';
 import { TelegramNotifier } from './telegramNotifier.js';
@@ -464,6 +466,45 @@ export class CentralMarketStore {
     };
   }
 
+  /**
+   * Executability for every BANK x AMOUNT x SIDE, derived from the ads the
+   * bank matrix already captured.
+   *
+   * Reads `adsByBank` and issues NO request of its own: the 6 amount tiers are
+   * filtered in memory from the same 14 responses per cycle. Refreshing the
+   * matrix when the cache is cold is the only thing that talks to Binance, and
+   * that is the refresh the matrix would have done anyway.
+   */
+  public async getExecutability(forceRefresh = false): Promise<{
+    timestamp: number;
+    byBank: Record<string, Record<string, BankAmountExecutability>>;
+    amountKeys: string[];
+  }> {
+    const isCacheFresh = this.bankMatrixCache && Date.now() - this.bankMatrixCache.timestamp < 45000;
+    if (forceRefresh || !isCacheFresh) {
+      await this.refreshBankMatrix();
+    }
+
+    const cache = this.bankMatrixCache;
+    const byBank: Record<string, Record<string, BankAmountExecutability>> = {};
+
+    for (const bankKey of Object.keys(BANK_CODE_MAP)) {
+      const ads = cache?.adsByBank[bankKey];
+      byBank[bankKey] = evaluateBankTiers({
+        bank: bankKey,
+        allowedCodes: BANK_CODE_MAP[bankKey].apiPayTypes,
+        buyAds: ads?.buy ?? [],
+        sellAds: ads?.sell ?? [],
+      });
+    }
+
+    return {
+      timestamp: cache?.timestamp ?? Date.now(),
+      byBank,
+      amountKeys: AMOUNT_TIERS.map((t) => t.key),
+    };
+  }
+
   private async refreshBankMatrix(): Promise<void> {
     if (this.matrixPollingInProgress) return;
     this.matrixPollingInProgress = true;
@@ -502,15 +543,26 @@ export class CentralMarketStore {
         // Query both BUY and SELL for each amount or for the primary bank query
         try {
           const [rawBuyAds, rawSellAds] = await Promise.all([
+            /*
+             * FASE 4: 15 -> 50 rows per bank per side.
+             *
+             * The REQUEST COUNT is unchanged - still one query per bank per
+             * side, 14 per cycle - only each response carries more of the
+             * book. Depth matters now because an ad has to clear bank
+             * verification AND the amount limits AND liquidity before it
+             * counts, and 15 ads can leave the 50K/100K tiers empty purely
+             * for want of depth rather than for want of a real offer.
+             * 50 is Binance's page size, so no pagination is needed.
+             */
             BinanceP2PService.queryP2PAds({
               tradeType: 'BUY',
               payTypes: bankConfig.apiPayTypes,
-              rows: 15,
+              rows: 50,
             }),
             BinanceP2PService.queryP2PAds({
               tradeType: 'SELL',
               payTypes: bankConfig.apiPayTypes,
-              rows: 15,
+              rows: 50,
             }),
           ]);
 

@@ -7,7 +7,14 @@ export type TradeType = 'BUY' | 'SELL';
  * PROJECTED  - an extrapolation about a moment that has not happened yet.
  * HEURISTIC  - a hand-written rule, hardcoded constant or invented fallback.
  */
-export type DataProvenance = 'REAL' | 'AGGREGATED' | 'PROJECTED' | 'HEURISTIC' | 'STRATEGIC';
+export type DataProvenance =
+  | 'REAL'
+  | 'AGGREGATED'
+  | 'PROJECTED'
+  | 'HEURISTIC'
+  | 'STRATEGIC'
+  | 'EXECUTABLE'
+  | 'NOT_VERIFIABLE';
 
 export interface DataWindow {
   sampleCount: number;
@@ -62,6 +69,12 @@ export interface NormalizedAd {
   minAmountVes: number;
   maxAmountVes: number;
   availableUsdt: number;
+  /**
+   * The volume Binance actually published, or null when it published none.
+   * availableUsdt above collapses that null to 0 for backwards compatibility;
+   * only this field can distinguish "no liquidity" from "liquidity unknown".
+   */
+  availableUsdtReported: number | null;
   merchantName: string;
   userType: string;
   ordersCount: number;
@@ -299,6 +312,88 @@ export interface BankVerificationCounts {
   verified: number;
   notVerified: number;
   notVerifiable: number;
+}
+
+/**
+ * LIQUIDITY_VERIFIED      - Binance published a volume above zero.
+ * LIQUIDITY_ZERO          - Binance published a volume, and it is zero.
+ * LIQUIDITY_NOT_VERIFIABLE- Binance published no volume at all. This is a
+ *                           missing fact, NOT a fact about missing liquidity.
+ */
+export type LiquidityStatus =
+  | 'LIQUIDITY_VERIFIED'
+  | 'LIQUIDITY_ZERO'
+  | 'LIQUIDITY_NOT_VERIFIABLE';
+
+/** Why an ad is not executable for a given bank and amount. */
+export type ExecutabilityRejection =
+  | 'BANK_NOT_VERIFIED'
+  | 'BANK_NOT_VERIFIABLE'
+  | 'INVALID_PRICE'
+  | 'AMOUNT_BELOW_MIN'
+  | 'AMOUNT_ABOVE_MAX'
+  | 'LIQUIDITY_INSUFFICIENT'
+  | 'LIQUIDITY_NOT_VERIFIABLE';
+
+/** What the merchant's record says. Observed values only - no score. */
+export interface MerchantQuality {
+  ordersCount: number;
+  finishRate: number;
+  userType: string;
+}
+
+/**
+ * One ad evaluated against one concrete operation: this bank, this amount,
+ * this side.
+ *
+ * `provenance` is 'EXECUTABLE' only when every condition was positively met.
+ * Anything that could not be established - an unverifiable bank, an
+ * unpublished volume - yields 'NOT_VERIFIABLE'. Uncertainty never becomes
+ * executability.
+ */
+export interface ExecutableQuote {
+  bank: string;
+  bankVerification: BankVerification;
+  amountVes: number;
+  side: 'BUY' | 'SELL';
+  price: number;
+  advNo: string;
+  merchant: string;
+  /** Human-readable label of the payment method that matched, when it did. */
+  paymentMethod: string | null;
+  /** The canonical Binance code that matched exactly, when it did. */
+  payType: string | null;
+  minAmountVes: number;
+  maxAmountVes: number;
+  /** null when Binance published no volume. Never a fabricated number. */
+  availableUsdt: number | null;
+  liquidityStatus: LiquidityStatus;
+  merchantQuality: MerchantQuality;
+  provenance: DataProvenance;
+  /** Set when the quote is not executable. null when it is. */
+  rejection: ExecutabilityRejection | null;
+  reason: string | null;
+}
+
+/** Executability of one BANK x AMOUNT cell, both sides. */
+export interface BankAmountExecutability {
+  bank: string;
+  amountVes: number;
+  /** Only the quotes that are actually executable. */
+  buyQuotes: ExecutableQuote[];
+  sellQuotes: ExecutableQuote[];
+  /** Cheapest executable BUY: the repurchase price I would actually pay. */
+  bestExecutableBuy: ExecutableQuote | null;
+  /** Highest executable SELL: the sale price I would actually receive. */
+  bestExecutableSell: ExecutableQuote | null;
+  /** ((venta - recompra) / recompra) * 100. Signed. null unless both exist. */
+  spreadPct: number | null;
+  /** Why a side is null, when it is. */
+  buyReason: string | null;
+  sellReason: string | null;
+  /** How every evaluated ad was classified. Nothing is silently dropped. */
+  buyRejections: Record<string, number>;
+  sellRejections: Record<string, number>;
 }
 
 export interface BankMatrixRow {

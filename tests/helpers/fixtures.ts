@@ -94,6 +94,7 @@ export function makeNormalizedAd(price: number, availableUsdt = 100): Normalized
     minAmountVes: 1000,
     maxAmountVes: 50000,
     availableUsdt,
+    availableUsdtReported: availableUsdt,
     merchantName: 'Comerciante',
     userType: 'merchant',
     ordersCount: 100,

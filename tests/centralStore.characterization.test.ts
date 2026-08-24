@@ -516,6 +516,90 @@ describe('FASE 3 - bank verification in the matrix', () => {
   });
 });
 
+describe('FASE 4 - executability from the captured book', () => {
+  it('TEST 20: the 6 amount tiers add no requests at all', async () => {
+    /*
+     * 7 banks x 2 sides = 14 requests, exactly as before FASE 4. Six tiers
+     * per bank per side would be 84 if each were queried. They are filtered
+     * in memory from the same 14 responses.
+     */
+    const mock = stubBinance([makeAdItem({ price: '919.00' })], [makeAdItem({ price: '921.50' })]);
+    const { store } = await freshStore();
+
+    const result = await store.getExecutability(true);
+
+    expect(mock).toHaveBeenCalledTimes(Object.keys(BANK_CODE_MAP).length * 2);
+    expect(result.amountKeys).toEqual(['10K', '20K', '30K', '40K', '50K', '100K']);
+  });
+
+  it('reads the cached book without touching Binance again', async () => {
+    const mock = stubBinance([makeAdItem({ price: '919.00' })], [makeAdItem({ price: '921.50' })]);
+    const { store } = await freshStore();
+
+    await store.getExecutability(true);
+    const afterFirst = mock.mock.calls.length;
+    await store.getExecutability(); // cache is fresh
+
+    expect(mock.mock.calls.length).toBe(afterFirst);
+  });
+
+  it('requests 50 rows per bank per side', async () => {
+    const mock = stubBinance([makeAdItem({ price: '919.00' })], [makeAdItem({ price: '921.50' })]);
+    const { store } = await freshStore();
+    await store.getExecutability(true);
+
+    const bodies = mock.mock.calls.map((c) => JSON.parse(String((c[1] as RequestInit).body)));
+    expect(bodies.every((b) => b.rows === 50)).toBe(true);
+  });
+
+  it('produces executable quotes for the bank whose payType actually matches', async () => {
+    // The fixture ad carries payType 'Banesco' for every bank query.
+    stubBinance(
+      [makeAdItem({ price: '919.00', tradable: '1000', min: '1000', max: '100000' })],
+      [makeAdItem({ price: '921.50', tradable: '1000', min: '1000', max: '100000' })]
+    );
+    const { store } = await freshStore();
+
+    const { byBank } = await store.getExecutability(true);
+    const banesco = byBank.BANESCO['20K'];
+
+    expect(banesco.bestExecutableBuy?.price).toBe(919);
+    expect(banesco.bestExecutableSell?.price).toBe(921.5);
+    expect(banesco.bestExecutableBuy?.provenance).toBe('EXECUTABLE');
+    expect(banesco.spreadPct).toBeCloseTo(((921.5 - 919) / 919) * 100, 2);
+  });
+
+  it('leaves an unverified bank with no executable quote, never a fallback', async () => {
+    stubBinance(
+      [makeAdItem({ price: '919.00', tradable: '1000' })],
+      [makeAdItem({ price: '921.50', tradable: '1000' })]
+    );
+    const { store } = await freshStore();
+
+    const { byBank } = await store.getExecutability(true);
+    const provincial = byBank.PROVINCIAL['20K'];
+
+    expect(provincial.bestExecutableBuy).toBeNull();
+    expect(provincial.bestExecutableSell).toBeNull();
+    expect(provincial.spreadPct).toBeNull();
+    expect(provincial.buyRejections).toEqual({ BANK_NOT_VERIFIED: 1 });
+  });
+
+  it('an unpublished volume never becomes an executable operation', async () => {
+    stubBinance(
+      [makeAdItem({ price: '919.00', tradable: '', surplus: '' })],
+      [makeAdItem({ price: '921.50', tradable: '', surplus: '' })]
+    );
+    const { store } = await freshStore();
+
+    const { byBank } = await store.getExecutability(true);
+    const banesco = byBank.BANESCO['20K'];
+
+    expect(banesco.bestExecutableBuy).toBeNull();
+    expect(banesco.buyRejections).toEqual({ LIQUIDITY_NOT_VERIFIABLE: 1 });
+  });
+});
+
 describe('provenance (phase C1)', () => {
   it('marks a bank/amount cell REAL when an ad really covers that tier', async () => {
     // Default fixture ad: min 1000, max 50000 VES.

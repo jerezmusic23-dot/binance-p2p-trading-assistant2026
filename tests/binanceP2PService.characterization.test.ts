@@ -188,6 +188,8 @@ describe('normalizeAds', () => {
       minAmountVes: 2000,
       maxAmountVes: 80000,
       availableUsdt: 250,
+      // FASE 4: additive. Distinguishes "no volume" from "volume unknown".
+      availableUsdtReported: 250,
       merchantName: 'Comerciante',
       userType: 'merchant',
       ordersCount: 120,
@@ -473,5 +475,33 @@ describe('FASE 2 - strategic prices', () => {
     expect(snap.strategicBuyPrice).toBeNull();
     expect(snap.strategicSpreadPct).toBeNull();
     expect(snap.strategicReason).toContain('BUY');
+  });
+});
+
+describe('FASE 4 - liquidity absence survives normalization', () => {
+  const normalizeOne = (o: Parameters<typeof makeAdItem>[0]) =>
+    BinanceP2PService.normalizeAds([makeAdItem(o)])[0];
+
+  it('reports a published volume as published', () => {
+    const ad = normalizeOne({ tradable: '250' });
+    expect(ad.availableUsdtReported).toBe(250);
+    expect(ad.availableUsdt).toBe(250);
+  });
+
+  it('reports a published zero as zero, not as absent', () => {
+    const ad = normalizeOne({ tradable: '0', surplus: '0' });
+    expect(ad.availableUsdtReported).toBe(0);
+  });
+
+  it('reports an unpublished volume as null, not as zero', () => {
+    // The old `parseFloat(...) || 0` mapped this onto 0, making "unknown"
+    // indistinguishable from "none".
+    const ad = normalizeOne({ tradable: '', surplus: '' });
+    expect(ad.availableUsdtReported).toBeNull();
+    expect(ad.availableUsdt).toBe(0); // compatibility field, unchanged
+  });
+
+  it('falls back to surplusAmount when tradableQuantity is absent', () => {
+    expect(normalizeOne({ tradable: '', surplus: '77' }).availableUsdtReported).toBe(77);
   });
 });

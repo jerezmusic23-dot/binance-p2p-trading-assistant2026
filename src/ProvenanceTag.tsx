@@ -32,6 +32,20 @@ const LABELS: Record<DataProvenance, { short: string; title: string; className: 
       'anuncio extremo. Un anuncio aislado y lejano no lo mueve.',
     className: 'text-[#f0b90b] border-[#f0b90b]/40 bg-[#f0b90b]/10',
   },
+  EXECUTABLE: {
+    short: 'EJEC',
+    title:
+      'Operacion realmente ejecutable: banco verificado por codigo canonico exacto, ' +
+      'monto dentro de los limites del anuncio y liquidez publicada suficiente.',
+    className: 'text-[#02c076] border-[#02c076]/40 bg-[#02c076]/10',
+  },
+  NOT_VERIFIABLE: {
+    short: 'SIN VERIF',
+    title:
+      'No se pudo establecer una condicion necesaria (banco o liquidez). NO es ejecutable: ' +
+      'la ausencia de verificacion nunca se convierte en una operacion.',
+    className: 'text-[#848e9c] border-[#848e9c]/40 bg-[#848e9c]/10',
+  },
   HEURISTIC: {
     short: 'HEUR',
     title:
