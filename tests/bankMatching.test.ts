@@ -231,3 +231,42 @@ describe('population helpers', () => {
     expect(filterVerifiedForBank(ads, VENEZUELA)).toHaveLength(0);
   });
 });
+
+describe('codes corrected from production evidence', () => {
+  it('BNC verifies on BNCBancoNacional, the code Binance actually returns', () => {
+    expect(verifyBank(same('BNCBancoNacional'), BANK_CODE_MAP.BNC.apiPayTypes).verification).toBe(
+      'VERIFIED'
+    );
+    // The old configured value was never a real Binance code.
+    expect(verifyBank(same('BNC'), BANK_CODE_MAP.BNC.apiPayTypes).verification).toBe('NOT_VERIFIED');
+  });
+
+  it('VENEZUELA verifies on BancoDeVenezuela - the capital D matters', () => {
+    const codes = BANK_CODE_MAP.VENEZUELA.apiPayTypes;
+
+    expect(verifyBank(same('BancoDeVenezuela'), codes).verification).toBe('VERIFIED');
+    // One letter apart, and exact equality is exact.
+    expect(verifyBank(same('BancodeVenezuela'), codes).verification).toBe('NOT_VERIFIED');
+  });
+
+  it('the corrected codes still cross no other bank', () => {
+    for (const [bank, config] of Object.entries(BANK_CODE_MAP)) {
+      for (const code of config.apiPayTypes) {
+        for (const other of Object.keys(BANK_CODE_MAP)) {
+          if (other === bank) continue;
+          expect(
+            verifyBank(same(code), BANK_CODE_MAP[other].apiPayTypes).verification,
+            `${code} must not verify against ${other}`
+          ).toBe('NOT_VERIFIED');
+        }
+      }
+    }
+  });
+
+  it('BBVAProvincial is retained - absence of evidence is not evidence of absence', () => {
+    // Provincial verifies on 'Provincial'; nothing observed proves
+    // 'BBVAProvincial' is invalid, so it stays.
+    expect(BANK_CODE_MAP.PROVINCIAL.apiPayTypes).toContain('BBVAProvincial');
+    expect(BANK_CODE_MAP.PROVINCIAL.apiPayTypes).toContain('Provincial');
+  });
+});

@@ -1172,9 +1172,10 @@ describe('payType diagnostic over the full captured book', () => {
   });
 
   it('distinguishes a bank not observed from a code Binance does not know', async () => {
-    const foreign = { payType: 'BancoDeVenezuela', tradeMethodName: 'Banco de Venezuela' };
+    // 'RecargaPines' is a real rail production returns and no bank claims.
+    const unmapped = { payType: 'RecargaPines', tradeMethodName: 'Recarga Pines' };
     stubBinance(
-      [makeAdItem({ price: '919.00', tradeMethods: [foreign] })],
+      [makeAdItem({ price: '919.00', tradeMethods: [unmapped] })],
       [makeAdItem({ price: '921.50' })] // default fixture: Banesco
     );
     const { store } = await freshStore();
@@ -1184,10 +1185,45 @@ describe('payType diagnostic over the full captured book', () => {
     const verdict = (bank: string) => m.bankVerdicts.find((v) => v.bank === bank)!;
 
     expect(verdict('BANESCO').status).toBe('VERIFIED');
-    expect(verdict('VENEZUELA').status).toBe('NOT_OBSERVED');
-    // ...and the real code is preserved as evidence, not acted on.
-    expect(m.observedUnmapped.map((o) => o.payType)).toContain('BancoDeVenezuela');
-    expect(m.configuredCodes).toContain('BancodeVenezuela'); // unchanged
+    expect(verdict('VENEZUELA').status).toBe('NOT_OBSERVED'); // simply absent here
+    // ...and the unclaimed code is preserved as evidence, not acted on.
+    expect(m.observedUnmapped.map((o) => o.payType)).toContain('RecargaPines');
+  });
+
+  it('the corrected codes verify against the payTypes production really returns', async () => {
+    /*
+     * Production evidence, September 2026: Binance publishes
+     * 'BNCBancoNacional' and 'BancoDeVenezuela'. The map previously carried
+     * 'BNC' and 'BancodeVenezuela', neither of which matched anything.
+     */
+    stubBinance(
+      [
+        makeAdItem({
+          advNo: 'bnc',
+          price: '919.00',
+          tradeMethods: [{ payType: 'BNCBancoNacional', tradeMethodName: 'BNC Banco Nacional' }],
+        }),
+      ],
+      [
+        makeAdItem({
+          advNo: 'bdv',
+          price: '921.50',
+          tradeMethods: [{ payType: 'BancoDeVenezuela', tradeMethodName: 'Banco de Venezuela' }],
+        }),
+      ]
+    );
+    const { store } = await freshStore();
+    await store.pollMarket();
+
+    const m = store.getPayTypeMapping();
+    const verdict = (bank: string) => m.bankVerdicts.find((v) => v.bank === bank)!;
+
+    expect(verdict('BNC').status).toBe('VERIFIED');
+    expect(verdict('BNC').matchedCodes).toEqual(['BNCBancoNacional']);
+    expect(verdict('VENEZUELA').status).toBe('VERIFIED');
+    expect(verdict('VENEZUELA').matchedCodes).toEqual(['BancoDeVenezuela']);
+    // Neither is left sitting in the unmapped pile any more.
+    expect(m.observedUnmapped).toEqual([]);
   });
 
   it('reports the window as zero before any poll, never as unknown depth', async () => {

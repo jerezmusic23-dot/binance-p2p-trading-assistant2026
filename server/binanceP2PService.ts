@@ -44,7 +44,8 @@ export const BANK_CODE_MAP: Record<string, BankCodeConfig> = {
   BNC: {
     code: 'BNC',
     displayName: 'BNC',
-    apiPayTypes: ['BNC'],
+    // Observed in production: Binance publishes 'BNCBancoNacional', not 'BNC'.
+    apiPayTypes: ['BNCBancoNacional'],
   },
   BANCAMIGA: {
     code: 'BANCAMIGA',
@@ -54,7 +55,10 @@ export const BANK_CODE_MAP: Record<string, BankCodeConfig> = {
   VENEZUELA: {
     code: 'VENEZUELA',
     displayName: 'Banco de Venezuela',
-    apiPayTypes: ['BancodeVenezuela'],
+    // Observed in production: 'BancoDeVenezuela', capital D. The previous
+    // 'BancodeVenezuela' differed by one letter and matched nothing - and this
+    // is the busiest rail in the book.
+    apiPayTypes: ['BancoDeVenezuela'],
   },
   PAGO_MOVIL: {
     code: 'PAGO_MOVIL',

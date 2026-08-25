@@ -93,7 +93,7 @@ describe('VERIFIED - evidence exists', () => {
   it('reports the configured codes verbatim, for comparison', () => {
     const r = assessPayTypeMapping(same('Banesco'), BANK_CODE_MAP);
     expect(r.configuredCodes).toContain('BBVAProvincial');
-    expect(r.configuredCodes).toContain('BancodeVenezuela');
+    expect(r.configuredCodes).toContain('BancoDeVenezuela');
   });
 });
 
@@ -190,15 +190,33 @@ describe('per-bank verdict: VERIFIED vs NOT_OBSERVED', () => {
 
   it('a near-miss code is NOT_OBSERVED, and the real code shows up unmapped', () => {
     /*
-     * The whole point of the distinction. VENEZUELA is configured as
-     * 'BancodeVenezuela'; Binance returns 'BancoDeVenezuela'. The bank cannot
-     * be verified, AND the real code appears as evidence - which is what a
-     * correction may later be based on. Neither half is a conclusion on its own.
+     * The whole point of the distinction, and how the VENEZUELA code was
+     * actually found: the configured code differed from Binance's by one
+     * letter, so the bank could not verify, AND the real code surfaced as
+     * evidence. Neither half is a conclusion on its own; together they
+     * justified a correction.
+     *
+     * Demonstrated here against a bank map deliberately carrying the old
+     * typo, so the behaviour stays pinned even though BANK_CODE_MAP has
+     * since been corrected from exactly this evidence.
      */
-    const r = assessPayTypeMapping(REAL_BOOK, BANK_CODE_MAP);
+    const mapWithTypo = {
+      ...BANK_CODE_MAP,
+      VENEZUELA: { code: 'VENEZUELA', displayName: 'Banco de Venezuela', apiPayTypes: ['BancodeVenezuela'] },
+    };
+    const r = assessPayTypeMapping(REAL_BOOK, mapWithTypo);
 
     expect(r.bankVerdicts.find((v) => v.bank === 'VENEZUELA')!.status).toBe('NOT_OBSERVED');
     expect(r.observedUnmapped.map((o) => o.payType)).toContain('BancoDeVenezuela');
+  });
+
+  it('the corrected VENEZUELA code now verifies against the real book', () => {
+    const r = assessPayTypeMapping(REAL_BOOK, BANK_CODE_MAP);
+    const venezuela = r.bankVerdicts.find((v) => v.bank === 'VENEZUELA')!;
+
+    expect(venezuela.status).toBe('VERIFIED');
+    expect(venezuela.matchedCodes).toEqual(['BancoDeVenezuela']);
+    expect(r.observedUnmapped.map((o) => o.payType)).not.toContain('BancoDeVenezuela');
   });
 
   it('every configured bank gets exactly one verdict', () => {
