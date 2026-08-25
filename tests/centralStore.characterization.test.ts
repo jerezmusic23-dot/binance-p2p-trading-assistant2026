@@ -543,13 +543,19 @@ describe('FASE 4 - executability from the captured book', () => {
     expect(mock.mock.calls.length).toBe(afterFirst);
   });
 
-  it('requests 50 rows per bank per side', async () => {
+  it('requests 20 rows per bank per side - the only page size Binance accepts here', async () => {
+    /*
+     * Was 50, which production rejected with "000002 illegal parameter" for
+     * every bank - including one whose payType Binance demonstrably
+     * publishes. 20 is what the unfiltered snapshot query uses, and that
+     * query works against the real API.
+     */
     const mock = stubBinance([makeAdItem({ price: '919.00' })], [makeAdItem({ price: '921.50' })]);
     const { store } = await freshStore();
     await store.getExecutability(true);
 
     const bodies = mock.mock.calls.map((c) => JSON.parse(String((c[1] as RequestInit).body)));
-    expect(bodies.every((b) => b.rows === 50)).toBe(true);
+    expect(bodies.every((b) => b.rows === 20)).toBe(true);
   });
 
   it('produces executable quotes for the bank whose payType actually matches', async () => {
@@ -837,9 +843,16 @@ describe('live capture and historical persistence are different cadences', () =>
     await vi.advanceTimersByTimeAsync(30_000);
     store.stop();
 
-    // 30s at 6s per poll = 6 polls (t=0 immediate, then 5 more), 2 requests each.
+    /*
+     * 30s at 6s per poll = 6 polls (t=0 immediate, then 5 more), 2 requests
+     * each.
+     *
+     * Discriminated by payTypes, not by rows: the snapshot queries the whole
+     * book unfiltered (payTypes: []), the bank matrix always names a bank.
+     * Both now send rows: 20, so rows can no longer tell them apart.
+     */
     const polls = mock.mock.calls.filter(
-      (c) => JSON.parse(String((c[1] as RequestInit).body)).rows === 20
+      (c) => JSON.parse(String((c[1] as RequestInit).body)).payTypes.length === 0
     ).length / 2;
     expect(polls).toBeGreaterThanOrEqual(5);
     expect(polls).toBeLessThanOrEqual(6);

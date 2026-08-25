@@ -691,25 +691,31 @@ export class CentralMarketStore {
         try {
           const [rawBuyAds, rawSellAds] = await Promise.all([
             /*
-             * FASE 4: 15 -> 50 rows per bank per side.
+             * rows: 20, the only page size this project has OBSERVED Binance
+             * accept - it is what the unfiltered snapshot query uses, and that
+             * query works in production.
              *
-             * The REQUEST COUNT is unchanged - still one query per bank per
-             * side, 14 per cycle - only each response carries more of the
-             * book. Depth matters now because an ad has to clear bank
-             * verification AND the amount limits AND liquidity before it
-             * counts, and 15 ads can leave the 50K/100K tiers empty purely
-             * for want of depth rather than for want of a real offer.
-             * 50 is Binance's page size, so no pagination is needed.
+             * This was 50, introduced with a comment asserting 50 was
+             * Binance's page size. That was an assumption, not an
+             * observation, and production answered every bank query with
+             * "000002 illegal parameter" - including BANESCO, whose payType
+             * Binance demonstrably publishes. A valid filter with an invalid
+             * page size leaves the page size as the cause.
+             *
+             * The request count is unchanged: one query per bank per side.
+             * Depth drops from 50 ads to 20, which may leave the 50K/100K
+             * tiers empty for want of book rather than for want of an offer -
+             * a smaller problem than the entire matrix being down.
              */
             BinanceP2PService.queryP2PAds({
               tradeType: 'BUY',
               payTypes: bankConfig.apiPayTypes,
-              rows: 50,
+              rows: 20,
             }),
             BinanceP2PService.queryP2PAds({
               tradeType: 'SELL',
               payTypes: bankConfig.apiPayTypes,
-              rows: 50,
+              rows: 20,
             }),
           ]);
 
