@@ -232,10 +232,15 @@ export class CentralMarketStore {
        * Logged once per status change - loudly when the mapping is wrong, so
        * "no opportunities" can never be mistaken for a quiet market.
        */
-      this.payTypeMapping = assessPayTypeMapping(
-        [...snapshot.topBuyAds, ...snapshot.topSellAds].flatMap((ad) => ad.paymentOptions),
-        BANK_CODE_MAP
+      const observedOptions = [...snapshot.topBuyAds, ...snapshot.topSellAds].flatMap(
+        (ad) => ad.paymentOptions
       );
+      this.payTypeMapping = assessPayTypeMapping(observedOptions, BANK_CODE_MAP, {
+        buyAds: snapshot.topBuyAds.length,
+        sellAds: snapshot.topSellAds.length,
+        totalAds: snapshot.topBuyAds.length + snapshot.topSellAds.length,
+        paymentMethodEntries: observedOptions.length,
+      });
       if (this.mappingStatusLogged !== this.payTypeMapping.status) {
         this.mappingStatusLogged = this.payTypeMapping.status;
         const line = describeMappingForLog(this.payTypeMapping);
@@ -614,20 +619,19 @@ export class CentralMarketStore {
    * real ads - never optimistic about a question nobody has answered.
    */
   public getPayTypeMapping(): PayTypeMappingReport {
-    return (
-      this.payTypeMapping ?? {
-        status: 'NOT_VERIFIABLE',
-        reason:
-          'Todavia no se ha completado ningun sondeo a Binance. El mapping no se ha podido comprobar.',
-        observedAdCount: 0,
-        observedPayTypes: [],
-        configuredCodes: [...new Set(Object.values(BANK_CODE_MAP).flatMap((b) => b.apiPayTypes))].sort(),
-        matchedCodes: [],
-        unmatchedObserved: [],
-        banksVerified: [],
-        banksNotObserved: Object.keys(BANK_CODE_MAP),
-      }
-    );
+    if (this.payTypeMapping !== null) return this.payTypeMapping;
+
+    /*
+     * Nothing polled yet. Built by the same assessor over an empty sample, so
+     * there is one definition of the report and not a hand-written copy that
+     * can drift from it.
+     */
+    return assessPayTypeMapping([], BANK_CODE_MAP, {
+      buyAds: 0,
+      sellAds: 0,
+      totalAds: 0,
+      paymentMethodEntries: 0,
+    });
   }
 
   /** Cached best opportunity. null when none exists OR none was computed yet. */

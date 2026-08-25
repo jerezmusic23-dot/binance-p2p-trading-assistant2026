@@ -1147,3 +1147,58 @@ describe('C2 - LIVE / STALE / OFFLINE', () => {
     expect(current.snapshot?.bestBuyPrice).toBeNull();
   });
 });
+
+describe('payType diagnostic over the full captured book', () => {
+  it('reports the inspection window from the real snapshot', async () => {
+    const buy = Array.from({ length: 20 }, (_, i) =>
+      makeAdItem({ advNo: `b${i}`, price: (919 + i * 0.01).toFixed(2) })
+    );
+    const sell = Array.from({ length: 20 }, (_, i) =>
+      makeAdItem({ advNo: `s${i}`, price: (921 + i * 0.01).toFixed(2) })
+    );
+    stubBinance(buy, sell);
+    const { store } = await freshStore();
+    await store.pollMarket();
+
+    const m = store.getPayTypeMapping();
+
+    // 20 + 20, now that the snapshot no longer discards half.
+    expect(m.inspected).toEqual({
+      buyAds: 20,
+      sellAds: 20,
+      totalAds: 40,
+      paymentMethodEntries: 40,
+    });
+  });
+
+  it('distinguishes a bank not observed from a code Binance does not know', async () => {
+    const foreign = { payType: 'BancoDeVenezuela', tradeMethodName: 'Banco de Venezuela' };
+    stubBinance(
+      [makeAdItem({ price: '919.00', tradeMethods: [foreign] })],
+      [makeAdItem({ price: '921.50' })] // default fixture: Banesco
+    );
+    const { store } = await freshStore();
+    await store.pollMarket();
+
+    const m = store.getPayTypeMapping();
+    const verdict = (bank: string) => m.bankVerdicts.find((v) => v.bank === bank)!;
+
+    expect(verdict('BANESCO').status).toBe('VERIFIED');
+    expect(verdict('VENEZUELA').status).toBe('NOT_OBSERVED');
+    // ...and the real code is preserved as evidence, not acted on.
+    expect(m.observedUnmapped.map((o) => o.payType)).toContain('BancoDeVenezuela');
+    expect(m.configuredCodes).toContain('BancodeVenezuela'); // unchanged
+  });
+
+  it('reports the window as zero before any poll, never as unknown depth', async () => {
+    stubBinance([makeAdItem({ price: '919.00' })], [makeAdItem({ price: '921.50' })]);
+    const { store } = await freshStore();
+
+    expect(store.getPayTypeMapping().inspected).toEqual({
+      buyAds: 0,
+      sellAds: 0,
+      totalAds: 0,
+      paymentMethodEntries: 0,
+    });
+  });
+});

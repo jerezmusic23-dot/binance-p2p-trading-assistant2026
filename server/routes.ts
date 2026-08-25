@@ -226,22 +226,42 @@ apiRouter.get('/health', (req, res) => {
  */
 apiRouter.get('/diagnostics/paytypes', (_req, res) => {
   const { snapshot } = centralStore.getCurrentSnapshot();
-  const options = [
-    ...(snapshot?.topBuyAds ?? []),
-    ...(snapshot?.topSellAds ?? []),
-  ].flatMap((ad) => ad.paymentOptions);
-
-  const seen = new Map<string, { payType: string | null; tradeMethodName: string | null; count: number }>();
-  for (const o of options) {
-    const key = `${o.payType}\u0000${o.tradeMethodName}`;
-    const entry = seen.get(key);
-    if (entry) entry.count += 1;
-    else seen.set(key, { payType: o.payType, tradeMethodName: o.tradeMethodName, count: 1 });
-  }
+  const mapping = centralStore.getPayTypeMapping();
 
   res.json({
     observedAt: snapshot?.timestamp ?? null,
-    mapping: centralStore.getPayTypeMapping(),
-    observed: [...seen.values()].sort((a, b) => b.count - a.count),
+
+    /*
+     * How much book this verdict rests on. A bank missing from a 40-ad sample
+     * says far less than one missing from a 400-ad sample, and the reader
+     * cannot judge that without the denominator.
+     */
+    inspected: mapping.inspected ?? null,
+
+    /* Every code Binance published, most frequent first, with its labels. */
+    observed: mapping.observations,
+
+    /*
+     * Codes Binance returns that no configured bank claims. These are the
+     * only admissible evidence for correcting BANK_CODE_MAP.
+     */
+    observedUnmapped: mapping.observedUnmapped,
+
+    /*
+     * Per bank: VERIFIED or NOT_OBSERVED. NOT_OBSERVED is never a claim that
+     * the configured code is wrong - see the reason on each verdict.
+     */
+    banks: mapping.bankVerdicts,
+
+    mapping: {
+      status: mapping.status,
+      reason: mapping.reason,
+      configuredCodes: mapping.configuredCodes,
+      matchedCodes: mapping.matchedCodes,
+      observedPayTypes: mapping.observedPayTypes,
+      unmatchedObserved: mapping.unmatchedObserved,
+      banksVerified: mapping.banksVerified,
+      banksNotObserved: mapping.banksNotObserved,
+    },
   });
 });

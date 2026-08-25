@@ -567,6 +567,49 @@ export type PayTypeMappingStatus = 'VERIFIED' | 'NOT_VERIFIED' | 'NOT_VERIFIABLE
  * Whether BANK_CODE_MAP.apiPayTypes matches what Binance actually sends,
  * derived from observation rather than asserted by a constant.
  */
+/**
+ * One payType as Binance published it, with everything observed about it.
+ *
+ * `mapped` says whether any configured bank claims this code - NOT whether
+ * the code is legitimate. An unmapped code is a real Binance rail we have no
+ * entry for; it is evidence, not an error.
+ */
+export interface PayTypeObservation {
+  payType: string;
+  /** Labels seen alongside this code, verbatim. Several ads may disagree. */
+  tradeMethodNames: string[];
+  count: number;
+  mapped: boolean;
+  /** Configured banks claiming this code. Empty when OBSERVED_UNMAPPED. */
+  banks: string[];
+}
+
+/**
+ * VERIFIED     - a configured code for this bank appeared in the sample.
+ * NOT_OBSERVED - it did not. This is NOT evidence that the code is wrong:
+ *                the bank may simply have had no ad in the window. A code is
+ *                only ever corrected against a payType Binance actually
+ *                returned.
+ */
+export type BankMappingStatus = 'VERIFIED' | 'NOT_OBSERVED';
+
+export interface BankMappingVerdict {
+  bank: string;
+  configuredCodes: string[];
+  status: BankMappingStatus;
+  matchedCodes: string[];
+  reason: string;
+}
+
+/** How much book the assessment actually looked at. */
+export interface PayTypeInspection {
+  buyAds: number;
+  sellAds: number;
+  totalAds: number;
+  /** Payment-method entries seen; an ad may publish several. */
+  paymentMethodEntries: number;
+}
+
 export interface PayTypeMappingReport {
   status: PayTypeMappingStatus;
   reason: string;
@@ -579,6 +622,15 @@ export interface PayTypeMappingReport {
   unmatchedObserved: string[];
   banksVerified: string[];
   banksNotObserved: string[];
+
+  /** How much book was inspected. Absent when the caller did not say. */
+  inspected?: PayTypeInspection;
+  /** Every payType observed, with frequency and labels. */
+  observations: PayTypeObservation[];
+  /** Observed codes no configured bank claims. */
+  observedUnmapped: PayTypeObservation[];
+  /** Per-bank verdict: VERIFIED or NOT_OBSERVED, never "wrong". */
+  bankVerdicts: BankMappingVerdict[];
 }
 
 /**

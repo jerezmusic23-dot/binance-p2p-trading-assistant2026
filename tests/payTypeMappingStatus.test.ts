@@ -153,3 +153,134 @@ describe('the comparison is exact equality, by construction', () => {
     expect(code).not.toContain('toLowerCase(');
   });
 });
+
+describe('per-bank verdict: VERIFIED vs NOT_OBSERVED', () => {
+  /** The real Venezuelan book as production reported it. */
+  const REAL_BOOK = opts(
+    ['BancoDeVenezuela', 'Banco de Venezuela'],
+    ['BANK', 'Transferencia bancaria'],
+    ['Mercantil', 'Mercantil'],
+    ['PagoMovil', 'Pago Movil'],
+    ['Provincial', 'Provincial'],
+    ['RecargaPines', 'Recarga Pines'],
+    ['Banesco', 'Banesco'],
+    ['BancoDelTesoro', 'Banco del Tesoro']
+  );
+
+  it('marks a bank VERIFIED only when one of its codes was actually seen', () => {
+    const r = assessPayTypeMapping(REAL_BOOK, BANK_CODE_MAP);
+    const verdict = (bank: string) => r.bankVerdicts.find((v) => v.bank === bank)!;
+
+    expect(verdict('BANESCO').status).toBe('VERIFIED');
+    expect(verdict('MERCANTIL').status).toBe('VERIFIED');
+    expect(verdict('PAGO_MOVIL').status).toBe('VERIFIED');
+    expect(verdict('PROVINCIAL').status).toBe('VERIFIED');
+    expect(verdict('PROVINCIAL').matchedCodes).toEqual(['Provincial']); // not BBVAProvincial
+  });
+
+  it('NOT_OBSERVED never claims the configured code is wrong', () => {
+    const r = assessPayTypeMapping(REAL_BOOK, BANK_CODE_MAP);
+    const bnc = r.bankVerdicts.find((v) => v.bank === 'BNC')!;
+
+    expect(bnc.status).toBe('NOT_OBSERVED');
+    expect(bnc.matchedCodes).toEqual([]);
+    expect(bnc.reason).toContain('NO es prueba de que el codigo sea incorrecto');
+    expect(bnc.reason).not.toMatch(/incorrecto\.|invalido|erroneo/);
+  });
+
+  it('a near-miss code is NOT_OBSERVED, and the real code shows up unmapped', () => {
+    /*
+     * The whole point of the distinction. VENEZUELA is configured as
+     * 'BancodeVenezuela'; Binance returns 'BancoDeVenezuela'. The bank cannot
+     * be verified, AND the real code appears as evidence - which is what a
+     * correction may later be based on. Neither half is a conclusion on its own.
+     */
+    const r = assessPayTypeMapping(REAL_BOOK, BANK_CODE_MAP);
+
+    expect(r.bankVerdicts.find((v) => v.bank === 'VENEZUELA')!.status).toBe('NOT_OBSERVED');
+    expect(r.observedUnmapped.map((o) => o.payType)).toContain('BancoDeVenezuela');
+  });
+
+  it('every configured bank gets exactly one verdict', () => {
+    const r = assessPayTypeMapping(REAL_BOOK, BANK_CODE_MAP);
+
+    expect(r.bankVerdicts).toHaveLength(Object.keys(BANK_CODE_MAP).length);
+    expect(r.bankVerdicts.map((v) => v.bank).sort()).toEqual(Object.keys(BANK_CODE_MAP).sort());
+  });
+});
+
+describe('observations: frequency, labels and mapping', () => {
+  const book = opts(
+    ['Banesco', 'Banesco'],
+    ['Banesco', 'Banesco'],
+    ['Banesco', 'Banesco Panama'],
+    ['RecargaPines', 'Recarga Pines'],
+    [null, 'Sin codigo']
+  );
+
+  it('counts every payment-method entry, not every ad', () => {
+    const r = assessPayTypeMapping(book, BANK_CODE_MAP);
+    const banesco = r.observations.find((o) => o.payType === 'Banesco')!;
+
+    expect(banesco.count).toBe(3);
+    expect(r.observations).toHaveLength(2); // the null entry carries no code
+  });
+
+  it('keeps every label seen for a code, verbatim, without picking one', () => {
+    const banesco = assessPayTypeMapping(book, BANK_CODE_MAP).observations.find(
+      (o) => o.payType === 'Banesco'
+    )!;
+
+    expect(banesco.tradeMethodNames).toEqual(['Banesco', 'Banesco Panama']);
+  });
+
+  it('sorts by frequency, so the dominant rails are visible first', () => {
+    const r = assessPayTypeMapping(book, BANK_CODE_MAP);
+    expect(r.observations[0].payType).toBe('Banesco');
+  });
+
+  it('says which banks claim a code, and marks the unmapped ones', () => {
+    const r = assessPayTypeMapping(book, BANK_CODE_MAP);
+
+    expect(r.observations.find((o) => o.payType === 'Banesco')!.banks).toEqual(['BANESCO']);
+    const pines = r.observations.find((o) => o.payType === 'RecargaPines')!;
+    expect(pines.mapped).toBe(false);
+    expect(pines.banks).toEqual([]);
+  });
+});
+
+describe('inspection window', () => {
+  it('reports how much book produced the verdict', () => {
+    const r = assessPayTypeMapping(same('Banesco'), BANK_CODE_MAP, {
+      buyAds: 20,
+      sellAds: 20,
+      totalAds: 40,
+      paymentMethodEntries: 70,
+    });
+
+    expect(r.inspected).toEqual({
+      buyAds: 20,
+      sellAds: 20,
+      totalAds: 40,
+      paymentMethodEntries: 70,
+    });
+  });
+
+  it('omits the window rather than inventing one', () => {
+    expect(assessPayTypeMapping(same('Banesco'), BANK_CODE_MAP).inspected).toBeUndefined();
+  });
+
+  it('an empty sample leaves every bank NOT_OBSERVED, none wrong', () => {
+    const r = assessPayTypeMapping([], BANK_CODE_MAP, {
+      buyAds: 0,
+      sellAds: 0,
+      totalAds: 0,
+      paymentMethodEntries: 0,
+    });
+
+    expect(r.status).toBe('NOT_VERIFIABLE');
+    expect(r.bankVerdicts.every((v) => v.status === 'NOT_OBSERVED')).toBe(true);
+    expect(r.observations).toEqual([]);
+    expect(r.observedUnmapped).toEqual([]);
+  });
+});
