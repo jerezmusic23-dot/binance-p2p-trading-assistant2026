@@ -160,7 +160,9 @@ function strategicLines(snapshot: MarketSnapshot | null): string[] {
 export function formatOpportunityMessage(
   opportunity: Opportunity,
   rule: AlertRule,
-  timestamp: number
+  timestamp: number,
+  /** When the book behind this operation was captured. Omitted if unknown. */
+  capturedAt?: number | null
 ): string {
   const n = (value: number, decimals = 2) => escapeHtml(value.toFixed(decimals));
 
@@ -182,6 +184,19 @@ export function formatOpportunityMessage(
     lines.push(`Liquidez: <b>${n(opportunity.availableUsdt)} USDT</b>`);
   } else {
     lines.push('Liquidez: no verificable');
+  }
+
+  /*
+   * The opportunity comes from the bank-matrix cache, which can be up to 45s
+   * old. Stating the age lets the reader judge whether the prices are still
+   * on the book. Printed only when a real capture timestamp exists - never
+   * invented, and never shown as 0 when unknown.
+   */
+  if (capturedAt !== null && capturedAt !== undefined && Number.isFinite(capturedAt)) {
+    const ageSeconds = Math.max(0, Math.round((timestamp - capturedAt) / 1000));
+    lines.push(`Antiguedad del dato: ${escapeHtml(String(ageSeconds))}s`);
+  } else {
+    lines.push('Antiguedad del dato: no verificable');
   }
 
   lines.push(
@@ -211,7 +226,8 @@ export function formatAlertMessage(
   trigger: AlertTriggerLog,
   rule: AlertRule,
   snapshot: MarketSnapshot | null,
-  opportunity?: Opportunity | null
+  opportunity?: Opportunity | null,
+  capturedAt?: number | null
 ): string {
   const time = formatVenezuelaClock(trigger.timestamp);
 
@@ -231,7 +247,7 @@ export function formatAlertMessage(
         `Hora: ${time}`,
       ].join('\n');
     }
-    return formatOpportunityMessage(opportunity, rule, trigger.timestamp);
+    return formatOpportunityMessage(opportunity, rule, trigger.timestamp, capturedAt);
   }
   const market = escapeHtml(marketLabel(snapshot));
   /*
@@ -347,7 +363,8 @@ export class TelegramNotifier {
     trigger: AlertTriggerLog,
     rule: AlertRule,
     snapshot: MarketSnapshot | null,
-    opportunity?: Opportunity | null
+    opportunity?: Opportunity | null,
+    capturedAt?: number | null
   ): Promise<TelegramResult> {
     try {
       if (!this.config) return { outcome: 'DISABLED' };
@@ -369,7 +386,7 @@ export class TelegramNotifier {
       this.lastSentAt.set(key, now);
       this.prune(now);
 
-      return await this.send(formatAlertMessage(trigger, rule, snapshot, opportunity));
+      return await this.send(formatAlertMessage(trigger, rule, snapshot, opportunity, capturedAt));
     } catch (err) {
       // Belt and braces: nothing above should throw, and if it somehow does,
       // the alert loop still must not notice.

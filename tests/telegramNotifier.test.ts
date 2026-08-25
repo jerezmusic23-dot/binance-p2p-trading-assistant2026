@@ -682,3 +682,42 @@ describe('BEST_OPPORTUNITY message', () => {
     expect(text).not.toContain('921');
   });
 });
+
+describe('data age in the opportunity message', () => {
+  const rule: AlertRule = {
+    id: 'op', name: 'Oportunidad', condition: 'OPPORTUNITY_ABOVE',
+    targetValue: 0.05, targetSide: 'BUY', enabled: true, createdAt: 1,
+  };
+  const opportunity = {
+    bank: 'BANESCO', amountVes: 50_000, buyPrice: 921.39, sellPrice: 921.79,
+    buyAdvNo: 'b', sellAdvNo: 's', spreadAbsolute: 0.4, spreadPct: 0.0434,
+    marginAbsolute: 0.4, marginPct: 0.0434, buyAvailableUsdt: 900,
+    sellAvailableUsdt: 480, availableUsdt: 480,
+    verification: 'VERIFIED' as const, provenance: 'EXECUTABLE' as const, reason: null,
+  };
+
+  it('reports the real age between capture and alert', () => {
+    const firedAt = Date.parse('2026-08-23T03:51:31Z');
+    const text = formatAlertMessage(
+      makeTrigger({ timestamp: firedAt }), rule, makeSnapshot(), opportunity, firedAt - 32_000
+    );
+
+    expect(text).toContain('Antiguedad del dato: 32s');
+  });
+
+  it('says the age is not verifiable rather than inventing 0', () => {
+    const text = formatAlertMessage(makeTrigger(), rule, makeSnapshot(), opportunity, null);
+
+    expect(text).toContain('Antiguedad del dato: no verificable');
+    expect(text).not.toContain('Antiguedad del dato: 0s');
+  });
+
+  it('never reports a negative age', () => {
+    const firedAt = Date.parse('2026-08-23T03:51:31Z');
+    const text = formatAlertMessage(
+      makeTrigger({ timestamp: firedAt }), rule, makeSnapshot(), opportunity, firedAt + 5_000
+    );
+
+    expect(text).toContain('Antiguedad del dato: 0s');
+  });
+});

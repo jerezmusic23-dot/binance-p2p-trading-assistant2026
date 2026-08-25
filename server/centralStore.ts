@@ -13,6 +13,7 @@ import {
   BankMatrixRow,
   Opportunity,
   OpportunityEngineResult,
+  PayTypeMappingReport,
   NormalizedAd,
   AlertRule,
   AlertTriggerLog,
@@ -22,6 +23,7 @@ import { BinanceP2PService, BANK_CODE_MAP } from './binanceP2PService.js';
 import { countVerifications } from './bankMatching.js';
 import { AMOUNT_TIERS, evaluateBankTiers } from './executability.js';
 import { runOpportunityEngine } from './opportunityEngine.js';
+import { assessPayTypeMapping, describeMappingForLog } from './payTypeMappingStatus.js';
 import { StorageEngine } from './storage.js';
 import { ProjectionEngine } from './projectionEngine.js';
 import { TelegramNotifier } from './telegramNotifier.js';
@@ -32,6 +34,22 @@ export class CentralMarketStore {
   private currentSnapshot: MarketSnapshot | null = null;
   private lastValidSnapshot: MarketSnapshot | null = null;
   private pollingIntervalMs = 6000; // 6 seconds for fast live updates
+  /*
+   * LIVE CAPTURE and HISTORICAL PERSISTENCE are two different cadences.
+   *
+   * The screen wants every observation it can get; the history does not.
+   * Writing every 6s appended ~14,400 near-identical records a day and
+   * rewrote the whole file each time, so the cost grew with the square of the
+   * history. Sampling once a minute keeps the same 100/500-record windows the
+   * consumers already ask for, but each covers ten times more real time -
+   * which is what a 1-4 hour projection horizon actually needs.
+   *
+   * Polling is NOT slowed down. Only the write is sampled.
+   */
+  private readonly historyIntervalMs = 60_000;
+  private lastPersistedAt: number | null = null;
+  /** Newest observation not yet written. Flushed on stop(). */
+  private pendingRecord: HistoryRecord | null = null;
   private pollTimer: NodeJS.Timeout | null = null;
   private isPolling = false;
   private bankMatrixCache: {
@@ -59,6 +77,17 @@ export class CentralMarketStore {
    * exists" - the alert loop must not fire on either.
    */
   private lastOpportunities: OpportunityEngineResult | null = null;
+  /*
+   * Whether BANK_CODE_MAP.apiPayTypes matches what Binance really sends,
+   * assessed from the UNFILTERED snapshot book (payTypes: []), which is
+   * representative of the whole market. The bank-matrix queries filter BY
+   * those same codes, so they cannot be used as evidence about themselves.
+   *
+   * null means "not assessed yet" and is reported as NOT_VERIFIABLE, never as
+   * working.
+   */
+  private payTypeMapping: PayTypeMappingReport | null = null;
+  private mappingStatusLogged: string | null = null;
   private matrixPollingInProgress = false;
   private filteredCache = new Map<
     string,
@@ -110,6 +139,22 @@ export class CentralMarketStore {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
     }
+    this.flushPendingRecord();
+  }
+
+  /**
+   * Writes the newest observation that the sampling interval skipped.
+   *
+   * Called from stop(), which is the only shutdown hook this codebase has.
+   * NOTE: nothing currently wires stop() to SIGTERM, so a container recycled
+   * by the platform still loses up to one sampling window. Adding a signal
+   * handler is a separate decision, not something to slip in here.
+   */
+  public flushPendingRecord(): void {
+    if (this.pendingRecord === null) return;
+    StorageEngine.appendRecord(this.pendingRecord);
+    this.lastPersistedAt = this.pendingRecord.timestamp;
+    this.pendingRecord = null;
   }
 
   public setPollingInterval(ms: number): void {
@@ -156,11 +201,46 @@ export class CentralMarketStore {
           source: 'BINANCE_P2P',
         };
 
-        StorageEngine.appendRecord(record);
+        /*
+         * One write per historyIntervalMs. The first observation always
+         * persists, so a fresh process records immediately instead of staying
+         * blank for a minute. Skipped observations are not lost data: they
+         * reached the LIVE snapshot, they simply were not sampled.
+         */
+        const due =
+          this.lastPersistedAt === null ||
+          snapshot.timestamp - this.lastPersistedAt >= this.historyIntervalMs;
+
+        if (due) {
+          StorageEngine.appendRecord(record);
+          this.lastPersistedAt = snapshot.timestamp;
+          this.pendingRecord = null;
+        } else {
+          this.pendingRecord = record;
+        }
       } else {
         console.warn(
           '[CentralStore] Snapshot incompleto (BUY o SELL sin anuncios): no se registra en el histórico.'
         );
+      }
+
+      /*
+       * Assess the payType mapping against what Binance actually sent. This
+       * is the only evidence available: the codes in BANK_CODE_MAP were
+       * written by hand and no test can confirm them.
+       *
+       * Logged once per status change - loudly when the mapping is wrong, so
+       * "no opportunities" can never be mistaken for a quiet market.
+       */
+      this.payTypeMapping = assessPayTypeMapping(
+        [...snapshot.topBuyAds, ...snapshot.topSellAds].flatMap((ad) => ad.paymentOptions),
+        BANK_CODE_MAP
+      );
+      if (this.mappingStatusLogged !== this.payTypeMapping.status) {
+        this.mappingStatusLogged = this.payTypeMapping.status;
+        const line = describeMappingForLog(this.payTypeMapping);
+        if (this.payTypeMapping.status === 'NOT_VERIFIED') console.error(line);
+        else console.warn(line);
       }
 
       // Evaluate alert rules
@@ -529,6 +609,27 @@ export class CentralMarketStore {
     };
   }
 
+  /**
+   * The payType mapping assessment. NOT_VERIFIABLE until a poll has observed
+   * real ads - never optimistic about a question nobody has answered.
+   */
+  public getPayTypeMapping(): PayTypeMappingReport {
+    return (
+      this.payTypeMapping ?? {
+        status: 'NOT_VERIFIABLE',
+        reason:
+          'Todavia no se ha completado ningun sondeo a Binance. El mapping no se ha podido comprobar.',
+        observedAdCount: 0,
+        observedPayTypes: [],
+        configuredCodes: [...new Set(Object.values(BANK_CODE_MAP).flatMap((b) => b.apiPayTypes))].sort(),
+        matchedCodes: [],
+        unmatchedObserved: [],
+        banksVerified: [],
+        banksNotObserved: Object.keys(BANK_CODE_MAP),
+      }
+    );
+  }
+
   /** Cached best opportunity. null when none exists OR none was computed yet. */
   public getCachedBestOpportunity(): Opportunity | null {
     return this.lastOpportunities?.bestOpportunity ?? null;
@@ -856,7 +957,13 @@ export class CentralMarketStore {
          * throws and never rejects, so a Telegram outage cannot interrupt the
          * alert loop, the polling cycle or persistence.
          */
-        void TelegramNotifier.getInstance().notifyAlert(log, rule, snapshot, opportunity);
+        void TelegramNotifier.getInstance().notifyAlert(
+          log,
+          rule,
+          snapshot,
+          opportunity,
+          this.bankMatrixCache?.timestamp ?? null
+        );
       }
     }
   }

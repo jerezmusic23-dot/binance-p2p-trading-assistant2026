@@ -1,0 +1,31 @@
+# Minimal CI: install, test, build. Nothing else.
+#
+# Until this existed, "410 tests pass" was a claim made from a laptop with no
+# independent check. These are the same three commands a contributor runs.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # `npm ci` needs the lockfile to match package.json exactly, which is
+      # the point: CI must not silently resolve different versions.
+      - run: npm ci
+
+      - run: npm run lint
+
+      - run: npm test
+
+      - run: npm run build

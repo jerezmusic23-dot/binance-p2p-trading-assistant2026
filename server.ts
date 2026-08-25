@@ -1,6 +1,5 @@
 import express from 'express';
 import path from 'node:path';
-import { createServer as createViteServer } from 'vite';
 import { apiRouter } from './server/routes.js';
 import { CentralMarketStore } from './server/centralStore.js';
 
@@ -18,6 +17,16 @@ async function startServer() {
   centralStore.start();
 
   if (process.env.NODE_ENV !== 'production') {
+    /*
+     * Imported here, not at the top of the file.
+     *
+     * A top-level import becomes an unconditional require() in the bundle, so
+     * production had to resolve vite even though this branch never runs there.
+     * vite is a devDependency, so any deploy that prunes dev dependencies -
+     * what `npm ci --omit=dev` and most Node buildpacks do by default - died
+     * at startup with "Cannot find module 'vite'".
+     */
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: {
         middlewareMode: true,

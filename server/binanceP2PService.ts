@@ -4,6 +4,7 @@
  */
 
 import {
+  BankCodeConfig,
   BinanceAdItem,
   BinanceP2PResponse,
   NormalizedAd,
@@ -24,7 +25,7 @@ export interface P2PSearchParams {
   merchantCheck?: boolean;
 }
 
-export const BANK_CODE_MAP: Record<string, { code: string; displayName: string; apiPayTypes: string[] }> = {
+export const BANK_CODE_MAP: Record<string, BankCodeConfig> = {
   BANESCO: {
     code: 'BANESCO',
     displayName: 'Banesco',

@@ -77,6 +77,9 @@ apiRouter.get('/market/opportunities', async (_req, res) => {
     const { timestamp, result } = await centralStore.getOpportunities();
     res.json({
       timestamp,
+      // Without this a null bestOpportunity is ambiguous: bad market, or
+      // broken mapping? The report says which.
+      payTypeMapping: centralStore.getPayTypeMapping(),
       bestOpportunity: result.bestOpportunity,
       opportunities: result.opportunities,
       byBank: result.byBank,
@@ -200,7 +203,45 @@ apiRouter.get('/health', (req, res) => {
     dataAgeSeconds: ageSeconds,
     market: 'USDT/VES',
     timestamp: Date.now(),
-    currentBuyPrice: snapshot?.bestBuyPrice || null,
-    currentSellPrice: snapshot?.bestSellPrice || null,
+    currentBuyPrice: snapshot?.bestBuyPrice ?? null,
+    currentSellPrice: snapshot?.bestSellPrice ?? null,
+    /*
+     * Whether BANK_CODE_MAP matches what Binance really sends. Without this,
+     * a wrong mapping and a quiet market are indistinguishable from outside:
+     * both produce no opportunities and no alerts.
+     */
+    payTypeMapping: (() => {
+      const m = centralStore.getPayTypeMapping();
+      return { status: m.status, reason: m.reason, observedAdCount: m.observedAdCount };
+    })(),
+  });
+});
+
+/*
+ * The raw payment methods Binance published, for auditing the mapping.
+ *
+ * Carries payType and tradeMethodName verbatim and nothing else - no
+ * merchant nickname, no advNo, no prices. NormalizedAd never kept userNo, so
+ * there is no advertiser identity here to leak.
+ */
+apiRouter.get('/diagnostics/paytypes', (_req, res) => {
+  const { snapshot } = centralStore.getCurrentSnapshot();
+  const options = [
+    ...(snapshot?.topBuyAds ?? []),
+    ...(snapshot?.topSellAds ?? []),
+  ].flatMap((ad) => ad.paymentOptions);
+
+  const seen = new Map<string, { payType: string | null; tradeMethodName: string | null; count: number }>();
+  for (const o of options) {
+    const key = `${o.payType}\u0000${o.tradeMethodName}`;
+    const entry = seen.get(key);
+    if (entry) entry.count += 1;
+    else seen.set(key, { payType: o.payType, tradeMethodName: o.tradeMethodName, count: 1 });
+  }
+
+  res.json({
+    observedAt: snapshot?.timestamp ?? null,
+    mapping: centralStore.getPayTypeMapping(),
+    observed: [...seen.values()].sort((a, b) => b.count - a.count),
   });
 });

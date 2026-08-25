@@ -430,6 +430,19 @@ export interface MarketProjections {
 }
 
 export interface BacktestMetrics {
+  /**
+   * FALSE, always, today.
+   *
+   * runBacktest fits a 5-point linear slope over history.buyPrice and predicts
+   * the NEXT stored record - one polling step, about 6 seconds ahead.
+   * generateProjections uses a different model entirely (volatility bands,
+   * session curves, seasonal factors, heuristic probabilities) over horizons
+   * of 1 to 4 hours. The two are not comparable, so these metrics do not
+   * validate the projections the dashboard shows.
+   */
+  validatesProductionModel: boolean;
+  /** What was actually measured, so the number cannot be read as more. */
+  modelDescription: string;
   hasSufficientData: boolean;
   sampleSize: number;
   samplePeriodDays: number;
@@ -535,6 +548,38 @@ export interface BankAmountExecutability {
  *                  established. Kept as context; never a usable operation.
  */
 export type OpportunityVerification = 'VERIFIED' | 'NOT_VERIFIABLE';
+
+/** One bank's entry in BANK_CODE_MAP. */
+export interface BankCodeConfig {
+  code: string;
+  displayName: string;
+  apiPayTypes: string[];
+}
+
+/**
+ * VERIFIED       - an observed payType matched a configured code exactly.
+ * NOT_VERIFIED   - ads carry codes and none matches. The mapping is WRONG.
+ * NOT_VERIFIABLE - nothing observed yet, or no ad carries a canonical code.
+ */
+export type PayTypeMappingStatus = 'VERIFIED' | 'NOT_VERIFIED' | 'NOT_VERIFIABLE';
+
+/**
+ * Whether BANK_CODE_MAP.apiPayTypes matches what Binance actually sends,
+ * derived from observation rather than asserted by a constant.
+ */
+export interface PayTypeMappingReport {
+  status: PayTypeMappingStatus;
+  reason: string;
+  observedAdCount: number;
+  /** Canonical codes actually seen, verbatim and deduplicated. */
+  observedPayTypes: string[];
+  configuredCodes: string[];
+  matchedCodes: string[];
+  /** Observed codes no bank claims - candidates for a corrected mapping. */
+  unmatchedObserved: string[];
+  banksVerified: string[];
+  banksNotObserved: string[];
+}
 
 /**
  * One concrete operation: buy USDT and sell them back, same bank, same amount.

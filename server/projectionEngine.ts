@@ -930,6 +930,9 @@ export class ProjectionEngine {
     const minSamplesRequired = 10;
     if (history.length < minSamplesRequired) {
       return {
+        validatesProductionModel: false,
+        modelDescription:
+          'Pendiente lineal sobre 5 puntos de history.buyPrice (RAW), prediciendo el siguiente registro almacenado (~6 s). NO es el modelo que genera las proyecciones.',
         hasSufficientData: false,
         sampleSize: history.length,
         samplePeriodDays: 0,
@@ -990,6 +993,9 @@ export class ProjectionEngine {
 
     if (totalTests === 0) {
       return {
+        validatesProductionModel: false,
+        modelDescription:
+          'Pendiente lineal sobre 5 puntos de history.buyPrice (RAW), prediciendo el siguiente registro almacenado (~6 s). NO es el modelo que genera las proyecciones.',
         hasSufficientData: false,
         sampleSize: history.length,
         samplePeriodDays: 0,
@@ -1011,7 +1017,10 @@ export class ProjectionEngine {
     const daysDiff = Number(((newestTs - oldestTs) / (1000 * 60 * 60 * 24)).toFixed(2));
 
     return {
-      hasSufficientData: true,
+      validatesProductionModel: false,
+        modelDescription:
+          'Pendiente lineal sobre 5 puntos de history.buyPrice (RAW), prediciendo el siguiente registro almacenado (~6 s). NO es el modelo que genera las proyecciones.',
+        hasSufficientData: true,
       sampleSize: totalTests,
       samplePeriodDays: daysDiff,
       mae,

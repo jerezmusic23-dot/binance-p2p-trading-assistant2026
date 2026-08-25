@@ -425,3 +425,25 @@ describe('runBacktest', () => {
     expect(sixSecondSteps.samplePeriodDays).toBe(0);
   });
 });
+
+describe('backtest does not validate the production model', () => {
+  it('says so explicitly, on every path', () => {
+    // Was audit finding: metrics named "backtest" read as validation of the
+    // projections. They measure a different model over a different horizon.
+    for (const history of [[], makeHistory(5), makeHistory(60)]) {
+      const m = ProjectionEngine.runBacktest(history);
+      expect(m.validatesProductionModel).toBe(false);
+      expect(m.modelDescription).toContain('NO es el modelo');
+    }
+  });
+
+  it('names the model it actually measured', () => {
+    const m = ProjectionEngine.runBacktest(makeHistory(60));
+
+    expect(m.modelDescription).toContain('5 puntos');
+    expect(m.modelDescription).toContain('RAW');
+  });
+
+  // confidencePct staying null is already asserted in 'generateProjections'
+  // above, where the `project` helper lives. Not duplicated here.
+});

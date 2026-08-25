@@ -733,6 +733,195 @@ describe('FASE 6 - BEST_OPPORTUNITY end to end', () => {
   });
 });
 
+describe('payType mapping status - no silent failure', () => {
+  it('is NOT_VERIFIABLE before any poll, never optimistic', async () => {
+    stubBinance([makeAdItem({ price: '919.00' })], [makeAdItem({ price: '921.50' })]);
+    const { store } = await freshStore();
+
+    const mapping = store.getPayTypeMapping();
+
+    expect(mapping.status).toBe('NOT_VERIFIABLE');
+    expect(mapping.observedAdCount).toBe(0);
+    expect(mapping.banksVerified).toEqual([]);
+    // The configured codes are still reported, for comparison.
+    expect(mapping.configuredCodes).toContain('BBVAProvincial');
+  });
+
+  it('reports VERIFIED once a real ad matches a configured code', async () => {
+    // The fixture ad carries payType 'Banesco', which IS configured.
+    stubBinance([makeAdItem({ price: '919.00' })], [makeAdItem({ price: '921.50' })]);
+    const { store } = await freshStore();
+    await store.pollMarket();
+
+    const mapping = store.getPayTypeMapping();
+
+    expect(mapping.status).toBe('VERIFIED');
+    expect(mapping.matchedCodes).toEqual(['Banesco']);
+    expect(mapping.banksVerified).toEqual(['BANESCO']);
+    expect(mapping.banksNotObserved).toContain('PROVINCIAL');
+  });
+
+  it('reports NOT_VERIFIED when Binance sends codes none of the banks claim', async () => {
+    /*
+     * The blocker this exists for. If BANK_CODE_MAP is wrong, every ad is
+     * NOT_VERIFIED, every opportunity is null and Telegram goes quiet - which
+     * from outside is indistinguishable from a calm market.
+     */
+    const foreign = { payType: 'BankTransferVES', tradeMethodName: 'Transferencia' };
+    stubBinance(
+      [makeAdItem({ price: '919.00', tradeMethods: [foreign] })],
+      [makeAdItem({ price: '921.50', tradeMethods: [foreign] })]
+    );
+    const { store } = await freshStore();
+    await store.pollMarket();
+
+    const mapping = store.getPayTypeMapping();
+
+    expect(mapping.status).toBe('NOT_VERIFIED');
+    expect(mapping.observedPayTypes).toEqual(['BankTransferVES']);
+    expect(mapping.matchedCodes).toEqual([]);
+    expect(mapping.reason).toContain('BankTransferVES');
+  });
+
+  it('a wrong mapping produces no opportunity, and the reason is retrievable', async () => {
+    const foreign = { payType: 'BankTransferVES', tradeMethodName: 'Transferencia' };
+    stubBinance(
+      [makeAdItem({ price: '919.00', tradable: '5000', tradeMethods: [foreign] })],
+      [makeAdItem({ price: '921.50', tradable: '5000', tradeMethods: [foreign] })]
+    );
+    const { store } = await freshStore();
+    await store.pollMarket();
+
+    const { result } = await store.getOpportunities(true);
+
+    expect(result.bestOpportunity).toBeNull();
+    // ...and now it is possible to say WHY.
+    expect(store.getPayTypeMapping().status).toBe('NOT_VERIFIED');
+  });
+
+  it('logs the wrong mapping as an error, once', async () => {
+    const errors: string[] = [];
+    const spy = vi.spyOn(console, 'error').mockImplementation((...a) => {
+      errors.push(a.join(' '));
+    });
+    const foreign = { payType: 'BankTransferVES', tradeMethodName: 'Transferencia' };
+    stubBinance(
+      [makeAdItem({ price: '919.00', tradeMethods: [foreign] })],
+      [makeAdItem({ price: '921.50', tradeMethods: [foreign] })]
+    );
+    const { store } = await freshStore();
+    await store.pollMarket();
+    await store.pollMarket();
+
+    const mappingErrors = errors.filter((e) => e.includes('MAPPING INCORRECTO'));
+    expect(mappingErrors).toHaveLength(1); // once per status change, not per poll
+    spy.mockRestore();
+  });
+});
+
+describe('live capture and historical persistence are different cadences', () => {
+  const ad = (price: string) => makeAdItem({ price, tradable: '5000' });
+
+  it('LIVE polling stays at 6 seconds - this test exists to stop it drifting to 60', async () => {
+    /*
+     * Sampling the HISTORY once a minute must never be mistaken for polling
+     * Binance once a minute. The screen is the reason the poll is fast.
+     * Measured through real fetch calls, not by reading a private field.
+     */
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.parse('2026-08-23T16:00:00Z'));
+    const mock = stubBinance([ad('919.00')], [ad('921.50')]);
+    const { store } = await freshStore();
+
+    store.start();
+    await vi.advanceTimersByTimeAsync(30_000);
+    store.stop();
+
+    // 30s at 6s per poll = 6 polls (t=0 immediate, then 5 more), 2 requests each.
+    const polls = mock.mock.calls.filter(
+      (c) => JSON.parse(String((c[1] as RequestInit).body)).rows === 20
+    ).length / 2;
+    expect(polls).toBeGreaterThanOrEqual(5);
+    expect(polls).toBeLessThanOrEqual(6);
+    vi.useRealTimers();
+  });
+
+  it('an intermediate observation reaches the LIVE snapshot but is not persisted', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.parse('2026-08-23T16:00:00Z'));
+    stubBinance([ad('919.00')], [ad('921.50')]);
+    const { store } = await freshStore();
+
+    await store.pollMarket(); // t=0 - first observation always persists
+    expect(readData<HistoryRecord[]>('market_history.json')).toHaveLength(1);
+
+    // A different market, 6 seconds later.
+    vi.setSystemTime(Date.parse('2026-08-23T16:00:06Z'));
+    stubBinance([ad('919.90')], [ad('922.40')]);
+    const live = await store.pollMarket();
+
+    // The screen sees it...
+    expect(live?.strategicBuyPrice).toBe(919.9);
+    expect(store.getCurrentSnapshot().snapshot?.strategicSellPrice).toBe(922.4);
+    // ...the history does not.
+    expect(readData<HistoryRecord[]>('market_history.json')).toHaveLength(1);
+    vi.useRealTimers();
+  });
+
+  it('persists again once a full minute of observations has passed', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.parse('2026-08-23T16:00:00Z'));
+    stubBinance([ad('919.00')], [ad('921.50')]);
+    const { store } = await freshStore();
+    await store.pollMarket();
+
+    // Nine more observations inside the minute: still one record.
+    for (let i = 1; i <= 9; i += 1) {
+      vi.setSystemTime(Date.parse('2026-08-23T16:00:00Z') + i * 6_000);
+      await store.pollMarket();
+    }
+    expect(readData<HistoryRecord[]>('market_history.json')).toHaveLength(1);
+
+    vi.setSystemTime(Date.parse('2026-08-23T16:01:00Z'));
+    await store.pollMarket();
+    expect(readData<HistoryRecord[]>('market_history.json')).toHaveLength(2);
+    vi.useRealTimers();
+  });
+
+  it('stop() writes the newest observation the sampling skipped', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.parse('2026-08-23T16:00:00Z'));
+    stubBinance([ad('919.00')], [ad('921.50')]);
+    const { store } = await freshStore();
+    await store.pollMarket();
+
+    vi.setSystemTime(Date.parse('2026-08-23T16:00:30Z'));
+    stubBinance([ad('925.00')], [ad('926.00')]);
+    await store.pollMarket(); // skipped by the sampling interval
+
+    store.stop();
+
+    const history = readData<HistoryRecord[]>('market_history.json');
+    expect(history).toHaveLength(2);
+    expect(history[1].buyPrice).toBe(925); // the skipped observation, not lost
+    vi.useRealTimers();
+  });
+
+  it('an incomplete book is still never persisted, at any cadence', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.parse('2026-08-23T16:00:00Z'));
+    stubBinance([], [ad('921.50')]); // BUY side empty
+    const { store } = await freshStore();
+    await store.pollMarket();
+    store.stop();
+
+    // StorageEngine.initialize() creates the file; what matters is that no
+    // observation was recorded into it.
+    expect(readData<HistoryRecord[]>('market_history.json')).toEqual([]);
+    vi.useRealTimers();
+  });
+});
+
 describe('provenance (phase C1)', () => {
   it('marks a bank/amount cell REAL when an ad really covers that tier', async () => {
     // Default fixture ad: min 1000, max 50000 VES.
