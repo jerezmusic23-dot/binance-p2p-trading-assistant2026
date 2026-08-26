@@ -5,7 +5,8 @@
 
 import fs from 'fs';
 import path from 'path';
-import { HistoryRecord, AlertRule, AlertTriggerLog } from './types.js';
+import {
+  StorageDiagnostics, HistoryRecord, AlertRule, AlertTriggerLog } from './types.js';
 
 export class StorageEngine {
   /**
@@ -237,6 +238,46 @@ export class StorageEngine {
     } catch (err) {
       console.error('[Storage] Error saving history:', err);
     }
+  }
+
+  /**
+   * Where the history is really being written, and whether it survived.
+   *
+   * The code resolves DATA_DIR correctly, but nothing in the repository can
+   * prove the platform mounted a persistent volume there - and a container
+   * filesystem looks identical to a real one until it is recycled. This
+   * reports the observable facts so the difference is a measurement rather
+   * than an assumption.
+   *
+   * Deliberately narrow: a path, a boolean and some counts. No environment
+   * dump, no credentials, no file contents.
+   */
+  public static describeStorage(): StorageDiagnostics {
+    this.initialize();
+
+    const exists = fs.existsSync(this.HISTORY_FILE);
+    let writable = false;
+    try {
+      fs.accessSync(this.DATA_DIR, fs.constants.W_OK);
+      writable = true;
+    } catch {
+      writable = false;
+    }
+
+    const iso = (ts: number | undefined) =>
+      ts === undefined ? null : new Date(ts).toISOString();
+
+    return {
+      dataDir: this.DATA_DIR,
+      historyFile: this.HISTORY_FILE,
+      exists,
+      writable,
+      recordCount: this.history.length,
+      oldestTimestamp: iso(this.history[0]?.timestamp),
+      newestTimestamp: iso(this.history[this.history.length - 1]?.timestamp),
+      strategicRecordCount: this.history.filter((r) => r.calculationVersion === 'v2-strategic')
+        .length,
+    };
   }
 
   public static getHistory(limit?: number, sinceTimestamp?: number): HistoryRecord[] {

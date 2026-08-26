@@ -685,14 +685,37 @@ describe('TEST 25 / 26 / 27 / 28 / 29 - BEST_OPPORTUNITY', () => {
     expect(selectBestOpportunity([], BANK_ORDER)).toBeNull();
   });
 
-  it('a negative margin can still be the best available, and stays negative', () => {
+  it('there is no best loss - an inverted market has no best opportunity', () => {
+    /*
+     * This used to return the least bad loss, and Telegram announced it as
+     * the operation to run. Losses stay in `opportunities` as market
+     * context; they are simply never the answer to "what should I trade".
+     */
     const best = selectBestOpportunity(
       [op({ bank: 'BANESCO', marginPct: -0.9 }), op({ bank: 'BNC', marginPct: -0.2 })],
       BANK_ORDER
     );
 
+    expect(best).toBeNull();
+  });
+
+  it('break-even is not an opportunity either', () => {
+    // Zero margin is a loss once commission, transfer and slippage are paid.
+    expect(selectBestOpportunity([op({ marginPct: 0 })], BANK_ORDER)).toBeNull();
+  });
+
+  it('picks the only profitable one out of a losing book', () => {
+    const best = selectBestOpportunity(
+      [
+        op({ bank: 'BANESCO', marginPct: -0.9 }),
+        op({ bank: 'BNC', marginPct: 0.05 }),
+        op({ bank: 'MERCANTIL', marginPct: -0.2 }),
+      ],
+      BANK_ORDER
+    );
+
     expect(best?.bank).toBe('BNC');
-    expect(best!.marginPct).toBeLessThan(0);
+    expect(best!.marginPct).toBeGreaterThan(0);
   });
 });
 
@@ -853,5 +876,76 @@ describe('runOpportunityEngine - full result', () => {
     expect(result.opportunities).toEqual([]);
     expect(result.bestOpportunity).toBeNull();
     expect(result.byBank).toEqual({});
+  });
+});
+
+describe('spread selection over the real executable set', () => {
+  it('CASO 15: the extremes ARE the maximum - no cartesian product needed', () => {
+    /*
+     * BUY 930/932/934 x SELL 931/933/935 has nine combinations. Enumerated,
+     * the best is 930 -> 935 = +5, which is exactly min(BUY) -> max(SELL).
+     *
+     * That is not a coincidence: (sell - buy) / buy rises with sell and falls
+     * with buy, so its maximum over the product always sits at that corner.
+     * The test enumerates all nine and asserts the engine's answer equals the
+     * enumerated winner - the guarantee, without paying O(n^2) for it.
+     */
+    const c = cell({
+      buy: [
+        { advNo: 'b930', price: 930 },
+        { advNo: 'b932', price: 932 },
+        { advNo: 'b934', price: 934 },
+      ],
+      sell: [
+        { advNo: 's931', price: 931 },
+        { advNo: 's933', price: 933 },
+        { advNo: 's935', price: 935 },
+      ],
+    });
+    const op = buildOpportunity(c)!;
+
+    expect(op.buyPrice).toBe(930);
+    expect(op.sellPrice).toBe(935);
+    expect(op.spreadAbsolute).toBe(5);
+
+    // Brute force, for comparison only - never used in production.
+    const brute = c.buyQuotes.flatMap((b) =>
+      c.sellQuotes.map((s) => ({ buy: b.price, sell: s.price, spread: s.price - b.price }))
+    );
+    expect(brute).toHaveLength(9);
+    const bestBrute = brute.reduce((a, b) => (b.spread > a.spread ? b : a));
+    expect(bestBrute).toEqual({ buy: 930, sell: 935, spread: 5 });
+    expect(op.spreadAbsolute).toBe(bestBrute.spread);
+  });
+
+  it('CASO 16: an inverted cell is context, never the best opportunity', () => {
+    const c = cell({
+      buy: [{ advNo: 'b', price: 934 }],
+      sell: [{ advNo: 's', price: 932 }],
+    });
+    const result = runOpportunityEngine({
+      byBank: { BANESCO: { '20K': c } },
+      bankOrder: BANK_ORDER,
+    });
+
+    // The cell exists and reports the real, negative spread...
+    expect(result.byBank.BANESCO['20K']!.spreadAbsolute).toBe(-2);
+    expect(result.opportunities).toHaveLength(1);
+    // ...and it is not offered as an operation.
+    expect(result.bestOpportunity).toBeNull();
+  });
+
+  it('CASO 19: a tier cannot borrow an ad that only covers another tier', () => {
+    const ads = {
+      buy: [{ advNo: 'only100k', price: 930, minAmountVes: 60_000, maxAmountVes: 100_000 }],
+      sell: [{ advNo: 'any', price: 940 }],
+    };
+
+    const at20K = buildOpportunity(cell({ ...ads, amountVes: 20_000 }));
+    const at100K = buildOpportunity(cell({ ...ads, amountVes: 100_000 }));
+
+    expect(at20K).toBeNull(); // 20K is below the ad's minimum
+    expect(at100K?.buyPrice).toBe(930); // 100K is inside its limits
+    expect(at100K?.amountVes).toBe(100_000);
   });
 });

@@ -199,6 +199,22 @@ export class CentralMarketStore {
           activeBuyAds: snapshot.topBuyAds.length,
           activeSellAds: snapshot.topSellAds.length,
           source: 'BINANCE_P2P',
+          /*
+           * ADDITIVE. The raw extremes above are untouched; these carry the
+           * strategic level of the same observation, which is what a market
+           * projection needs. Written only when both sides produced one -
+           * never derived, never defaulted.
+           */
+          ...(snapshot.strategicBuyPrice !== null &&
+          snapshot.strategicSellPrice !== null &&
+          snapshot.strategicSpreadPct !== null
+            ? {
+                calculationVersion: 'v2-strategic' as const,
+                strategicBuyPrice: snapshot.strategicBuyPrice,
+                strategicSellPrice: snapshot.strategicSellPrice,
+                strategicSpreadPct: snapshot.strategicSpreadPct,
+              }
+            : {}),
         };
 
         /*

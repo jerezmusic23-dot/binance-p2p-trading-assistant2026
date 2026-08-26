@@ -12,6 +12,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { ProjectionEngine } from '../server/projectionEngine.js';
 import { makeHistory, makeSnapshot, makeNormalizedAd } from './helpers/fixtures.js';
+import type { HistoryRecord } from '../server/types.js';
 
 // 2026-08-23T16:00:00Z == 12:00 VET (UTC-4), inside the 8:00-20:00 session.
 const FIXED_NOW = Date.parse('2026-08-23T16:00:00Z');
@@ -446,4 +447,97 @@ describe('backtest does not validate the production model', () => {
 
   // confidencePct staying null is already asserted in 'generateProjections'
   // above, where the `project` helper lives. Not duplicated here.
+});
+
+describe('series basis: strategic when the whole window has it, RAW otherwise', () => {
+  /** A record carrying both definitions, deliberately far apart. */
+  const v2 = (i: number, raw: number, strategic: number): HistoryRecord => ({
+    id: `v2-${i}`,
+    timestamp: 1_756_000_000_000 + i * 60_000,
+    dateStr: '2026-08-24',
+    hour: 12,
+    buyPrice: raw,
+    sellPrice: raw + 2,
+    spreadPct: 0.2,
+    bestBuyMerchant: 'A',
+    bestSellMerchant: 'B',
+    activeBuyAds: 5,
+    activeSellAds: 5,
+    source: 'BINANCE_P2P',
+    calculationVersion: 'v2-strategic',
+    strategicBuyPrice: strategic,
+    strategicSellPrice: strategic + 2,
+    strategicSpreadPct: 0.21,
+  });
+
+  it('uses the strategic series when every record carries it', () => {
+    // Raw sits flat at 900; strategic rises 920 -> 959. If the engine reads
+    // the strategic series the trend is up; if it reads raw it is flat.
+    const history = Array.from({ length: 40 }, (_, i) => v2(i, 900, 920 + i));
+    const snap = makeSnapshot({
+      bestBuyPrice: 900,
+      strategicBuyPrice: 959,
+      strategicSellPrice: 961,
+    });
+
+    const analysis = ProjectionEngine.analyzeMarket(snap, history);
+
+    expect(analysis.trend).toBe('ALCISTA');
+  });
+
+  it('stays RAW when the window mixes v1 and v2 - never a hybrid series', () => {
+    /*
+     * One legacy record is enough. Mixing a strategic anchor onto a series of
+     * raw minima offsets the newest point by the gap between the definitions
+     * and invents momentum out of a change of units.
+     */
+    const history: HistoryRecord[] = [
+      ...Array.from({ length: 39 }, (_, i) => v2(i, 900, 920 + i)),
+      { ...v2(39, 900, 959), calculationVersion: undefined, strategicBuyPrice: undefined },
+    ];
+    const snap = makeSnapshot({
+      bestBuyPrice: 900,
+      strategicBuyPrice: 959,
+      strategicSellPrice: 961,
+    });
+
+    const analysis = ProjectionEngine.analyzeMarket(snap, history);
+
+    // The raw series is flat, so the trend must be flat too.
+    expect(analysis.trend).toBe('LATERAL');
+  });
+
+  it('the same input always produces the same analysis', () => {
+    const history = Array.from({ length: 40 }, (_, i) => v2(i, 900, 920 + i));
+    const snap = makeSnapshot({ strategicBuyPrice: 959, strategicSellPrice: 961 });
+
+    expect(ProjectionEngine.analyzeMarket(snap, history)).toEqual(
+      ProjectionEngine.analyzeMarket(snap, history)
+    );
+  });
+
+  it('changing the stored history changes the projection', () => {
+    const flat = Array.from({ length: 40 }, (_, i) => v2(i, 900, 920));
+    const rising = Array.from({ length: 40 }, (_, i) => v2(i, 900, 920 + i));
+    const snap = makeSnapshot({ strategicBuyPrice: 959, strategicSellPrice: 961 });
+
+    expect(ProjectionEngine.analyzeMarket(snap, flat).trend).not.toBe(
+      ProjectionEngine.analyzeMarket(snap, rising).trend
+    );
+  });
+
+  it('below the minimum sample count there is still no projection and no confidence', () => {
+    const history = Array.from({ length: 29 }, (_, i) => v2(i, 900, 920 + i));
+    const snap = makeSnapshot({ strategicBuyPrice: 959, strategicSellPrice: 961 });
+
+    const p = ProjectionEngine.generateProjections(
+      snap,
+      history,
+      ProjectionEngine.analyzeMarket(snap, history)
+    );
+
+    expect(p.hasSufficientData).toBe(false);
+    expect(p.daily.confidencePct).toBeNull();
+    expect(p.insufficientDataReason).toContain('29');
+  });
 });

@@ -355,3 +355,79 @@ describe('data directory resolution (DATA_DIR)', () => {
     expect(StorageEngine.getHistory()).toHaveLength(7);
   });
 });
+
+describe('storage diagnostics', () => {
+  it('reports the configured DATA_DIR, resolved to an absolute path', async () => {
+    process.env.DATA_DIR = path.join(tmpDir, 'volume');
+    vi.resetModules();
+    const { StorageEngine } = await import('../server/storage.js');
+
+    const d = StorageEngine.describeStorage();
+
+    expect(d.dataDir).toBe(path.join(tmpDir, 'volume'));
+    expect(d.historyFile).toBe(path.join(tmpDir, 'volume', 'market_history.json'));
+    delete process.env.DATA_DIR;
+  });
+
+  it('falls back to ./data when DATA_DIR is unset', async () => {
+    delete process.env.DATA_DIR;
+    vi.resetModules();
+    const { StorageEngine } = await import('../server/storage.js');
+
+    expect(StorageEngine.describeStorage().dataDir).toBe(path.join(process.cwd(), 'data'));
+  });
+
+  it('reports the directory as existing and writable once initialised', async () => {
+    vi.resetModules();
+    const { StorageEngine } = await import('../server/storage.js');
+    const d = StorageEngine.describeStorage();
+
+    expect(d.exists).toBe(true);
+    expect(d.writable).toBe(true);
+  });
+
+  it('counts records and reports the real time span', async () => {
+    vi.resetModules();
+    const { StorageEngine } = await import('../server/storage.js');
+    const at = (iso: string) => ({
+      id: iso, timestamp: Date.parse(iso), dateStr: iso, hour: 12,
+      buyPrice: 919, sellPrice: 921, spreadPct: 0.2,
+      bestBuyMerchant: 'A', bestSellMerchant: 'B',
+      activeBuyAds: 1, activeSellAds: 1, source: 'BINANCE_P2P',
+    });
+    StorageEngine.appendRecord(at('2026-08-25T10:00:00.000Z'));
+    StorageEngine.appendRecord(at('2026-08-25T10:05:00.000Z'));
+
+    const d = StorageEngine.describeStorage();
+
+    expect(d.recordCount).toBe(2);
+    expect(d.oldestTimestamp).toBe('2026-08-25T10:00:00.000Z');
+    expect(d.newestTimestamp).toBe('2026-08-25T10:05:00.000Z');
+    expect(d.strategicRecordCount).toBe(0); // both are legacy records
+  });
+
+  it('reports an empty history as empty, not as unknown', async () => {
+    vi.resetModules();
+    const { StorageEngine } = await import('../server/storage.js');
+    const d = StorageEngine.describeStorage();
+
+    expect(d.recordCount).toBe(0);
+    expect(d.oldestTimestamp).toBeNull();
+    expect(d.newestTimestamp).toBeNull();
+  });
+
+  it('exposes no environment, credentials or file contents', async () => {
+    process.env.TELEGRAM_BOT_TOKEN = 'secret-token-value';
+    vi.resetModules();
+    const { StorageEngine } = await import('../server/storage.js');
+
+    const serialised = JSON.stringify(StorageEngine.describeStorage());
+
+    expect(serialised).not.toContain('secret-token-value');
+    expect(Object.keys(StorageEngine.describeStorage()).sort()).toEqual([
+      'dataDir', 'exists', 'historyFile', 'newestTimestamp', 'oldestTimestamp',
+      'recordCount', 'strategicRecordCount', 'writable',
+    ]);
+    delete process.env.TELEGRAM_BOT_TOKEN;
+  });
+});

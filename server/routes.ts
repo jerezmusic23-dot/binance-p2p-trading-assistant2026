@@ -214,6 +214,13 @@ apiRouter.get('/health', (req, res) => {
       const m = centralStore.getPayTypeMapping();
       return { status: m.status, reason: m.reason, observedAdCount: m.observedAdCount };
     })(),
+    /*
+     * Where the history is actually being written. Code resolving DATA_DIR
+     * correctly does not prove the platform mounted a persistent volume
+     * there; a recordCount that resets to zero after every deploy does prove
+     * it did not. A path and some counts only - no environment dump.
+     */
+    storage: StorageEngine.describeStorage(),
   });
 });
 

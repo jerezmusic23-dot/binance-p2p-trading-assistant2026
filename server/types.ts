@@ -259,6 +259,35 @@ export interface HistoryRecord {
   source: string;
   filterBank?: string;
   filterAmount?: number;
+
+  /**
+   * ADDITIVE. Absent on every record written before this existed - those are
+   * v1, RAW-only, and are never backfilled with values nobody observed.
+   *
+   * buyPrice/sellPrice/spreadPct above stay exactly what they were: the raw
+   * extremes of the book. These three are the strategic level - the median of
+   * each side and the signed spread between them - which is what a market
+   * projection should be built on. Both are kept because they answer
+   * different questions, and a series must never mix them.
+   */
+  calculationVersion?: 'v2-strategic';
+  strategicBuyPrice?: number;
+  strategicSellPrice?: number;
+  strategicSpreadPct?: number;
+}
+
+/** What the storage layer is actually doing, for diagnosing persistence. */
+export interface StorageDiagnostics {
+  dataDir: string;
+  historyFile: string;
+  exists: boolean;
+  writable: boolean;
+  recordCount: number;
+  /** ISO timestamps of the first and last stored sample. null when empty. */
+  oldestTimestamp: string | null;
+  newestTimestamp: string | null;
+  /** How many stored records carry strategic prices. */
+  strategicRecordCount: number;
 }
 
 export interface HourlyChartPoint {

@@ -113,10 +113,11 @@ export function buildOpportunity(cell: BankAmountExecutability): Opportunity | n
 }
 
 /**
- * Picks the best operation among VERIFIED opportunities only.
+ * Picks the best operation among VERIFIED, PROFITABLE opportunities only.
  *
  * A NOT_VERIFIABLE opportunity is never "the best" - an unestablished
- * liquidity is not a usable operation.
+ * liquidity is not a usable operation. Neither is a margin of zero or less:
+ * there is no such thing as the best loss.
  *
  * Criteria, in order:
  *   1. higher marginPct
@@ -145,6 +146,19 @@ export function selectBestOpportunity(
 
   for (const candidate of opportunities) {
     if (candidate.verification !== 'VERIFIED') continue;
+    /*
+     * A loss is not an opportunity, and neither is break-even.
+     *
+     * The selector used to rank on margin alone, so in an inverted market it
+     * returned the least bad loss and Telegram announced it as the best
+     * operation available. Zero is excluded too: break-even before Binance
+     * commission, transfer fees and slippage is a loss once they are paid.
+     *
+     * Negative cells stay in `opportunities` and `byBank` - they are the real
+     * state of the market. They just cannot be the answer to "what should I
+     * trade right now".
+     */
+    if (candidate.marginPct <= 0) continue;
     if (best === null) {
       best = candidate;
       continue;

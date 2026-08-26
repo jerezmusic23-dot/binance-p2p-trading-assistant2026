@@ -86,27 +86,65 @@ export class ProjectionEngine {
   /**
    * Performs technical and statistical analysis on real historical records and current snapshot
    */
+  /**
+   * Picks ONE definition for the series and its latest point.
+   *
+   * A market projection should read the strategic level - the median of each
+   * side - not the raw extremes. But the series and the anchor must come from
+   * the SAME definition. Feeding a strategic median as the newest point of a
+   * series of raw minima offsets that point by the gap between the two
+   * definitions (~2.4 VES in the observed book) and manufactures a momentum
+   * signal out of a change of units.
+   *
+   * So: strategic only when EVERY record in the window carries it and the
+   * snapshot has one too. A window mixing v1 and v2 records stays entirely
+   * RAW - consistent, and honest about what it is. As v2 records accumulate
+   * the window flips over on its own, with no migration and nothing
+   * backfilled.
+   */
+  private static selectSeriesBasis(
+    snapshot: MarketSnapshot,
+    history: HistoryRecord[]
+  ): {
+    basis: 'STRATEGIC' | 'RAW';
+    buyPrices: number[];
+    currentBuy: number | null;
+    currentSell: number | null;
+  } {
+    const allStrategic =
+      history.length > 0 &&
+      history.every(
+        (h) =>
+          h.calculationVersion === 'v2-strategic' &&
+          h.strategicBuyPrice !== undefined &&
+          h.strategicSellPrice !== undefined
+      );
+
+    if (allStrategic && snapshot.strategicBuyPrice !== null && snapshot.strategicSellPrice !== null) {
+      return {
+        basis: 'STRATEGIC',
+        buyPrices: history.map((h) => h.strategicBuyPrice as number).filter((p) => p > 0),
+        currentBuy: snapshot.strategicBuyPrice,
+        currentSell: snapshot.strategicSellPrice,
+      };
+    }
+
+    return {
+      basis: 'RAW',
+      buyPrices: history.map((h) => h.buyPrice).filter((p) => p > 0),
+      currentBuy: snapshot.bestBuyPrice,
+      currentSell: snapshot.bestSellPrice,
+    };
+  }
+
   public static analyzeMarket(
     snapshot: MarketSnapshot,
     history: HistoryRecord[]
   ): MarketAnalysis {
-    /*
-     * PENDING - deliberately still RAW, and NOT substituted blindly.
-     *
-     * Classification: this is a MARKET analysis, so it should read
-     * strategicBuyPrice. It cannot yet, because `history` stores buyPrice =
-     * bestBuyPrice, the RAW minimum. Feeding a strategic median as the latest
-     * point of a series of raw minima would offset the last observation by
-     * the gap between them (~2.4 VES in the observed book) and manufacture a
-     * momentum signal out of a change of definition.
-     *
-     * The fix is to make HistoryRecord carry the strategic prices for NEW
-     * records (calculationVersion 'v2-strategic'; absent = v1), leaving old
-     * records untouched, and then switch both the series and this anchor
-     * together. That belongs to the history phase, not here.
-     */
-    const buyPrices = history.map((h) => h.buyPrice).filter((p) => p > 0);
-    const currentPrice = snapshot.bestBuyPrice;
+    // Series and anchor from one definition - see selectSeriesBasis.
+    const series = this.selectSeriesBasis(snapshot, history);
+    const buyPrices = series.buyPrices;
+    const currentPrice = series.currentBuy;
     const dataWindow = this.describeWindow(history);
     const provenance = {
       overall: 'AGGREGATED' as const,
@@ -329,9 +367,10 @@ export class ProjectionEngine {
     history: HistoryRecord[],
     analysis: MarketAnalysis
   ): MarketProjections {
-    // PENDING - RAW anchor, same history-series dependency as analyzeMarket.
-    const currentBuy = snapshot.bestBuyPrice;
-    const currentSell = snapshot.bestSellPrice;
+    // Same single definition as analyzeMarket, for the same reason.
+    const seriesBasis = this.selectSeriesBasis(snapshot, history);
+    const currentBuy = seriesBasis.currentBuy;
+    const currentSell = seriesBasis.currentSell;
     const currentVetHour = this.getVenezuelaHour();
     const orderBookPressure = this.computeOrderBookPressure(snapshot);
     const dataWindow = this.describeWindow(history);

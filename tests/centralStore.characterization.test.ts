@@ -110,7 +110,9 @@ describe('pollMarket - success path', () => {
 
   it('BUG: the history record drops the entire order book', async () => {
     // Depth loss #3 (audit) - the single most damaging gap for projections.
-    // 10 ads per side are fetched; two prices survive.
+    // The order book is STILL dropped: the record now also carries the
+    // strategic level of the observation, but not a single ad, price, limit
+    // or liquidity figure from the book itself. Still a BUG:.
     const buy = Array.from({ length: 10 }, (_, i) =>
       makeAdItem({ advNo: `b${i}`, price: String(918 + i), tradable: '500' })
     );
@@ -135,6 +137,11 @@ describe('pollMarket - success path', () => {
         'source',
         'spreadPct',
         'timestamp',
+        // Added additively: the strategic level of the same observation.
+        'calculationVersion',
+        'strategicBuyPrice',
+        'strategicSellPrice',
+        'strategicSpreadPct',
       ].sort()
     );
     // No liquidity, no per-ad prices, no payment methods, no merchant ratings.
@@ -1236,5 +1243,232 @@ describe('payType diagnostic over the full captured book', () => {
       totalAds: 0,
       paymentMethodEntries: 0,
     });
+  });
+});
+
+describe('an inverted market produces no opportunity and no alert', () => {
+  const liquid = (price: string, extra: Record<string, unknown> = {}) =>
+    makeAdItem({ price, tradable: '5000', min: '1000', max: '100000', ...extra });
+
+  it('BUY above SELL: the cell is kept as context, bestOpportunity is null', async () => {
+    // Repurchase costlier than the sale. Real market state, not an operation.
+    stubBinance([liquid('941.00')], [liquid('918.00')]);
+    const { store } = await freshStore();
+
+    const { result } = await store.getOpportunities(true);
+
+    expect(result.opportunities.length).toBeGreaterThan(0);
+    expect(result.byBank.BANESCO['20K']!.spreadPct).toBeLessThan(0);
+    expect(result.bestOpportunity).toBeNull();
+  });
+
+  it('Telegram is never handed a losing operation', async () => {
+    stubBinance([liquid('941.00')], [liquid('918.00')]);
+    const { store, StorageEngine } = await freshStore();
+    StorageEngine.deleteAlert('rule-spread-high');
+    StorageEngine.deleteAlert('rule-volatility-spike');
+    // A rule whose threshold a negative margin WOULD clear, if it ever arrived.
+    StorageEngine.saveAlert({
+      id: 'op-rule',
+      name: 'Oportunidad',
+      condition: 'OPPORTUNITY_ABOVE',
+      targetValue: -99,
+      targetSide: 'BUY',
+      enabled: true,
+      createdAt: 1,
+    });
+
+    await store.getOpportunities(true);
+    await store.pollMarket();
+
+    expect(store.getCachedBestOpportunity()).toBeNull();
+    expect(fs.existsSync(path.join(tmpDir, 'data', 'alert_triggers.json'))).toBe(false);
+  });
+
+  it('a profitable market still alerts', async () => {
+    stubBinance([liquid('919.00')], [liquid('921.50')]);
+    const { store, StorageEngine } = await freshStore();
+    StorageEngine.deleteAlert('rule-spread-high');
+    StorageEngine.deleteAlert('rule-volatility-spike');
+    StorageEngine.saveAlert({
+      id: 'op-rule',
+      name: 'Oportunidad',
+      condition: 'OPPORTUNITY_ABOVE',
+      targetValue: 0.1,
+      targetSide: 'BUY',
+      enabled: true,
+      createdAt: 1,
+    });
+
+    await store.getOpportunities(true);
+    await store.pollMarket();
+
+    expect(store.getCachedBestOpportunity()!.marginPct).toBeGreaterThan(0);
+    expect(readData<AlertTriggerLog[]>('alert_triggers.json')).toHaveLength(1);
+  });
+});
+
+describe('CASO 20 - historical samples survive a restart', () => {
+  const liquid = (price: string) => makeAdItem({ price, tradable: '5000' });
+
+  it('stores a sample, reads it back, and keeps accumulating after a restart', async () => {
+    vi.useFakeTimers();
+    const t0 = Date.parse('2026-08-25T16:00:00Z');
+    vi.setSystemTime(t0);
+    stubBinance([liquid('919.00')], [liquid('921.50')]);
+
+    const first = await freshStore();
+    await first.store.pollMarket();
+    vi.setSystemTime(t0 + 60_000);
+    await first.store.pollMarket();
+    expect(first.StorageEngine.getHistory()).toHaveLength(2);
+
+    // Restart: fresh modules, same DATA_DIR. Nothing is carried in memory.
+    vi.setSystemTime(t0 + 120_000);
+    const second = await freshStore();
+
+    // The samples written before the restart are still there...
+    expect(second.StorageEngine.getHistory()).toHaveLength(2);
+    // ...and the process keeps appending to them, it does not start over.
+    await second.store.pollMarket();
+    const after = second.StorageEngine.getHistory();
+    expect(after).toHaveLength(3);
+
+    // Chronological order, no gaps, no duplicates.
+    const stamps = after.map((r) => r.timestamp);
+    expect(stamps).toEqual([...stamps].sort((a, b) => a - b));
+    expect(new Set(stamps).size).toBe(3);
+    expect(after.every((r) => r.buyPrice === 919 && r.sellPrice === 921.5)).toBe(true);
+    vi.useRealTimers();
+  });
+});
+
+describe('strategic history records', () => {
+  const liquid = (price: string) => makeAdItem({ price, tradable: '5000' });
+
+  it('a new record carries the strategic level and its version', async () => {
+    stubBinance([liquid('919.00')], [liquid('921.50')]);
+    const { store } = await freshStore();
+    await store.pollMarket();
+
+    const [record] = readData<HistoryRecord[]>('market_history.json');
+
+    expect(record.calculationVersion).toBe('v2-strategic');
+    expect(record.strategicBuyPrice).toBe(919);
+    expect(record.strategicSellPrice).toBe(921.5);
+    expect(record.strategicSpreadPct).toBeCloseTo(((921.5 - 919) / 919) * 100, 2);
+    // The raw fields are untouched and still there.
+    expect(record.buyPrice).toBe(919);
+    expect(record.sellPrice).toBe(921.5);
+  });
+
+  it('a legacy record is left exactly as written, never backfilled', async () => {
+    stubBinance([liquid('919.00')], [liquid('921.50')]);
+    const { StorageEngine } = await freshStore();
+
+    // A v1 record, as an older build would have written it.
+    StorageEngine.appendRecord({
+      id: 'legacy-1',
+      timestamp: Date.parse('2026-08-01T10:00:00Z'),
+      dateStr: '2026-08-01',
+      hour: 10,
+      buyPrice: 900,
+      sellPrice: 905,
+      spreadPct: 0.55,
+      bestBuyMerchant: 'A',
+      bestSellMerchant: 'B',
+      activeBuyAds: 3,
+      activeSellAds: 3,
+      source: 'BINANCE_P2P',
+    });
+
+    const [legacy] = StorageEngine.getHistory();
+
+    expect(legacy.calculationVersion).toBeUndefined();
+    expect(legacy.strategicBuyPrice).toBeUndefined();
+    expect(legacy.buyPrice).toBe(900); // readable, unchanged
+  });
+
+  it('does not write strategic fields when a side had no price', async () => {
+    stubBinance([], [liquid('921.50')]); // BUY side empty
+    const { store } = await freshStore();
+    await store.pollMarket();
+
+    // C2: an incomplete observation is not recorded at all.
+    expect(readData<HistoryRecord[]>('market_history.json')).toEqual([]);
+  });
+
+  it('storage diagnostics count the strategic records', async () => {
+    stubBinance([liquid('919.00')], [liquid('921.50')]);
+    const { store, StorageEngine } = await freshStore();
+    await store.pollMarket();
+
+    const d = StorageEngine.describeStorage();
+    expect(d.recordCount).toBe(1);
+    expect(d.strategicRecordCount).toBe(1);
+  });
+});
+
+describe('shutdown flush', () => {
+  const liquid = (price: string) => makeAdItem({ price, tradable: '5000' });
+
+  it('stop() writes the sample the interval skipped', async () => {
+    vi.useFakeTimers();
+    const t0 = Date.parse('2026-08-25T18:00:00Z');
+    vi.setSystemTime(t0);
+    stubBinance([liquid('919.00')], [liquid('921.50')]);
+    const { store } = await freshStore();
+
+    await store.pollMarket(); // persists (first one always does)
+    vi.setSystemTime(t0 + 30_000);
+    stubBinance([liquid('925.00')], [liquid('926.00')]);
+    await store.pollMarket(); // inside the sampling window: pending
+
+    expect(readData<HistoryRecord[]>('market_history.json')).toHaveLength(1);
+    store.stop();
+    const after = readData<HistoryRecord[]>('market_history.json');
+
+    expect(after).toHaveLength(2);
+    expect(after[1].buyPrice).toBe(925);
+    vi.useRealTimers();
+  });
+
+  it('stopping twice does not append the same sample again', async () => {
+    /*
+     * A platform commonly sends SIGTERM and then SIGINT. Flushing twice would
+     * duplicate the newest observation, which would then look like two ticks
+     * at the same instant.
+     */
+    vi.useFakeTimers();
+    const t0 = Date.parse('2026-08-25T18:00:00Z');
+    vi.setSystemTime(t0);
+    stubBinance([liquid('919.00')], [liquid('921.50')]);
+    const { store } = await freshStore();
+
+    await store.pollMarket();
+    vi.setSystemTime(t0 + 30_000);
+    await store.pollMarket();
+
+    store.stop();
+    store.stop();
+    store.stop();
+
+    const after = readData<HistoryRecord[]>('market_history.json');
+    expect(after).toHaveLength(2);
+    expect(new Set(after.map((r) => r.timestamp)).size).toBe(2);
+    vi.useRealTimers();
+  });
+
+  it('stop() with nothing pending writes nothing', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.parse('2026-08-25T18:00:00Z'));
+    stubBinance([liquid('919.00')], [liquid('921.50')]);
+    const { store } = await freshStore();
+    await store.pollMarket();
+
+    store.stop();
+
+    expect(readData<HistoryRecord[]>('market_history.json')).toHaveLength(1);
+    vi.useRealTimers();
   });
 });

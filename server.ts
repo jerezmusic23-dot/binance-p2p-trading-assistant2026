@@ -45,9 +45,37 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`[Binance Assistant] Server running on port ${PORT}`);
   });
+
+  /*
+   * Controlled shutdown.
+   *
+   * The history is sampled once a minute, so the newest observation is
+   * usually still pending when the platform recycles the container.
+   * CentralMarketStore.stop() writes it; nothing called stop() on a signal
+   * until now, so that sample was lost on every deploy.
+   *
+   * Guarded against running twice: a platform commonly sends SIGTERM and then
+   * SIGINT, and flushing twice would append the same record again.
+   */
+  let shuttingDown = false;
+  const shutdown = (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`[Binance Assistant] ${signal} received, flushing and closing.`);
+
+    centralStore.stop();
+
+    // Stop accepting connections, then leave. The exit is not conditional on
+    // close() finishing: a hung keep-alive must not block the shutdown.
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 5000).unref();
+  };
+
+  process.once('SIGTERM', () => shutdown('SIGTERM'));
+  process.once('SIGINT', () => shutdown('SIGINT'));
 }
 
 startServer().catch((err) => {
