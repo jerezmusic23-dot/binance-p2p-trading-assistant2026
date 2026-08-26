@@ -48,14 +48,28 @@ apiRouter.get('/market/projections', async (req, res) => {
 });
 
 // 4. Multi-Filter Bank Matrix
+/*
+ * Two structures, named so they cannot be confused.
+ *
+ * executableMatrix - BANK x AMOUNT, every cell from ads verified as that
+ *                    bank's, accepting that amount, with volume covering it.
+ *                    The ONLY thing here that may be presented as a rate.
+ * marketReference  - the level of the whole book, no bank and no amount. It
+ *                    carries executable: false inside the payload.
+ *
+ * The tradeType query parameter is gone: a cell is not one side, it is an
+ * operation with both. Asking for "the SELL matrix" was itself the shape of
+ * the old mistake.
+ */
 apiRouter.get('/market/matrix', async (req, res) => {
   try {
-    const tradeType = (req.query.tradeType as string)?.toUpperCase() === 'BUY' ? 'BUY' : 'SELL';
     const forceRefresh = req.query.refresh === 'true';
-    const matrix = await centralStore.getBankMatrix(tradeType, forceRefresh);
-    res.json(matrix);
+    const { executableMatrix, marketReference } = await centralStore.getExecutableMatrix(
+      forceRefresh
+    );
+    res.json({ marketReference, executableMatrix });
   } catch (err: any) {
-    res.status(500).json({ error: err.message || 'Error fetching bank matrix' });
+    res.status(500).json({ error: err.message || 'Error fetching executable matrix' });
   }
 });
 
@@ -77,6 +91,9 @@ apiRouter.get('/market/opportunities', async (_req, res) => {
     const { timestamp, result } = await centralStore.getOpportunities();
     res.json({
       timestamp,
+      // Without this a null bestOpportunity is ambiguous: bad market, or
+      // broken mapping? The report says which.
+      payTypeMapping: centralStore.getPayTypeMapping(),
       bestOpportunity: result.bestOpportunity,
       opportunities: result.opportunities,
       byBank: result.byBank,
@@ -127,8 +144,22 @@ apiRouter.get('/market/history', (req, res) => {
 // 6. Backtest Metrics
 apiRouter.get('/market/backtest', (req, res) => {
   try {
+    /*
+     * Two measurements, both reported.
+     *
+     * backtest      - the legacy one-step linear fit over RAW buyPrice. It
+     *                 still says validatesProductionModel: false, because it
+     *                 still does not measure the engine that publishes.
+     * walkForward   - the production engine itself, replayed at every past
+     *                 record. This is the one that can validate the model, and
+     *                 it does so only when it actually scored samples.
+     *
+     * The old one is kept rather than replaced: it is the record of what was
+     * being measured before, and deleting it would erase the comparison.
+     */
     const backtest = centralStore.getBacktestMetrics();
-    res.json({ backtest });
+    const walkForward = centralStore.getWalkForwardBacktest();
+    res.json({ backtest, walkForward });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Error computing backtest' });
   }
@@ -200,7 +231,72 @@ apiRouter.get('/health', (req, res) => {
     dataAgeSeconds: ageSeconds,
     market: 'USDT/VES',
     timestamp: Date.now(),
-    currentBuyPrice: snapshot?.bestBuyPrice || null,
-    currentSellPrice: snapshot?.bestSellPrice || null,
+    currentBuyPrice: snapshot?.bestBuyPrice ?? null,
+    currentSellPrice: snapshot?.bestSellPrice ?? null,
+    /*
+     * Whether BANK_CODE_MAP matches what Binance really sends. Without this,
+     * a wrong mapping and a quiet market are indistinguishable from outside:
+     * both produce no opportunities and no alerts.
+     */
+    payTypeMapping: (() => {
+      const m = centralStore.getPayTypeMapping();
+      return { status: m.status, reason: m.reason, observedAdCount: m.observedAdCount };
+    })(),
+    /*
+     * Where the history is actually being written. Code resolving DATA_DIR
+     * correctly does not prove the platform mounted a persistent volume
+     * there; a recordCount that resets to zero after every deploy does prove
+     * it did not. A path and some counts only - no environment dump.
+     */
+    storage: StorageEngine.describeStorage(),
+  });
+});
+
+/*
+ * The raw payment methods Binance published, for auditing the mapping.
+ *
+ * Carries payType and tradeMethodName verbatim and nothing else - no
+ * merchant nickname, no advNo, no prices. NormalizedAd never kept userNo, so
+ * there is no advertiser identity here to leak.
+ */
+apiRouter.get('/diagnostics/paytypes', (_req, res) => {
+  const { snapshot } = centralStore.getCurrentSnapshot();
+  const mapping = centralStore.getPayTypeMapping();
+
+  res.json({
+    observedAt: snapshot?.timestamp ?? null,
+
+    /*
+     * How much book this verdict rests on. A bank missing from a 40-ad sample
+     * says far less than one missing from a 400-ad sample, and the reader
+     * cannot judge that without the denominator.
+     */
+    inspected: mapping.inspected ?? null,
+
+    /* Every code Binance published, most frequent first, with its labels. */
+    observed: mapping.observations,
+
+    /*
+     * Codes Binance returns that no configured bank claims. These are the
+     * only admissible evidence for correcting BANK_CODE_MAP.
+     */
+    observedUnmapped: mapping.observedUnmapped,
+
+    /*
+     * Per bank: VERIFIED or NOT_OBSERVED. NOT_OBSERVED is never a claim that
+     * the configured code is wrong - see the reason on each verdict.
+     */
+    banks: mapping.bankVerdicts,
+
+    mapping: {
+      status: mapping.status,
+      reason: mapping.reason,
+      configuredCodes: mapping.configuredCodes,
+      matchedCodes: mapping.matchedCodes,
+      observedPayTypes: mapping.observedPayTypes,
+      unmatchedObserved: mapping.unmatchedObserved,
+      banksVerified: mapping.banksVerified,
+      banksNotObserved: mapping.banksNotObserved,
+    },
   });
 });

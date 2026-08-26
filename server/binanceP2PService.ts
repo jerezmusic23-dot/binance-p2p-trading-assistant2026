@@ -4,6 +4,7 @@
  */
 
 import {
+  BankCodeConfig,
   BinanceAdItem,
   BinanceP2PResponse,
   NormalizedAd,
@@ -24,7 +25,7 @@ export interface P2PSearchParams {
   merchantCheck?: boolean;
 }
 
-export const BANK_CODE_MAP: Record<string, { code: string; displayName: string; apiPayTypes: string[] }> = {
+export const BANK_CODE_MAP: Record<string, BankCodeConfig> = {
   BANESCO: {
     code: 'BANESCO',
     displayName: 'Banesco',
@@ -43,7 +44,8 @@ export const BANK_CODE_MAP: Record<string, { code: string; displayName: string; 
   BNC: {
     code: 'BNC',
     displayName: 'BNC',
-    apiPayTypes: ['BNC'],
+    // Observed in production: Binance publishes 'BNCBancoNacional', not 'BNC'.
+    apiPayTypes: ['BNCBancoNacional'],
   },
   BANCAMIGA: {
     code: 'BANCAMIGA',
@@ -53,7 +55,10 @@ export const BANK_CODE_MAP: Record<string, { code: string; displayName: string; 
   VENEZUELA: {
     code: 'VENEZUELA',
     displayName: 'Banco de Venezuela',
-    apiPayTypes: ['BancodeVenezuela'],
+    // Observed in production: 'BancoDeVenezuela', capital D. The previous
+    // 'BancodeVenezuela' differed by one letter and matched nothing - and this
+    // is the busiest rail in the book.
+    apiPayTypes: ['BancoDeVenezuela'],
   },
   PAGO_MOVIL: {
     code: 'PAGO_MOVIL',
@@ -335,8 +340,20 @@ export class BinanceP2PService {
       strategicSellPrice,
       strategicSpreadPct,
       strategicReason,
-      topBuyAds: topBuyAds.slice(0, 10),
-      topSellAds: topSellAds.slice(0, 10),
+      /*
+       * The whole captured book, not the first 10.
+       *
+       * The slice threw away half of what was already fetched, normalized and
+       * used for the aggregates. Anything reading the snapshot - the order
+       * book view, the payType diagnostic, anything deriving coverage per
+       * bank - saw a sample less than half the size of the real one, and an
+       * absent bank could not be told from a bank that simply fell below
+       * tenth place.
+       *
+       * No extra request: rows is still 20 per side.
+       */
+      topBuyAds,
+      topSellAds,
       source: 'BINANCE_P2P',
       fetchDurationMs: duration,
       status: 'LIVE',

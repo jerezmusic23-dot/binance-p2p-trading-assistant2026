@@ -1,52 +1,197 @@
+/**
+ * TASAS EJECUTABLES - BANCO x MONTO
+ *
+ * Every number on this screen comes from `executableMatrix`: a cell built
+ * server-side from ads verified as that bank's, accepting that amount, with
+ * published volume covering the operation.
+ *
+ * This component performs NO economic calculation. It does not compute a
+ * spread, does not pick a best price, does not compare banks. The backend
+ * decided all of it; this renders the decision and names the absences.
+ *
+ * The previous version consumed `ratesByAmount`, whose cells came from ads
+ * filtered only by min/max - no bank verification, no liquidity - and whose
+ * "spread" column was the 0.01 VES undercut of the leader. Neither that
+ * structure nor that endpoint exists any more.
+ */
+
 import React, { useState, useEffect } from 'react';
-import { BankMatrixRow, TradeType, GlobalFilterState, BankFilterKey, AmountFilterKey } from './types';
+import {
+  CellStatus,
+  ExecutableCell,
+  ExecutableMatrix,
+  MarketReference,
+  GlobalFilterState,
+  BankFilterKey,
+  AmountFilterKey,
+} from './types';
 import { ApiService } from './api';
-import { ProvenanceTag } from './ProvenanceTag';
 import {
   Building2,
-  Trophy,
   RefreshCw,
   Info,
   CheckCircle2,
-  SlidersHorizontal,
-  ArrowRight,
-  Sparkles,
+  AlertTriangle,
+  Clock,
+  HelpCircle,
+  XCircle,
+  Droplet,
 } from 'lucide-react';
 
 interface BankMatrixProps {
-  initialTradeType?: TradeType;
   activeGlobalFilter?: GlobalFilterState;
   onSelectFilter?: (bank: BankFilterKey, amount: AmountFilterKey) => void;
   onNavigateTab?: (tab: 'overview' | 'projections' | 'orderbook') => void;
 }
 
+/**
+ * How each status reads on screen.
+ *
+ * EXECUTABLE is the only one that gets a price-forward treatment. Every other
+ * state is shown with its own label and colour - none is rendered as 0, as
+ * "--" standing in for a price, or hidden. A blocked cell is information.
+ */
+const STATUS_STYLE: Record<
+  CellStatus,
+  { label: string; className: string; Icon: React.ComponentType<{ className?: string }> }
+> = {
+  EXECUTABLE: {
+    label: 'EJECUTABLE',
+    className: 'text-[#02c076] border-[#02c076]/40 bg-[#02c076]/10',
+    Icon: CheckCircle2,
+  },
+  NO_OPPORTUNITY: {
+    label: 'SIN ARBITRAJE',
+    className: 'text-[#848e9c] border-[#2b2f36] bg-[#181a20]',
+    Icon: XCircle,
+  },
+  NO_LIQUIDITY: {
+    label: 'SIN LIQUIDEZ',
+    className: 'text-[#f0b90b] border-[#f0b90b]/40 bg-[#f0b90b]/10',
+    Icon: Droplet,
+  },
+  INSUFFICIENT_LIQUIDITY: {
+    label: 'LIQUIDEZ INSUF.',
+    className: 'text-[#f0b90b] border-[#f0b90b]/40 bg-[#f0b90b]/10',
+    Icon: Droplet,
+  },
+  NO_AD: {
+    label: 'SIN ANUNCIO',
+    className: 'text-[#5e6673] border-[#2b2f36] bg-[#181a20]',
+    Icon: Info,
+  },
+  STALE: {
+    label: 'DATO ANTIGUO',
+    className: 'text-[#f0b90b] border-[#f0b90b]/40 bg-[#f0b90b]/10',
+    Icon: Clock,
+  },
+  NOT_VERIFIABLE: {
+    label: 'NO VERIFICABLE',
+    className: 'text-[#848e9c] border-[#848e9c]/40 bg-[#181a20]',
+    Icon: HelpCircle,
+  },
+  ERROR: {
+    label: 'ERROR',
+    className: 'text-[#f6465d] border-[#f6465d]/40 bg-[#f6465d]/10',
+    Icon: AlertTriangle,
+  },
+};
+
+const fmtPrice = (v: number | null) => (v === null ? null : v.toFixed(2));
+
+/** Signed, always. A leading + on a gain, the minus preserved on a loss. */
+const fmtSpread = (v: number | null) =>
+  v === null ? 'no verificable' : `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`;
+
+const fmtUsdt = (v: number | null) =>
+  v === null ? 'no verificable' : `${v.toFixed(2)} USDT`;
+
+const CellView: React.FC<{ cell: ExecutableCell; onSelect?: () => void }> = ({
+  cell,
+  onSelect,
+}) => {
+  const style = STATUS_STYLE[cell.status];
+  const buyPrice = fmtPrice(cell.buy?.price ?? null);
+  const sellPrice = fmtPrice(cell.sell?.price ?? null);
+
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      title={cell.reason ?? `${cell.bankDisplayName} · ${cell.amountVes.toLocaleString('es-VE')} VES`}
+      className={`w-full text-left rounded-md border px-2 py-1.5 transition-colors ${style.className}`}
+    >
+      <div className="flex items-center gap-1 mb-1">
+        <style.Icon className="w-3 h-3 shrink-0" />
+        <span className="text-[9px] font-bold uppercase tracking-wide truncate">
+          {style.label}
+        </span>
+      </div>
+
+      {/*
+        Prices are printed ONLY when the leg is executable. A blocked leg says
+        so in words - it never borrows a number from anywhere else.
+      */}
+      <div className="font-mono text-[11px] leading-tight">
+        <div className="flex justify-between gap-1">
+          <span className="text-[#848e9c]">Compra</span>
+          <span className={buyPrice ? 'text-[#e0e0e0]' : 'text-[#5e6673] italic'}>
+            {buyPrice ?? '—'}
+          </span>
+        </div>
+        <div className="flex justify-between gap-1">
+          <span className="text-[#848e9c]">Venta</span>
+          <span className={sellPrice ? 'text-[#e0e0e0]' : 'text-[#5e6673] italic'}>
+            {sellPrice ?? '—'}
+          </span>
+        </div>
+        <div className="flex justify-between gap-1 mt-0.5 pt-0.5 border-t border-current/10">
+          <span className="text-[#848e9c]">Spread</span>
+          <span
+            className={
+              cell.spreadPct === null
+                ? 'text-[#5e6673] italic'
+                : cell.spreadPct > 0
+                ? 'text-[#02c076]'
+                : 'text-[#f6465d]'
+            }
+          >
+            {cell.spreadPct === null ? '—' : fmtSpread(cell.spreadPct)}
+          </span>
+        </div>
+        <div className="flex justify-between gap-1">
+          <span className="text-[#848e9c]">Liquidez</span>
+          <span className={cell.availableUsdt === null ? 'text-[#5e6673] italic' : 'text-[#e0e0e0]'}>
+            {cell.availableUsdt === null ? 'n/v' : cell.availableUsdt.toFixed(0)}
+          </span>
+        </div>
+      </div>
+    </button>
+  );
+};
+
 export const BankMatrix: React.FC<BankMatrixProps> = ({
-  initialTradeType = 'SELL',
   activeGlobalFilter,
   onSelectFilter,
-  onNavigateTab,
 }) => {
-  const [tradeType, setTradeType] = useState<TradeType>(initialTradeType);
-  const [matrixRows, setMatrixRows] = useState<BankMatrixRow[]>([]);
+  const [matrix, setMatrix] = useState<ExecutableMatrix | null>(null);
+  const [reference, setReference] = useState<MarketReference | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
-  const [lastUpdated, setLastUpdated] = useState<number>(Date.now());
   const [error, setError] = useState<string | null>(null);
 
-  const amountTiers: AmountFilterKey[] = ['50K', '40K', '30K', '20K', '10K', '100K'];
-
-  const fetchMatrix = async (type: TradeType, force = false) => {
+  const fetchMatrix = async (force = false) => {
     try {
       if (force) setIsRefreshing(true);
       else setIsLoading(true);
 
-      const res = await ApiService.getBankMatrix(type, force);
-      setMatrixRows(res.rows || []);
-      setLastUpdated(res.timestamp || Date.now());
+      const res = await ApiService.getExecutableMatrix(force);
+      setMatrix(res.executableMatrix);
+      setReference(res.marketReference);
       setError(null);
     } catch (err: any) {
-      console.error('Failed to load bank matrix:', err);
-      setError(err.message || 'Error al obtener la matriz de bancos');
+      console.error('Failed to load executable matrix:', err);
+      setError(err.message || 'Error al obtener la matriz ejecutable');
     } finally {
       setIsLoading(false);
       setIsRefreshing(false);
@@ -54,261 +199,148 @@ export const BankMatrix: React.FC<BankMatrixProps> = ({
   };
 
   useEffect(() => {
-    fetchMatrix(tradeType, false);
-  }, [tradeType]);
+    fetchMatrix(false);
+  }, []);
 
-  // Find the top spread or best deal row across the matrix to place the trophy
-  let bestRowKey = '';
-  let bestSpread = -1;
+  if (isLoading) {
+    return (
+      <div className="p-6 text-center text-[#848e9c] text-sm">
+        Cargando tasas ejecutables…
+      </div>
+    );
+  }
 
-  matrixRows.forEach((row) => {
-    amountTiers.forEach((amt) => {
-      const cell = row.ratesByAmount?.[amt];
-      if (cell && cell.spreadPct !== null && cell.spreadPct > bestSpread) {
-        bestSpread = cell.spreadPct;
-        bestRowKey = `${row.bankKey}-${amt}`;
-      }
-    });
-  });
+  if (error !== null) {
+    return (
+      <div className="p-6 text-center text-[#f6465d] text-sm border border-[#f6465d]/30 rounded-lg">
+        {error}
+      </div>
+    );
+  }
 
-  const handleCellClick = (bankKey: string, amt: AmountFilterKey) => {
-    if (onSelectFilter) {
-      onSelectFilter(bankKey as BankFilterKey, amt);
-    }
-  };
+  if (matrix === null) {
+    return (
+      <div className="p-6 text-center text-[#848e9c] text-sm">
+        No hay matriz ejecutable disponible.
+      </div>
+    );
+  }
+
+  const executableCount = Object.values(matrix.cells)
+    .flatMap((row) => Object.values(row))
+    .filter((c) => c.status === 'EXECUTABLE').length;
 
   return (
-    <div id="bank-matrix-container" className="space-y-4">
-      {/* Top Banner & Global Connection Indicator */}
-      <div className="bg-[#181a20] border border-[#2b2f36] rounded-lg p-5">
-        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border-b border-[#2b2f36] pb-4">
-          <div>
-            <div className="flex items-center gap-2">
-              <h2 className="text-xs uppercase text-[#848e9c] font-bold tracking-wider flex items-center gap-2">
-                <Building2 className="w-4 h-4 text-[#FCD535]" />
-                MATRIZ MULTIFILTRO POR BANCO Y MONTO
-              </h2>
-              <span className="text-[10px] bg-[#02c076]/20 text-[#02c076] px-2 py-0.5 rounded font-mono font-bold">
-                Conexión Global Activa
-              </span>
-            </div>
-            <p className="text-[11px] text-[#848e9c] mt-1">
-              Haz clic en cualquier celda o banco para <strong>conectar y filtrar toda la interfaz</strong> (precios, gráfico 8AM-8PM, proyección y libro de órdenes) a esa tasa específica.
-            </p>
-          </div>
-
-          <div className="flex items-center gap-3">
-            <button
-              onClick={() => fetchMatrix(tradeType, true)}
-              disabled={isRefreshing}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded bg-[#1e2329] hover:bg-[#2b2f36] text-[#e0e0e0] border border-[#474d57] text-xs font-medium cursor-pointer transition disabled:opacity-50"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin text-[#FCD535]' : 'text-[#FCD535]'}`} />
-              <span>Actualizar Matriz</span>
-            </button>
-          </div>
+    <div className="space-y-3">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <div>
+          <h2 className="text-sm font-bold text-[#e0e0e0] uppercase tracking-wide flex items-center gap-2">
+            <Building2 className="w-4 h-4 text-[#FCD535]" />
+            Tasas ejecutables
+          </h2>
+          <p className="text-[10px] text-[#848e9c] mt-0.5">
+            Cada celda proviene de anuncios verificados de ese banco que aceptan ese monto y
+            publican liquidez suficiente. No es un precio global.
+          </p>
         </div>
 
-        {/* Tab Selector: Venta Multifiltro / Recompra Multifiltro */}
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-4">
-          <div className="grid grid-cols-2 gap-3 max-w-md w-full">
-            <button
-              onClick={() => setTradeType('SELL')}
-              className={`py-2 px-3 rounded text-xs font-bold transition flex items-center justify-center gap-2 cursor-pointer font-mono tracking-wide ${
-                tradeType === 'SELL'
-                  ? 'bg-[#1e2329] border border-[#FCD535] text-[#FCD535] shadow-sm'
-                  : 'bg-[#111417] text-[#848e9c] hover:text-[#e0e0e0] border border-[#2b2f36]'
-              }`}
-            >
-              <span>Venta (Tú recibes VES)</span>
-            </button>
-
-            <button
-              onClick={() => setTradeType('BUY')}
-              className={`py-2 px-3 rounded text-xs font-bold transition flex items-center justify-center gap-2 cursor-pointer font-mono tracking-wide ${
-                tradeType === 'BUY'
-                  ? 'bg-[#1e2329] border border-[#02c076] text-[#02c076] shadow-sm'
-                  : 'bg-[#111417] text-[#848e9c] hover:text-[#e0e0e0] border border-[#2b2f36]'
-              }`}
-            >
-              <span>Recompra (Tú pagas VES)</span>
-            </button>
-          </div>
-
-          {activeGlobalFilter && (activeGlobalFilter.bank !== 'ALL' || activeGlobalFilter.amount !== 'ALL') && (
-            <div className="flex items-center gap-2 px-3 py-1.5 rounded bg-[#FCD535]/10 border border-[#FCD535]/40 text-xs font-mono">
-              <span className="text-[#848e9c]">Filtro aplicado en dashboard:</span>
-              <span className="text-[#FCD535] font-bold">
-                {activeGlobalFilter.bankDisplayName} · {activeGlobalFilter.amount}
-              </span>
-              {onNavigateTab && (
-                <button
-                  onClick={() => onNavigateTab('overview')}
-                  className="ml-2 flex items-center gap-1 text-[11px] font-bold text-[#e0e0e0] hover:text-[#FCD535] cursor-pointer"
-                >
-                  <span>Ver Resumen</span>
-                  <ArrowRight className="w-3 h-3" />
-                </button>
-              )}
-            </div>
-          )}
+        <div className="flex items-center gap-3 text-[10px] text-[#848e9c]">
+          <span>
+            Capturado hace <strong className="font-mono">{matrix.ageSeconds}s</strong>
+            {matrix.stale && (
+              <span className="text-[#f0b90b] font-semibold"> · DATO ANTIGUO</span>
+            )}
+          </span>
+          <span>
+            <strong className="font-mono text-[#02c076]">{executableCount}</strong> ejecutables
+          </span>
+          <button
+            type="button"
+            onClick={() => fetchMatrix(true)}
+            disabled={isRefreshing}
+            className="flex items-center gap-1 px-2 py-1 rounded border border-[#2b2f36] hover:border-[#FCD535] transition-colors"
+          >
+            <RefreshCw className={`w-3 h-3 ${isRefreshing ? 'animate-spin' : ''}`} />
+            Refrescar
+          </button>
         </div>
       </div>
 
-      {/* Loading State */}
-      {isLoading && matrixRows.length === 0 && (
-        <div className="p-12 text-center bg-[#181a20] rounded-lg border border-[#2b2f36]">
-          <div className="w-8 h-8 border-3 border-[#FCD535] border-t-transparent rounded-full animate-spin mx-auto mb-3" />
-          <p className="text-[#e0e0e0] text-sm font-medium">Consultando profundidad bancaria en Binance P2P...</p>
-          <p className="text-[#848e9c] text-xs mt-1">Obteniendo tasas de Banesco, Mercantil, Provincial, BNC, Bancamiga, Venezuela y Pago Móvil</p>
+      {/*
+        The global reference is shown here ONLY as context, labelled as such and
+        visually demoted. It is never a column of the matrix.
+      */}
+      {reference !== null && (
+        <div className="text-[10px] text-[#5e6673] border border-dashed border-[#2b2f36] rounded px-2 py-1">
+          Referencia de mercado (no ejecutable):{' '}
+          <span className="font-mono">
+            recompra {reference.referenceBuyPrice?.toFixed(2) ?? 'n/v'} · venta{' '}
+            {reference.referenceSellPrice?.toFixed(2) ?? 'n/v'}
+          </span>
+          . {reference.note}
         </div>
       )}
 
-      {/* Matrix Tables Grouped by Bank */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {matrixRows.map((bankRow) => {
-          const isBankActive = activeGlobalFilter?.bank === bankRow.bankKey;
-
-          return (
-            <div
-              key={bankRow.bankKey}
-              id={`matrix-bank-${bankRow.bankKey.toLowerCase()}`}
-              className={`bg-[#181a20] border rounded-lg overflow-hidden flex flex-col justify-between transition ${
-                isBankActive ? 'border-[#FCD535] shadow-md ring-1 ring-[#FCD535]/30' : 'border-[#2b2f36]'
-              }`}
-            >
-              <div>
-                {/* Bank Table Header */}
-                <div className="bg-[#111417] border-b border-[#2b2f36] px-4 py-2.5 flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <Building2 className={`w-4 h-4 ${isBankActive ? 'text-[#FCD535]' : 'text-[#848e9c]'}`} />
-                    <h3 className="font-bold text-[#e0e0e0] text-xs uppercase tracking-wider">{bankRow.bankDisplayName}</h3>
-                    {isBankActive && (
-                      <span className="text-[10px] bg-[#FCD535] text-black px-1.5 py-0.2 rounded font-mono font-bold">
-                        CONECTADO
-                      </span>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => handleCellClick(bankRow.bankKey, 'ALL')}
-                      className="text-[10px] text-[#FCD535] hover:underline font-mono uppercase cursor-pointer"
-                      title="Aplicar este banco a todo el dashboard"
-                    >
-                      Filtrar Banco
-                    </button>
-                  </div>
-                </div>
-
-                {/* Data Table */}
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left text-xs border-collapse">
-                    <thead>
-                      <tr className="bg-[#111417]/80 text-[#848e9c] text-[10px] uppercase font-bold border-b border-[#2b2f36]">
-                        <th className="py-2.5 px-3 font-semibold">Filtro</th>
-                        <th className="py-2.5 px-3 font-semibold">Precio Líder</th>
-                        <th className="py-2.5 px-3 font-semibold">Sugerido</th>
-                        <th className="py-2.5 px-3 font-semibold">Spread %</th>
-                        <th className="py-2.5 px-3 font-semibold text-right">Acción</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-[#2b2f36]">
-                      {amountTiers.map((amt) => {
-                        const cell = bankRow.ratesByAmount[amt];
-                        const isTrophy = `${bankRow.bankKey}-${amt}` === bestRowKey;
-                        const isCellSelected =
-                          activeGlobalFilter?.bank === bankRow.bankKey && activeGlobalFilter?.amount === amt;
-
-                        if (!cell || cell.leaderPrice === null) {
-                          return (
-                            <tr key={amt} className="hover:bg-[#2b2f36]/30 transition">
-                              <td className="py-2.5 px-3 font-bold font-mono text-[#848e9c]">{amt}</td>
-                              <td colSpan={4} className="py-2.5 px-3 text-[#848e9c] italic text-[11px]">
-                                SIN DATOS EN LIBRO BINANCE
-                              </td>
-                            </tr>
-                          );
+      <div className="overflow-x-auto">
+        <table className="w-full border-separate border-spacing-1">
+          <thead>
+            <tr>
+              <th className="text-left text-[10px] uppercase text-[#848e9c] font-semibold px-2">
+                Banco
+              </th>
+              {matrix.amountKeys.map((amt) => (
+                <th
+                  key={amt}
+                  className="text-center text-[10px] uppercase text-[#848e9c] font-semibold min-w-[110px]"
+                >
+                  {amt}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {matrix.bankOrder.map((bank) => (
+              <tr key={bank}>
+                <td className="text-[11px] font-semibold text-[#e0e0e0] px-2 whitespace-nowrap">
+                  {matrix.bankDisplayNames[bank] ?? bank}
+                </td>
+                {matrix.amountKeys.map((amt) => {
+                  const cell = matrix.cells[bank]?.[amt];
+                  if (cell === undefined) {
+                    return (
+                      <td key={amt} className="text-center text-[10px] text-[#5e6673]">
+                        sin datos
+                      </td>
+                    );
+                  }
+                  return (
+                    <td key={amt}>
+                      <CellView
+                        cell={cell}
+                        onSelect={() =>
+                          onSelectFilter?.(bank as BankFilterKey, amt as AmountFilterKey)
                         }
-
-                        return (
-                          <tr
-                            key={amt}
-                            onClick={() => handleCellClick(bankRow.bankKey, amt)}
-                            className={`transition font-mono cursor-pointer ${
-                              isCellSelected
-                                ? 'bg-[#FCD535]/20 border-l-3 border-[#FCD535] text-[#FCD535] font-bold'
-                                : isTrophy
-                                ? 'bg-[#FCD535]/10 text-[#FCD535] hover:bg-[#FCD535]/15'
-                                : 'hover:bg-[#2b2f36]/50 text-[#e0e0e0]'
-                            }`}
-                            title="Haz clic para conectar este precio a toda la interfaz"
-                          >
-                            <td className="py-2.5 px-3 font-bold flex items-center gap-1.5">
-                              {isTrophy && <Trophy className="w-3.5 h-3.5 text-[#FCD535]" />}
-                              {isCellSelected && <CheckCircle2 className="w-3.5 h-3.5 text-[#FCD535]" />}
-                              <span>{amt}</span>
-                            </td>
-                            <td className="py-2.5 px-3 font-bold text-[#FCD535]">
-                              <span className="flex items-center gap-1">
-                                {cell.leaderPrice !== null ? cell.leaderPrice.toFixed(2) : '--'}
-                                {cell.leaderPrice !== null && cell.provenance !== 'REAL' && (
-                                  <ProvenanceTag
-                                    provenance={cell.provenance}
-                                    reason={cell.provenanceReason}
-                                  />
-                                )}
-                              </span>
-                            </td>
-                            <td className="py-2.5 px-3 text-[#02c076]">
-                              {cell.suggestedPrice?.toFixed(2) || '--'}
-                            </td>
-                            <td className="py-2.5 px-3 font-semibold text-[#e0e0e0]">
-                              {cell.spreadPct !== null ? `${cell.spreadPct.toFixed(2)}%` : '--'}
-                            </td>
-                            <td className="py-2.5 px-3 text-right">
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  handleCellClick(bankRow.bankKey, amt);
-                                }}
-                                className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase transition cursor-pointer ${
-                                  isCellSelected
-                                    ? 'bg-[#FCD535] text-black'
-                                    : 'bg-[#1e2329] hover:bg-[#FCD535] text-[#848e9c] hover:text-black border border-[#2b2f36]'
-                                }`}
-                              >
-                                {isCellSelected ? 'Conectado' : 'Conectar'}
-                              </button>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-
-              <div className="bg-[#111417] px-3 py-1.5 border-t border-[#2b2f36] text-[10px] text-[#848e9c] font-mono flex items-center justify-between">
-                <span>Filtro P2P automático</span>
-                <span>Binance Direct API</span>
-              </div>
-            </div>
-          );
-        })}
+                      />
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
 
-      {/* Info Footnote */}
-      <div className="p-4 rounded-lg bg-[#181a20] border border-[#2b2f36] text-xs text-[#848e9c] flex items-start gap-2.5">
-        <Info className="w-4 h-4 text-[#FCD535] shrink-0 mt-0.5" />
-        <div>
-          <p className="font-semibold text-[#e0e0e0]">¿Cómo interactúa la matriz con el resto de la aplicación?</p>
-          <p className="mt-0.5">
-            Al seleccionar un banco y rango de capital, la aplicación reconfigura inmediatamente el motor estadístico: el Resumen Principal, las Proyecciones Horarias (8:00 AM - 8:00 PM), los Pisos/Techos esperados y el Libro de Órdenes se calibran en tiempo real con la liquidez de ese banco en Binance P2P.
-          </p>
-        </div>
-      </div>
+      <p className="text-[10px] text-[#848e9c]">
+        SPREAD firmado: <strong>((venta − recompra) / recompra) × 100</strong>. Un valor negativo
+        se muestra negativo y se clasifica SIN ARBITRAJE — nunca se convierte en oportunidad.
+        MARGEN BRUTO: no descuenta comisiones, transferencias, slippage ni tiempo de ejecución.
+      </p>
+
+      {activeGlobalFilter !== undefined && activeGlobalFilter.bank !== 'ALL' && (
+        <p className="text-[10px] text-[#5e6673]">
+          Filtro activo: {activeGlobalFilter.bank} · {activeGlobalFilter.amount}
+        </p>
+      )}
     </div>
   );
 };
-
-

@@ -115,33 +115,57 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
         </div>
 
-        {/* Center: Live Rates Summary */}
+        {/*
+          REFERENCIA DE MERCADO - never a quote.
+          =====================================
+
+          These are the medians of the WHOLE book: no bank filter, no amount
+          filter. Nobody can execute at the median of every advertiser at once,
+          so the label says reference and the block is visually demoted.
+
+          Until FASE 5 these same three numbers sat here reading "Tasa Venta /
+          Tasa Recompra / Spread", which is how a -0.11% global figure came to
+          look like a tradeable rate. Executable rates live in the TASAS
+          EJECUTABLES matrix, per bank and per amount.
+        */}
         {snapshot && snapshot.strategicBuyPrice !== null && (
-          <div className="hidden lg:flex items-center gap-5 bg-[#181a20] border border-[#2b2f36] px-4 py-2 rounded-lg text-xs">
+          <div className="hidden lg:flex items-center gap-5 bg-[#181a20] border border-dashed border-[#2b2f36] px-4 py-2 rounded-lg text-xs">
+            <span
+              className="text-[9px] uppercase text-[#5e6673] font-bold tracking-wider"
+              title="Nivel mediano del libro completo, sin banco ni monto. No es una tasa ejecutable."
+            >
+              Referencia
+              <br />
+              de mercado
+            </span>
+            <div className="w-px h-6 bg-[#2b2f36]" />
             <div className="flex items-center gap-2">
               <span className="text-[10px] uppercase text-[#848e9c] font-semibold">
-                {isFiltered ? `Venta (${globalFilter.bank}):` : 'Tasa Venta:'}
+                Venta ref.:
               </span>
-              <span className="font-mono font-bold text-[#FCD535] text-sm">
-                {fmt(snapshot.strategicSellPrice)} <span className="text-[10px] text-[#848e9c]">VES</span>
+              <span className="font-mono font-semibold text-[#848e9c] text-sm">
+                {fmt(snapshot.strategicSellPrice)} <span className="text-[10px]">VES</span>
               </span>
             </div>
             <div className="w-px h-4 bg-[#2b2f36]" />
             <div className="flex items-center gap-2">
               <span className="text-[10px] uppercase text-[#848e9c] font-semibold">
-                {isFiltered ? `Recompra (${globalFilter.bank}):` : 'Tasa Recompra:'}
+                Recompra ref.:
               </span>
-              <span className="font-mono font-bold text-[#02c076] text-sm">
-                {fmt(snapshot.strategicBuyPrice)} <span className="text-[10px] text-[#848e9c]">VES</span>
+              <span className="font-mono font-semibold text-[#848e9c] text-sm">
+                {fmt(snapshot.strategicBuyPrice)} <span className="text-[10px]">VES</span>
               </span>
             </div>
             <div className="w-px h-4 bg-[#2b2f36]" />
             <div className="flex items-center gap-2">
-              <span className="text-[10px] uppercase text-[#848e9c] font-semibold">Spread:</span>
-              <span className="font-mono font-semibold text-[#e0e0e0]">
+              <span className="text-[10px] uppercase text-[#848e9c] font-semibold">
+                Spread ref.:
+              </span>
+              <span className="font-mono font-semibold text-[#848e9c]">
                 {fmtPct(snapshot.strategicSpreadPct)}
               </span>
             </div>
+            <span className="text-[9px] text-[#5e6673] italic">no ejecutable</span>
           </div>
         )}
 

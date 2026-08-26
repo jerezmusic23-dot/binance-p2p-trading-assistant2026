@@ -296,8 +296,13 @@ describe('fetchFullMarketSnapshot', () => {
     );
   });
 
-  it('BUG: requests 20 ads per side but discards half via slice(0, 10)', async () => {
-    // Depth loss #2 (audit).
+  it('keeps every ad it requested - no depth is discarded', async () => {
+    /*
+     * Was audit depth loss #2: rows was 20 but the snapshot exposed
+     * slice(0, 10), so half of what had already been fetched, normalized and
+     * fed to the aggregates never reached any consumer. An absent bank could
+     * not be told from a bank that merely fell below tenth place.
+     */
     const many = Array.from({ length: 20 }, (_, i) =>
       makeAdItem({ advNo: `b${i}`, price: String(900 + i) })
     );
@@ -307,8 +312,23 @@ describe('fetchFullMarketSnapshot', () => {
     const snap = await BinanceP2PService.fetchFullMarketSnapshot();
 
     expect(requestBody(fetchMock).rows).toBe(20);
-    expect(snap.topBuyAds).toHaveLength(10);
-    expect(snap.topSellAds).toHaveLength(10);
+    expect(snap.topBuyAds).toHaveLength(20);
+    expect(snap.topSellAds).toHaveLength(20);
+    // The 20th ad is reachable, not just counted.
+    expect(snap.topBuyAds[19].advNo).toBe('b19');
+  });
+
+  it('exposes exactly what was captured, however few', async () => {
+    // Fewer ads than requested must not be padded, and none dropped.
+    const three = Array.from({ length: 3 }, (_, i) =>
+      makeAdItem({ advNo: `s${i}`, price: String(920 + i) })
+    );
+    vi.stubGlobal('fetch', vi.fn(makeFetchMock([makeBinanceResponse(three)])));
+
+    const snap = await BinanceP2PService.fetchFullMarketSnapshot();
+
+    expect(snap.topBuyAds).toHaveLength(3);
+    expect(snap.topSellAds).toHaveLength(3);
   });
 
   it('reports a missing side as null, never derived from the other side', async () => {

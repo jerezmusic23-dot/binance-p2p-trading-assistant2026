@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { MarketSnapshot, MarketAnalysis, MarketProjections } from './types';
 import { ProvenanceTag, InsufficientDataNotice, StaleTag } from './ProvenanceTag';
+import { OpportunityCard } from './OpportunityCard';
 import { fmt, fmtPct, fmtSignedPct, fmtInt, fmtText, NO_DATA } from './format';
 
 interface MainOverviewProps {
@@ -43,12 +44,32 @@ export const MainOverview: React.FC<MainOverviewProps> = ({
   derivedAgeSeconds = 0,
   onNavigateTab,
 }) => {
+  /*
+   * The global snapshot gates only the GLOBAL cards below it.
+   *
+   * It used to gate this entire view, which coupled the executable path to the
+   * reference path: with no global median the opportunities disappeared too,
+   * even though they come from a different set of ads through a different
+   * endpoint. The two are independent and are now rendered independently.
+   */
   if (!snapshot || snapshot.strategicBuyPrice === null) {
     return (
-      <div id="overview-loading" className="p-8 text-center bg-[#181a20] rounded-lg border border-[#2b2f36]">
-        <div className="w-10 h-10 border-3 border-[#FCD535] border-t-transparent rounded-full animate-spin mx-auto mb-4" />
-        <p className="text-[#e0e0e0] font-medium text-sm">Conectando con Binance P2P API...</p>
-        <p className="text-[#848e9c] text-xs mt-1">Sincronizando libro de órdenes real USDT/VES y modelos predictivos</p>
+      <div className="space-y-4">
+        <section aria-label="Oportunidades ejecutables">
+          <h2 className="text-[10px] uppercase text-[#FCD535] font-bold tracking-wider mb-2">
+            Oportunidades ejecutables (banco + monto)
+          </h2>
+          <OpportunityCard />
+        </section>
+
+        <div id="overview-loading" className="p-8 text-center bg-[#181a20] rounded-lg border border-[#2b2f36]">
+          <div className="w-10 h-10 border-3 border-[#FCD535] border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+          <p className="text-[#e0e0e0] font-medium text-sm">Sin referencia de mercado global</p>
+          <p className="text-[#848e9c] text-xs mt-1">
+            El nivel mediano del libro no está disponible. Las tasas ejecutables de arriba no
+            dependen de él.
+          </p>
+        </div>
       </div>
     );
   }
@@ -224,12 +245,37 @@ export const MainOverview: React.FC<MainOverviewProps> = ({
         </div>
       )}
 
-      {/* 4 Primary Metric Cards */}
+      {/*
+        OPORTUNIDADES EJECUTABLES - separated from MERCADO GLOBAL below.
+
+        This section is the only place an arbitrage may be declared, and it is
+        fed by /market/opportunities, which is the executability cell for one
+        bank and one amount. The cards below it are market context.
+      */}
+      <section aria-label="Oportunidades ejecutables">
+        <h2 className="text-[10px] uppercase text-[#FCD535] font-bold tracking-wider mb-2">
+          Oportunidades ejecutables (banco + monto)
+        </h2>
+        <OpportunityCard />
+      </section>
+
+      {/* 4 Primary Metric Cards - MERCADO GLOBAL: contexto, no cotizacion */}
+      <h2 className="text-[10px] uppercase text-[#848e9c] font-bold tracking-wider pt-2">
+        Mercado global (referencia, no ejecutable)
+      </h2>
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
-        {/* Card 1: 1. Tasa Real Actual */}
-        <div id="card-current-rate" className="bg-[#181a20] border border-[#2b2f36] p-5 rounded-lg relative overflow-hidden">
+        {/*
+          Card 1: MERCADO GLOBAL - reference only.
+
+          The medians of the whole book, with no bank and no amount. Renamed
+          from "Tasa Real Actual", which was the label that made a global level
+          read as something you could trade at. The executable rates are in the
+          TASAS EJECUTABLES matrix; the opportunity card below is the only place
+          an arbitrage may be declared.
+        */}
+        <div id="card-current-rate" className="bg-[#181a20] border border-dashed border-[#2b2f36] p-5 rounded-lg relative overflow-hidden">
           <div className="flex items-center justify-between text-xs mb-3">
-            <span className="text-[10px] uppercase text-[#848e9c] font-bold tracking-wider">1. Tasa Real Actual</span>
+            <span className="text-[10px] uppercase text-[#848e9c] font-bold tracking-wider">1. Mercado global (referencia)</span>
             {/* C2: the card reports the real freshness, never a fixed "LIVE". */}
             {effectiveStatus === 'LIVE' ? (
               <span className="flex items-center gap-1 text-[10px] text-[#02c076] font-mono">
@@ -254,9 +300,13 @@ export const MainOverview: React.FC<MainOverviewProps> = ({
               <span className="text-xs font-semibold text-[#848e9c]">VES/USDT</span>
             </div>
             <div className="flex items-center justify-between text-xs mt-4 pt-3 border-t border-[#2b2f36] text-[#848e9c]">
-              <span>Venta: <strong className="text-[#FCD535] font-mono">{fmt(snapshot.strategicSellPrice)}</strong></span>
-              <span>Spread: <strong className="text-[#e0e0e0] font-mono">{fmtPct(snapshot.strategicSpreadPct)}</strong></span>
+              <span>Venta ref.: <strong className="text-[#848e9c] font-mono">{fmt(snapshot.strategicSellPrice)}</strong></span>
+              <span>Spread ref.: <strong className="text-[#848e9c] font-mono">{fmtPct(snapshot.strategicSpreadPct)}</strong></span>
             </div>
+            <p className="text-[9px] text-[#5e6673] italic mt-2 leading-snug">
+              Mediana del libro completo, sin filtro de banco ni de monto.
+              NO es una tasa ejecutable: nadie puede operar a este precio.
+            </p>
           </div>
         </div>
 

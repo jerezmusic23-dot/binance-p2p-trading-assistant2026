@@ -38,6 +38,7 @@ beforeEach(() => {
 
 afterEach(() => {
   delete process.env.DATA_DIR;
+  delete process.env.HISTORY_MAX_RECORDS;
   process.chdir(originalCwd);
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
@@ -205,9 +206,25 @@ describe('getHistorySummary', () => {
   });
 
   it('derives the span from the FIRST and LAST array entries, not from min/max', async () => {
+    /*
+     * 601 records * 6s = 3600s = exactly 1 hour.
+     *
+     * Seeded through the file rather than 601 appendRecord calls. Each append
+     * rewrites the whole history atomically, so 601 of them serialise ~56 MB
+     * and issue 1202 fsyncs in order to assert something about an in-memory
+     * array. That cost is the subject of the retention work, not of this test,
+     * and on a slow CI runner it exceeded the 5s timeout while passing in
+     * ~700ms locally. Seeding asserts exactly the same three values in ~13ms.
+     */
+    fs.mkdirSync(path.join(tmpDir, 'data'), { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpDir, 'data', 'market_history.json'),
+      JSON.stringify(makeHistory(601)),
+      'utf-8'
+    );
+
     const StorageEngine = await freshStorage();
-    // 601 records * 6s = 3600s = exactly 1 hour
-    for (const rec of makeHistory(601)) StorageEngine.appendRecord(rec);
+    StorageEngine.initialize();
 
     const summary = StorageEngine.getHistorySummary();
     expect(summary.totalRecords).toBe(601);
@@ -225,6 +242,143 @@ describe('getHistorySummary', () => {
     const summary = StorageEngine.getHistorySummary();
     expect(summary.oldestTimestamp).toBe(2_000_000_000_000); // actually the newest
     expect(summary.availableHours).toBe(0);
+  });
+});
+
+describe('retention: the active window is bounded, history is never destroyed', () => {
+  /*
+   * Every append rewrites the whole file. Measured over 601 appends: 56.1 MB
+   * serialised for a 191 KB file. Capping the active window bounds that cost;
+   * archiving rather than deleting keeps REGLA 2 intact.
+   */
+  it('archives the overflow in batches instead of dropping it', async () => {
+    /*
+     * cap 10 -> batch 1 (a tenth, floored at 1). Archiving fires once the
+     * window exceeds cap + batch, and each batch gets a file of its own that
+     * is never reopened.
+     */
+    process.env.HISTORY_MAX_RECORDS = '10';
+    const StorageEngine = await freshStorage();
+    for (const rec of makeHistory(14)) StorageEngine.appendRecord(rec);
+
+    expect(StorageEngine.getHistory().length).toBeLessThanOrEqual(11);
+
+    const archiveDir = path.join(tmpDir, 'data', 'history_archive');
+    const files = fs.readdirSync(archiveDir);
+    expect(files.length).toBeGreaterThan(0);
+
+    const archived = files.flatMap(
+      (f) => JSON.parse(fs.readFileSync(path.join(archiveDir, f), 'utf-8')) as HistoryRecord[]
+    );
+    expect(archived.length + StorageEngine.getHistory().length).toBe(14);
+  });
+
+  it('never reopens an archive file - each batch is written once', async () => {
+    /*
+     * The first version of this read the archive and rewrote it on every
+     * append past the cap, which merely moved the quadratic cost from one file
+     * to the other: benchmarked at 2000 appends it was SLOWER than no
+     * retention at all. Each batch now owns a file nothing ever writes twice.
+     */
+    process.env.HISTORY_MAX_RECORDS = '20';
+    const StorageEngine = await freshStorage();
+    for (const rec of makeHistory(60)) StorageEngine.appendRecord(rec);
+
+    const archiveDir = path.join(tmpDir, 'data', 'history_archive');
+    const files = fs.readdirSync(archiveDir);
+    const sizes = files.map((f) => JSON.parse(
+      fs.readFileSync(path.join(archiveDir, f), 'utf-8')
+    ).length as number);
+
+    // Every file holds exactly one batch: none grew by being reopened.
+    expect(new Set(sizes)).toEqual(new Set([2]));
+    expect(files.length).toBe(sizes.length);
+  });
+
+  it('loses no observation: archived + active == everything appended', async () => {
+    process.env.HISTORY_MAX_RECORDS = '10';
+    const StorageEngine = await freshStorage();
+    const all = makeHistory(37);
+    for (const rec of all) StorageEngine.appendRecord(rec);
+
+    const active = StorageEngine.getHistory();
+    const archiveDir = path.join(tmpDir, 'data', 'history_archive');
+    const archived = fs
+      .readdirSync(archiveDir)
+      .flatMap(
+        (f) => JSON.parse(fs.readFileSync(path.join(archiveDir, f), 'utf-8')) as HistoryRecord[]
+      );
+
+    expect(archived.length + active.length).toBe(37);
+    const ids = new Set([...archived, ...active].map((r) => r.id));
+    expect(ids.size).toBe(37);
+    for (const rec of all) expect(ids.has(rec.id)).toBe(true);
+  });
+
+  it('keeps the NEWEST records in the active window', async () => {
+    process.env.HISTORY_MAX_RECORDS = '5';
+    const StorageEngine = await freshStorage();
+    const all = makeHistory(12);
+    for (const rec of all) StorageEngine.appendRecord(rec);
+
+    const active = StorageEngine.getHistory();
+    expect(active.map((r) => r.id)).toEqual(all.slice(-5).map((r) => r.id));
+  });
+
+  it('HISTORY_MAX_RECORDS=0 restores the previous unbounded behaviour', async () => {
+    process.env.HISTORY_MAX_RECORDS = '0';
+    const StorageEngine = await freshStorage();
+    for (const rec of makeHistory(30)) StorageEngine.appendRecord(rec);
+
+    expect(StorageEngine.getHistory()).toHaveLength(30);
+    expect(fs.existsSync(path.join(tmpDir, 'data', 'history_archive'))).toBe(false);
+  });
+
+  it('does not archive at all below the cap', async () => {
+    process.env.HISTORY_MAX_RECORDS = '100';
+    const StorageEngine = await freshStorage();
+    for (const rec of makeHistory(20)) StorageEngine.appendRecord(rec);
+
+    expect(StorageEngine.getHistory()).toHaveLength(20);
+    expect(fs.existsSync(path.join(tmpDir, 'data', 'history_archive'))).toBe(false);
+  });
+
+  it('reports the retention state in the diagnostics', async () => {
+    process.env.HISTORY_MAX_RECORDS = '10';
+    const StorageEngine = await freshStorage();
+    for (const rec of makeHistory(13)) StorageEngine.appendRecord(rec);
+
+    const d = StorageEngine.describeStorage();
+    expect(d.maxActiveRecords).toBe(10);
+    expect(d.archivedRecordCount).toBeGreaterThan(0);
+    expect(d.archivedRecordCount + d.recordCount).toBe(13);
+    expect(d.lastArchiveFile).toMatch(
+      /history_archive[/\\]market_history-\d{4}-\d{2}-\d{2}T[\d-]+\.json$/
+    );
+  });
+
+  it('writes the active history compactly, not pretty-printed', async () => {
+    const StorageEngine = await freshStorage();
+    for (const rec of makeHistory(3)) StorageEngine.appendRecord(rec);
+
+    const raw = fs.readFileSync(path.join(tmpDir, 'data', 'market_history.json'), 'utf-8');
+    expect(raw.startsWith('[{')).toBe(true);
+    expect(raw).not.toContain('\n  ');
+    // Still valid JSON with every record intact.
+    expect(JSON.parse(raw)).toHaveLength(3);
+  });
+
+  it('still reads a pretty-printed file written before this change', async () => {
+    fs.mkdirSync(path.join(tmpDir, 'data'), { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpDir, 'data', 'market_history.json'),
+      JSON.stringify(makeHistory(4), null, 2),
+      'utf-8'
+    );
+
+    const StorageEngine = await freshStorage();
+    StorageEngine.initialize();
+    expect(StorageEngine.getHistory()).toHaveLength(4);
   });
 });
 
@@ -353,5 +507,93 @@ describe('data directory resolution (DATA_DIR)', () => {
     process.env.DATA_DIR = volume;
     const StorageEngine = await freshStorage();
     expect(StorageEngine.getHistory()).toHaveLength(7);
+  });
+});
+
+describe('storage diagnostics', () => {
+  it('reports the configured DATA_DIR, resolved to an absolute path', async () => {
+    process.env.DATA_DIR = path.join(tmpDir, 'volume');
+    vi.resetModules();
+    const { StorageEngine } = await import('../server/storage.js');
+
+    const d = StorageEngine.describeStorage();
+
+    expect(d.dataDir).toBe(path.join(tmpDir, 'volume'));
+    expect(d.historyFile).toBe(path.join(tmpDir, 'volume', 'market_history.json'));
+    delete process.env.DATA_DIR;
+  });
+
+  it('falls back to ./data when DATA_DIR is unset', async () => {
+    delete process.env.DATA_DIR;
+    vi.resetModules();
+    const { StorageEngine } = await import('../server/storage.js');
+
+    expect(StorageEngine.describeStorage().dataDir).toBe(path.join(process.cwd(), 'data'));
+  });
+
+  it('reports the directory as existing and writable once initialised', async () => {
+    vi.resetModules();
+    const { StorageEngine } = await import('../server/storage.js');
+    const d = StorageEngine.describeStorage();
+
+    expect(d.exists).toBe(true);
+    expect(d.writable).toBe(true);
+  });
+
+  it('counts records and reports the real time span', async () => {
+    vi.resetModules();
+    const { StorageEngine } = await import('../server/storage.js');
+    const at = (iso: string) => ({
+      id: iso, timestamp: Date.parse(iso), dateStr: iso, hour: 12,
+      buyPrice: 919, sellPrice: 921, spreadPct: 0.2,
+      bestBuyMerchant: 'A', bestSellMerchant: 'B',
+      activeBuyAds: 1, activeSellAds: 1, source: 'BINANCE_P2P',
+    });
+    StorageEngine.appendRecord(at('2026-08-25T10:00:00.000Z'));
+    StorageEngine.appendRecord(at('2026-08-25T10:05:00.000Z'));
+
+    const d = StorageEngine.describeStorage();
+
+    expect(d.recordCount).toBe(2);
+    expect(d.oldestTimestamp).toBe('2026-08-25T10:00:00.000Z');
+    expect(d.newestTimestamp).toBe('2026-08-25T10:05:00.000Z');
+    expect(d.strategicRecordCount).toBe(0); // both are legacy records
+  });
+
+  it('reports an empty history as empty, not as unknown', async () => {
+    vi.resetModules();
+    const { StorageEngine } = await import('../server/storage.js');
+    const d = StorageEngine.describeStorage();
+
+    expect(d.recordCount).toBe(0);
+    expect(d.oldestTimestamp).toBeNull();
+    expect(d.newestTimestamp).toBeNull();
+  });
+
+  it('exposes no environment, credentials or file contents', async () => {
+    process.env.TELEGRAM_BOT_TOKEN = 'secret-token-value';
+    vi.resetModules();
+    const { StorageEngine } = await import('../server/storage.js');
+
+    const serialised = JSON.stringify(StorageEngine.describeStorage());
+
+    expect(serialised).not.toContain('secret-token-value');
+    /*
+     * CONTRACT CHANGE: three retention fields added.
+     *
+     * The purpose of this assertion is unchanged and is the reason it pins the
+     * exact key list: describeStorage is served publicly on /api/health, so
+     * every field has to be a deliberate decision rather than an accident.
+     *
+     * maxActiveRecords is a configured number, archivedRecordCount a count,
+     * and lastArchiveFile a path under dataDir - which this same payload
+     * already publishes. No new class of information is exposed.
+     */
+    expect(Object.keys(StorageEngine.describeStorage()).sort()).toEqual([
+      'archivedRecordCount', 'dataDir', 'exists', 'historyFile', 'lastArchiveFile',
+      'maxActiveRecords', 'newestTimestamp', 'oldestTimestamp',
+      'recordCount', 'strategicRecordCount', 'writable',
+    ]);
+    delete process.env.TELEGRAM_BOT_TOKEN;
   });
 });

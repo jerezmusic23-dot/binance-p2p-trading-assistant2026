@@ -5,7 +5,8 @@
 
 import fs from 'fs';
 import path from 'path';
-import { HistoryRecord, AlertRule, AlertTriggerLog } from './types.js';
+import {
+  StorageDiagnostics, HistoryRecord, AlertRule, AlertTriggerLog } from './types.js';
 
 export class StorageEngine {
   /**
@@ -29,6 +30,47 @@ export class StorageEngine {
   private static triggers: AlertTriggerLog[] = [];
   private static isInitialized = false;
   private static tmpCounter = 0;
+
+  /**
+   * RETENTION.
+   *
+   * Every appendRecord rewrites the ENTIRE history file: serialise the whole
+   * array, fsync, rename, fsync the directory. That is O(n) per append and
+   * therefore O(n^2) over the life of the file, with an unbounded n.
+   *
+   * Measured, 601 appends: 56.1 MB serialised for a 191 KB file - 301x write
+   * amplification, 1202 fsyncs. Projected at the production cadence of one
+   * record per 60s: 13.7 MB per write after a month, 82 MB after six, and
+   * every single write pays it.
+   *
+   * The active window is capped so that cost stops growing. Records leaving
+   * the window are NOT deleted - they are appended to a dated archive under
+   * history_archive/ and stay on disk forever. REGLA 2: nothing destroys
+   * history, and a retention policy that quietly drops observations would be
+   * exactly that.
+   *
+   * 43200 = 30 days at one record per minute. Chosen to keep the whole window
+   * well past the 1471 records the +24H backtest horizon needs, while bounding
+   * a single write to roughly 13 MB.
+   */
+  private static readonly DEFAULT_MAX_ACTIVE_RECORDS = 43_200;
+  private static maxActiveRecords = StorageEngine.resolveMaxActiveRecords();
+  private static ARCHIVE_DIR = path.join(StorageEngine.DATA_DIR, 'history_archive');
+  private static lastArchiveFile: string | null = null;
+  private static archivedRecordCount = 0;
+
+  /**
+   * HISTORY_MAX_RECORDS overrides the cap. A value of 0 disables archiving
+   * entirely and restores the previous unbounded behaviour, for anyone who
+   * would rather pay the write cost than split the file.
+   */
+  private static resolveMaxActiveRecords(): number {
+    const raw = process.env.HISTORY_MAX_RECORDS?.trim();
+    if (raw === undefined || raw === '') return StorageEngine.DEFAULT_MAX_ACTIVE_RECORDS;
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed) || parsed < 0) return StorageEngine.DEFAULT_MAX_ACTIVE_RECORDS;
+    return Math.floor(parsed);
+  }
 
   private static resolveDataDir(): string {
     const configured = process.env.DATA_DIR?.trim();
@@ -224,8 +266,100 @@ export class StorageEngine {
   public static appendRecord(record: HistoryRecord): void {
     this.initialize();
     this.history.push(record);
-    // Persist to disk (debounce or direct write)
+    /*
+     * Archive BEFORE writing, so the write that follows is already bounded.
+     * Archiving first also means a crash between the two leaves the overflow
+     * safely in the archive and merely repeated in the active file - which
+     * the next boot corrects. The opposite order could lose it.
+     */
+    this.enforceRetention();
     this.saveHistory();
+  }
+
+  /**
+   * Moves the overflow out of the active window into its own archive file.
+   *
+   * NOT a delete. The records are written to history_archive/ and stay there.
+   * REGLA 2: a retention policy that quietly drops observations would be
+   * exactly the destruction of history the rules forbid.
+   *
+   * APPEND-ONLY, IN BATCHES, AND THAT MATTERS.
+   *
+   * The first version of this archived on every append past the cap, reading
+   * the existing archive and rewriting it with one more record. Benchmarked at
+   * 2000 appends it was SLOWER than no retention at all - 4811ms against
+   * 3452ms - because it had moved the quadratic cost from the active file to
+   * the archive rather than removing it.
+   *
+   * So: archiving triggers only once the overflow reaches a whole batch, and
+   * each batch is written ONCE to a file of its own that is never reopened.
+   * No archive file is ever read, appended to or rewritten.
+   */
+  private static enforceRetention(): void {
+    if (this.maxActiveRecords <= 0) return;
+
+    const batch = this.archiveBatchSize();
+    if (this.history.length < this.maxActiveRecords + batch) return;
+
+    const overflow = this.history.slice(0, batch);
+    if (overflow.length === 0) return;
+
+    try {
+      if (!fs.existsSync(this.ARCHIVE_DIR)) {
+        fs.mkdirSync(this.ARCHIVE_DIR, { recursive: true });
+      }
+
+      const archiveFile = this.nextArchiveFile(overflow[0].timestamp);
+      this.writeFileAtomicSync(archiveFile, JSON.stringify(overflow));
+
+      // Only once the batch is safely on disk is it dropped from the window.
+      this.history = this.history.slice(batch);
+      this.archivedRecordCount += overflow.length;
+      this.lastArchiveFile = archiveFile;
+
+      console.log(
+        `[Storage] Archived ${overflow.length} records to ${path.basename(archiveFile)}; ` +
+          `active window now ${this.history.length}.`
+      );
+    } catch (err) {
+      /*
+       * Keep them in the active window. Nothing is lost; the file stays large.
+       * A file that is too big is a performance problem and losing an
+       * observation is a data problem, and they are not the same size of
+       * mistake.
+       */
+      console.error('[Storage] Archiving failed, retaining records in the active window:', err);
+    }
+  }
+
+  /**
+   * How many records move at once.
+   *
+   * A tenth of the window, so archiving runs about ten times per window rather
+   * than on every append, and each run costs the batch rather than the whole
+   * history. Floored at 1 so a tiny configured cap still makes progress.
+   */
+  private static archiveBatchSize(): number {
+    return Math.max(1, Math.floor(this.maxActiveRecords / 10));
+  }
+
+  /**
+   * A fresh path for this batch, named for the oldest record it carries.
+   *
+   * Never returns the name of an existing file: a collision takes a numeric
+   * suffix instead. Overwriting an archive is the one way this code could
+   * destroy history, so it is made structurally impossible rather than
+   * unlikely.
+   */
+  private static nextArchiveFile(oldestTimestamp: number): string {
+    const stamp = new Date(oldestTimestamp).toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    let candidate = path.join(this.ARCHIVE_DIR, `market_history-${stamp}.json`);
+    let suffix = 1;
+    while (fs.existsSync(candidate)) {
+      candidate = path.join(this.ARCHIVE_DIR, `market_history-${stamp}-${suffix}.json`);
+      suffix += 1;
+    }
+    return candidate;
   }
 
   private static saveHistory(): void {
@@ -233,10 +367,59 @@ export class StorageEngine {
       if (!fs.existsSync(this.DATA_DIR)) {
         fs.mkdirSync(this.DATA_DIR, { recursive: true });
       }
-      this.writeFileAtomicSync(this.HISTORY_FILE, JSON.stringify(this.history, null, 2));
+      /*
+       * Compact, not pretty-printed. This is a machine-written file rewritten
+       * every 60s; the indentation cost 21% of every byte written for the
+       * benefit of nobody. JSON.parse reads either form, so existing files
+       * keep loading unchanged.
+       */
+      this.writeFileAtomicSync(this.HISTORY_FILE, JSON.stringify(this.history));
     } catch (err) {
       console.error('[Storage] Error saving history:', err);
     }
+  }
+
+  /**
+   * Where the history is really being written, and whether it survived.
+   *
+   * The code resolves DATA_DIR correctly, but nothing in the repository can
+   * prove the platform mounted a persistent volume there - and a container
+   * filesystem looks identical to a real one until it is recycled. This
+   * reports the observable facts so the difference is a measurement rather
+   * than an assumption.
+   *
+   * Deliberately narrow: a path, a boolean and some counts. No environment
+   * dump, no credentials, no file contents.
+   */
+  public static describeStorage(): StorageDiagnostics {
+    this.initialize();
+
+    const exists = fs.existsSync(this.HISTORY_FILE);
+    let writable = false;
+    try {
+      fs.accessSync(this.DATA_DIR, fs.constants.W_OK);
+      writable = true;
+    } catch {
+      writable = false;
+    }
+
+    const iso = (ts: number | undefined) =>
+      ts === undefined ? null : new Date(ts).toISOString();
+
+    return {
+      dataDir: this.DATA_DIR,
+      historyFile: this.HISTORY_FILE,
+      exists,
+      writable,
+      recordCount: this.history.length,
+      oldestTimestamp: iso(this.history[0]?.timestamp),
+      newestTimestamp: iso(this.history[this.history.length - 1]?.timestamp),
+      strategicRecordCount: this.history.filter((r) => r.calculationVersion === 'v2-strategic')
+        .length,
+      maxActiveRecords: this.maxActiveRecords,
+      archivedRecordCount: this.archivedRecordCount,
+      lastArchiveFile: this.lastArchiveFile,
+    };
   }
 
   public static getHistory(limit?: number, sinceTimestamp?: number): HistoryRecord[] {

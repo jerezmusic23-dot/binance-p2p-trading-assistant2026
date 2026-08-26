@@ -297,16 +297,12 @@ export interface BacktestMetrics {
   lastEvaluatedAt: string;
 }
 
-export interface BankRateItem {
-  leaderPrice: number | null;
-  suggestedPrice: number | null;
-  spreadPct: number | null;
-  availableMerchant?: string;
-  orderCount?: number;
-  adCount: number;
-  provenance: DataProvenance;
-  provenanceReason?: string;
-}
+/*
+ * BankRateItem REMOVED in FASE 5 - the shape of the old "best price" cell.
+ * Its spreadPct was the 0.01 VES undercut of the leader, not an arbitrage
+ * spread, and nothing in it guaranteed the bank or the liquidity. Replaced by
+ * ExecutableCell below.
+ */
 
 export interface BankVerificationCounts {
   verified: number;
@@ -396,15 +392,126 @@ export interface BankAmountExecutability {
   sellRejections: Record<string, number>;
 }
 
-export interface BankMatrixRow {
-  bankKey: string;
+/* ------------------------------------------------------------------------ *
+ * EXECUTABLE MATRIX - mirror of server/types.ts
+ *
+ * The only structure this UI may render as a RATE. Every cell is one bank and
+ * one amount, built server-side from ads verified as that bank's, accepting
+ * that amount, with published volume covering it.
+ * ------------------------------------------------------------------------ */
+
+export type CellStatus =
+  | 'EXECUTABLE'
+  | 'NO_OPPORTUNITY'
+  | 'NO_LIQUIDITY'
+  | 'INSUFFICIENT_LIQUIDITY'
+  | 'NO_AD'
+  | 'STALE'
+  | 'NOT_VERIFIABLE'
+  | 'ERROR';
+
+export interface ExecutableSideView {
+  price: number;
+  advNo: string;
+  merchant: string;
+  payType: string | null;
+  paymentMethod: string | null;
+  availableUsdt: number | null;
+  minAmountVes: number;
+  maxAmountVes: number;
+  liquidityStatus: LiquidityStatus;
+}
+
+export interface ExecutableCell {
+  bank: string;
   bankDisplayName: string;
-  /** FASE 3: reported, not yet enforced. */
-  verificationBuy?: BankVerificationCounts;
-  verificationSell?: BankVerificationCounts;
-  ratesByAmount: {
-    [amountKey: string]: BankRateItem;
-  };
+  amountKey: string;
+  amountVes: number;
+  status: CellStatus;
+  reason: string | null;
+  buy: ExecutableSideView | null;
+  sell: ExecutableSideView | null;
+  /** Signed. Negative stays negative. */
+  spreadPct: number | null;
+  availableUsdt: number | null;
+  buyStatus: CellStatus;
+  sellStatus: CellStatus;
+  buyReason: string | null;
+  sellReason: string | null;
+  buyRejections: Record<string, number>;
+  sellRejections: Record<string, number>;
+  capturedAt: number;
+  ageSeconds: number;
+  provenance: DataProvenance;
+}
+
+export interface ExecutableMatrix {
+  capturedAt: number;
+  ageSeconds: number;
+  stale: boolean;
+  staleAfterSeconds: number;
+  bankOrder: string[];
+  bankDisplayNames: Record<string, string>;
+  amountKeys: string[];
+  cells: Record<string, Record<string, ExecutableCell>>;
+}
+
+/**
+ * Global market level. Context only.
+ *
+ * `executable: false` is part of the payload, not a convention to remember.
+ * Rendering these three numbers as a quote is the defect FASE 5 removed.
+ */
+export interface MarketReference {
+  referenceBuyPrice: number | null;
+  referenceSellPrice: number | null;
+  referenceSpreadPct: number | null;
+  provenance: DataProvenance;
+  capturedAt: number;
+  ageSeconds: number;
+  status: 'LIVE' | 'STALE' | 'OFFLINE';
+  executable: false;
+  note: string;
+}
+
+export interface ExecutableMatrixResponse {
+  marketReference: MarketReference;
+  executableMatrix: ExecutableMatrix;
+}
+
+/**
+ * One real operation: a bank, an amount, two executable legs.
+ *
+ * Identical to the object the backend hands Telegram. There is no second
+ * calculation - the card the user reads and the message the bot sends are the
+ * same Opportunity.
+ */
+export interface Opportunity {
+  bank: string;
+  amountVes: number;
+  buyPrice: number;
+  sellPrice: number;
+  buyAdvNo: string;
+  sellAdvNo: string;
+  spreadAbsolute: number;
+  /** Signed, denominator always buyPrice. */
+  spreadPct: number;
+  /** GROSS. Before commissions, transfers, slippage. Never net profit. */
+  marginAbsolute: number;
+  marginPct: number;
+  buyAvailableUsdt: number | null;
+  sellAvailableUsdt: number | null;
+  availableUsdt: number | null;
+  verification: 'VERIFIED' | 'NOT_VERIFIABLE';
+  provenance: DataProvenance;
+  reason: string | null;
+}
+
+export interface OpportunitiesResponse {
+  timestamp: number;
+  bestOpportunity: Opportunity | null;
+  opportunities: Opportunity[];
+  byBank: Record<string, Record<string, Opportunity | null>>;
 }
 
 export interface AlertRule {

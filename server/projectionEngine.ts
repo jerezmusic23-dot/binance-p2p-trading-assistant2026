@@ -35,6 +35,27 @@ export class ProjectionEngine {
    */
   public static readonly MIN_SAMPLES_FOR_PROJECTION = 30;
 
+  /**
+   * The horizons this engine publishes, and the band multiplier each one
+   * applies to the measured volatility.
+   *
+   * Unchanged values, lifted out of generateProjections so the backtest reads
+   * the labels and hours from here instead of keeping a second list that could
+   * drift out of step with the one production emits.
+   */
+  public static readonly HORIZONS: ReadonlyArray<{
+    label: string;
+    hours: number;
+    mult: number;
+  }> = [
+    { label: '+1H', hours: 1, mult: 0.35 },
+    { label: '+2H', hours: 2, mult: 0.55 },
+    { label: '+4H', hours: 4, mult: 0.85 },
+    { label: '+6H', hours: 6, mult: 1.15 },
+    { label: '+12H', hours: 12, mult: 1.55 },
+    { label: '+24H', hours: 24, mult: 2.0 },
+  ];
+
   /** Describes the stored observations a derived value was computed from. */
   public static describeWindow(history: HistoryRecord[]): DataWindow {
     if (history.length === 0) {
@@ -86,27 +107,70 @@ export class ProjectionEngine {
   /**
    * Performs technical and statistical analysis on real historical records and current snapshot
    */
+  /**
+   * Picks ONE definition for the series and its latest point.
+   *
+   * A market projection should read the strategic level - the median of each
+   * side - not the raw extremes. But the series and the anchor must come from
+   * the SAME definition. Feeding a strategic median as the newest point of a
+   * series of raw minima offsets that point by the gap between the two
+   * definitions (~2.4 VES in the observed book) and manufactures a momentum
+   * signal out of a change of units.
+   *
+   * So: strategic only when EVERY record in the window carries it and the
+   * snapshot has one too. A window mixing v1 and v2 records stays entirely
+   * RAW - consistent, and honest about what it is. As v2 records accumulate
+   * the window flips over on its own, with no migration and nothing
+   * backfilled.
+   *
+   * PUBLIC so the backtest can ask which definition a given window resolves
+   * to, and compare its prediction against the SAME field in the future
+   * record. Duplicating this rule in the backtest would let the two drift
+   * apart silently; there is one definition and both callers read it.
+   */
+  public static selectSeriesBasis(
+    snapshot: MarketSnapshot,
+    history: HistoryRecord[]
+  ): {
+    basis: 'STRATEGIC' | 'RAW';
+    buyPrices: number[];
+    currentBuy: number | null;
+    currentSell: number | null;
+  } {
+    const allStrategic =
+      history.length > 0 &&
+      history.every(
+        (h) =>
+          h.calculationVersion === 'v2-strategic' &&
+          h.strategicBuyPrice !== undefined &&
+          h.strategicSellPrice !== undefined
+      );
+
+    if (allStrategic && snapshot.strategicBuyPrice !== null && snapshot.strategicSellPrice !== null) {
+      return {
+        basis: 'STRATEGIC',
+        buyPrices: history.map((h) => h.strategicBuyPrice as number).filter((p) => p > 0),
+        currentBuy: snapshot.strategicBuyPrice,
+        currentSell: snapshot.strategicSellPrice,
+      };
+    }
+
+    return {
+      basis: 'RAW',
+      buyPrices: history.map((h) => h.buyPrice).filter((p) => p > 0),
+      currentBuy: snapshot.bestBuyPrice,
+      currentSell: snapshot.bestSellPrice,
+    };
+  }
+
   public static analyzeMarket(
     snapshot: MarketSnapshot,
     history: HistoryRecord[]
   ): MarketAnalysis {
-    /*
-     * PENDING - deliberately still RAW, and NOT substituted blindly.
-     *
-     * Classification: this is a MARKET analysis, so it should read
-     * strategicBuyPrice. It cannot yet, because `history` stores buyPrice =
-     * bestBuyPrice, the RAW minimum. Feeding a strategic median as the latest
-     * point of a series of raw minima would offset the last observation by
-     * the gap between them (~2.4 VES in the observed book) and manufacture a
-     * momentum signal out of a change of definition.
-     *
-     * The fix is to make HistoryRecord carry the strategic prices for NEW
-     * records (calculationVersion 'v2-strategic'; absent = v1), leaving old
-     * records untouched, and then switch both the series and this anchor
-     * together. That belongs to the history phase, not here.
-     */
-    const buyPrices = history.map((h) => h.buyPrice).filter((p) => p > 0);
-    const currentPrice = snapshot.bestBuyPrice;
+    // Series and anchor from one definition - see selectSeriesBasis.
+    const series = this.selectSeriesBasis(snapshot, history);
+    const buyPrices = series.buyPrices;
+    const currentPrice = series.currentBuy;
     const dataWindow = this.describeWindow(history);
     const provenance = {
       overall: 'AGGREGATED' as const,
@@ -327,12 +391,26 @@ export class ProjectionEngine {
   public static generateProjections(
     snapshot: MarketSnapshot,
     history: HistoryRecord[],
-    analysis: MarketAnalysis
+    analysis: MarketAnalysis,
+    /*
+     * The instant this projection is made from. Defaults to the wall clock, so
+     * production behaviour is byte-for-byte what it was.
+     *
+     * It exists because the horizons are anchored in time: the seasonal
+     * coefficient depends on the Venezuela hour of now + h hours. A
+     * walk-forward backtest standing at a past record has to make the engine
+     * believe 'now' is that record's timestamp, or it would price a past
+     * projection against today's session curve. No heuristic changes - only
+     * where the clock is read from.
+     */
+    nowMs?: number
   ): MarketProjections {
-    // PENDING - RAW anchor, same history-series dependency as analyzeMarket.
-    const currentBuy = snapshot.bestBuyPrice;
-    const currentSell = snapshot.bestSellPrice;
-    const currentVetHour = this.getVenezuelaHour();
+    // Same single definition as analyzeMarket, for the same reason.
+    const seriesBasis = this.selectSeriesBasis(snapshot, history);
+    const currentBuy = seriesBasis.currentBuy;
+    const currentSell = seriesBasis.currentSell;
+    const projectionNow = nowMs ?? Date.now();
+    const currentVetHour = this.getVenezuelaHour(projectionNow);
     const orderBookPressure = this.computeOrderBookPressure(snapshot);
     const dataWindow = this.describeWindow(history);
 
@@ -484,16 +562,9 @@ export class ProjectionEngine {
      */
     const confidencePct: number | null = null;
 
-    const horizons = [
-      { label: '+1H', hours: 1, mult: 0.35 },
-      { label: '+2H', hours: 2, mult: 0.55 },
-      { label: '+4H', hours: 4, mult: 0.85 },
-      { label: '+6H', hours: 6, mult: 1.15 },
-      { label: '+12H', hours: 12, mult: 1.55 },
-      { label: '+24H', hours: 24, mult: 2.0 },
-    ];
+    const horizons = ProjectionEngine.HORIZONS;
 
-    const now = Date.now();
+    const now = projectionNow;
     const intradayHorizons: HourlyProjectionItem[] = horizons.map((h) => {
       const targetTs = now + h.hours * 3600 * 1000;
       const targetVetHour = this.getVenezuelaHour(targetTs);
@@ -930,6 +1001,9 @@ export class ProjectionEngine {
     const minSamplesRequired = 10;
     if (history.length < minSamplesRequired) {
       return {
+        validatesProductionModel: false,
+        modelDescription:
+          'Pendiente lineal sobre 5 puntos de history.buyPrice (RAW), prediciendo el siguiente registro almacenado (~6 s). NO es el modelo que genera las proyecciones.',
         hasSufficientData: false,
         sampleSize: history.length,
         samplePeriodDays: 0,
@@ -990,6 +1064,9 @@ export class ProjectionEngine {
 
     if (totalTests === 0) {
       return {
+        validatesProductionModel: false,
+        modelDescription:
+          'Pendiente lineal sobre 5 puntos de history.buyPrice (RAW), prediciendo el siguiente registro almacenado (~6 s). NO es el modelo que genera las proyecciones.',
         hasSufficientData: false,
         sampleSize: history.length,
         samplePeriodDays: 0,
@@ -1011,7 +1088,10 @@ export class ProjectionEngine {
     const daysDiff = Number(((newestTs - oldestTs) / (1000 * 60 * 60 * 24)).toFixed(2));
 
     return {
-      hasSufficientData: true,
+      validatesProductionModel: false,
+        modelDescription:
+          'Pendiente lineal sobre 5 puntos de history.buyPrice (RAW), prediciendo el siguiente registro almacenado (~6 s). NO es el modelo que genera las proyecciones.',
+        hasSufficientData: true,
       sampleSize: totalTests,
       samplePeriodDays: daysDiff,
       mae,
