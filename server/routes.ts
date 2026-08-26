@@ -48,14 +48,28 @@ apiRouter.get('/market/projections', async (req, res) => {
 });
 
 // 4. Multi-Filter Bank Matrix
+/*
+ * Two structures, named so they cannot be confused.
+ *
+ * executableMatrix - BANK x AMOUNT, every cell from ads verified as that
+ *                    bank's, accepting that amount, with volume covering it.
+ *                    The ONLY thing here that may be presented as a rate.
+ * marketReference  - the level of the whole book, no bank and no amount. It
+ *                    carries executable: false inside the payload.
+ *
+ * The tradeType query parameter is gone: a cell is not one side, it is an
+ * operation with both. Asking for "the SELL matrix" was itself the shape of
+ * the old mistake.
+ */
 apiRouter.get('/market/matrix', async (req, res) => {
   try {
-    const tradeType = (req.query.tradeType as string)?.toUpperCase() === 'BUY' ? 'BUY' : 'SELL';
     const forceRefresh = req.query.refresh === 'true';
-    const matrix = await centralStore.getBankMatrix(tradeType, forceRefresh);
-    res.json(matrix);
+    const { executableMatrix, marketReference } = await centralStore.getExecutableMatrix(
+      forceRefresh
+    );
+    res.json({ marketReference, executableMatrix });
   } catch (err: any) {
-    res.status(500).json({ error: err.message || 'Error fetching bank matrix' });
+    res.status(500).json({ error: err.message || 'Error fetching executable matrix' });
   }
 });
 
@@ -130,8 +144,22 @@ apiRouter.get('/market/history', (req, res) => {
 // 6. Backtest Metrics
 apiRouter.get('/market/backtest', (req, res) => {
   try {
+    /*
+     * Two measurements, both reported.
+     *
+     * backtest      - the legacy one-step linear fit over RAW buyPrice. It
+     *                 still says validatesProductionModel: false, because it
+     *                 still does not measure the engine that publishes.
+     * walkForward   - the production engine itself, replayed at every past
+     *                 record. This is the one that can validate the model, and
+     *                 it does so only when it actually scored samples.
+     *
+     * The old one is kept rather than replaced: it is the record of what was
+     * being measured before, and deleting it would erase the comparison.
+     */
     const backtest = centralStore.getBacktestMetrics();
-    res.json({ backtest });
+    const walkForward = centralStore.getWalkForwardBacktest();
+    res.json({ backtest, walkForward });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Error computing backtest' });
   }

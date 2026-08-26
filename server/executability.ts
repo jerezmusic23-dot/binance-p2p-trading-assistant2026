@@ -129,6 +129,25 @@ export function evaluateAd(
   return { ...base, provenance: 'EXECUTABLE', rejection: null, reason: null };
 }
 
+/**
+ * Counts what Binance published about volume, across every evaluated ad.
+ *
+ * Descriptive only: nothing here rejects or accepts anything. It lets a caller
+ * separate "no advertiser published any volume" from "volume exists but is too
+ * small", which evaluateAd correctly rejects with the same reason.
+ */
+function tallyLiquidity(
+  quotes: readonly ExecutableQuote[]
+): Record<LiquidityStatus, number> {
+  const counts: Record<LiquidityStatus, number> = {
+    LIQUIDITY_VERIFIED: 0,
+    LIQUIDITY_ZERO: 0,
+    LIQUIDITY_NOT_VERIFIABLE: 0,
+  };
+  for (const q of quotes) counts[q.liquidityStatus] += 1;
+  return counts;
+}
+
 function tally(quotes: readonly ExecutableQuote[]): Record<string, number> {
   const counts: Record<string, number> = {};
   for (const q of quotes) {
@@ -207,6 +226,8 @@ export function evaluateBankAmount(params: {
     sellReason: bestExecutableSell === null ? noneReason('venta', allSell.length) : null,
     buyRejections: tally(allBuy),
     sellRejections: tally(allSell),
+    buyLiquidity: tallyLiquidity(allBuy),
+    sellLiquidity: tallyLiquidity(allSell),
   };
 }
 

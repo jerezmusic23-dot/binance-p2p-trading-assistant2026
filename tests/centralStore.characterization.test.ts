@@ -453,22 +453,30 @@ describe('analysis / projections window', () => {
   });
 });
 
-describe('FASE 3 - bank verification in the matrix', () => {
+describe('FASE 5 - the matrix is the executable matrix', () => {
+  /*
+   * CONTRACT CHANGE, deliberate.
+   *
+   * These tests previously asserted `matrix.rows[i].ratesByAmount`, the cells
+   * built from ads filtered only by min/max - no bank verification, no
+   * liquidity - whose spreadPct was the 0.01 VES undercut of the leader. That
+   * structure is gone: it was a second, weaker answer over the same ads, and
+   * it was the one the interface rendered.
+   *
+   * They now assert the same underlying properties (flat request budget, six
+   * tiers, bank verification) against ExecutableMatrix. One test changes
+   * meaning rather than shape and is renamed to say so.
+   */
   it('keeps the request budget flat: 1 query per bank per side, 6 amount tiers in memory', async () => {
-    /*
-     * 7 banks x 2 sides = 14 requests. Querying each of the 6 amount tiers
-     * separately would be 7 x 6 x 2 = 84. The tiers are filtered in memory
-     * from those same 14 responses, and FASE 3 does not add a single request.
-     */
     const mock = stubBinance([makeAdItem({ price: '918.00' })], [makeAdItem({ price: '921.00' })]);
     const { store } = await freshStore();
 
-    const matrix = await store.getBankMatrix('SELL', true);
+    const { executableMatrix } = await store.getExecutableMatrix(true);
 
     const bankCount = Object.keys(BANK_CODE_MAP).length;
     expect(mock).toHaveBeenCalledTimes(bankCount * 2);
-    // All six tiers were still produced, from those same responses.
-    expect(Object.keys(matrix.rows[0].ratesByAmount)).toEqual([
+    expect(executableMatrix.amountKeys).toEqual(['10K', '20K', '30K', '40K', '50K', '100K']);
+    expect(Object.keys(executableMatrix.cells.BANESCO)).toEqual([
       '10K',
       '20K',
       '30K',
@@ -478,48 +486,67 @@ describe('FASE 3 - bank verification in the matrix', () => {
     ]);
   });
 
-  it('reports how many ads could be verified as the bank they were fetched for', async () => {
-    // The fixture ad carries payType 'Banesco' for every bank query, so only
-    // the Banesco row can verify. The rest are honestly NOT_VERIFIED.
-    stubBinance([makeAdItem({ price: '918.00' })], [makeAdItem({ price: '921.00' })]);
-    const { store } = await freshStore();
-
-    const matrix = await store.getBankMatrix('SELL', true);
-    const banesco = matrix.rows.find((r) => r.bankKey === 'BANESCO');
-    const provincial = matrix.rows.find((r) => r.bankKey === 'PROVINCIAL');
-
-    expect(banesco?.verificationSell).toEqual({ verified: 1, notVerified: 0, notVerifiable: 0 });
-    expect(provincial?.verificationSell).toEqual({ verified: 0, notVerified: 1, notVerifiable: 0 });
-  });
-
-  it('counts an ad with no canonical code as NOT_VERIFIABLE, never as the bank', async () => {
-    stubBinance(
-      [makeAdItem({ price: '918.00' })],
-      [makeAdItem({ price: '921.00', tradeMethods: [{ payType: '', tradeMethodName: 'Banesco' }] })]
-    );
-    const { store } = await freshStore();
-
-    const matrix = await store.getBankMatrix('SELL', true);
-    const banesco = matrix.rows.find((r) => r.bankKey === 'BANESCO');
-
-    expect(banesco?.verificationSell).toEqual({ verified: 0, notVerified: 0, notVerifiable: 1 });
-  });
-
-  it('reports verification without yet filtering the published rates', async () => {
+  it('ENFORCES bank verification instead of merely reporting it', async () => {
     /*
-     * Deliberate: this environment cannot reach Binance to confirm what its
-     * real payType values are. Filtering on an unconfirmed mapping would
-     * silently empty the matrix in production. The counts make the gap
-     * visible; FASE 4 enforces once they are confirmed in Render.
+     * WAS: "reports verification without yet filtering the published rates",
+     * which asserted provincial.ratesByAmount['10K'].leaderPrice === 921 -
+     * a rate published for Provincial from an ad carrying Banesco's payType.
+     *
+     * That is exactly the defect FASE 5 removes. The fixture ad carries
+     * payType 'Banesco' for every bank query, so Provincial must now produce
+     * NO price at all rather than borrow one.
      */
     stubBinance([makeAdItem({ price: '918.00' })], [makeAdItem({ price: '921.00' })]);
     const { store } = await freshStore();
 
-    const matrix = await store.getBankMatrix('SELL', true);
-    const provincial = matrix.rows.find((r) => r.bankKey === 'PROVINCIAL');
+    const { executableMatrix } = await store.getExecutableMatrix(true);
+    const provincial = executableMatrix.cells.PROVINCIAL['10K'];
 
-    expect(provincial?.verificationSell?.verified).toBe(0);
-    expect(provincial?.ratesByAmount['10K'].leaderPrice).toBe(921); // still published
+    expect(provincial.buy).toBeNull();
+    expect(provincial.sell).toBeNull();
+    expect(provincial.spreadPct).toBeNull();
+    expect(provincial.status).not.toBe('EXECUTABLE');
+  });
+
+  it('never lets one bank inherit another bank\'s ad', async () => {
+    stubBinance([makeAdItem({ price: '918.00' })], [makeAdItem({ price: '921.00' })]);
+    const { store } = await freshStore();
+
+    const { executableMatrix } = await store.getExecutableMatrix(true);
+
+    for (const bank of executableMatrix.bankOrder) {
+      if (bank === 'BANESCO') continue;
+      for (const amt of executableMatrix.amountKeys) {
+        const cell = executableMatrix.cells[bank][amt];
+        expect(cell.buy?.price ?? null).toBeNull();
+        expect(cell.sell?.price ?? null).toBeNull();
+      }
+    }
+  });
+
+  it('marks a cell NOT_VERIFIABLE when the bank cannot be established', async () => {
+    stubBinance(
+      [makeAdItem({ price: '918.00', tradeMethods: [{ payType: '', tradeMethodName: 'Banesco' }] })],
+      [makeAdItem({ price: '921.00', tradeMethods: [{ payType: '', tradeMethodName: 'Banesco' }] })]
+    );
+    const { store } = await freshStore();
+
+    const { executableMatrix } = await store.getExecutableMatrix(true);
+    const banesco = executableMatrix.cells.BANESCO['10K'];
+
+    expect(banesco.status).toBe('NOT_VERIFIABLE');
+    expect(banesco.provenance).toBe('NOT_VERIFIABLE');
+  });
+
+  it('separates the global reference from the executable matrix in one response', async () => {
+    stubBinance([makeAdItem({ price: '918.00' })], [makeAdItem({ price: '921.00' })]);
+    const { store } = await freshStore();
+
+    const res = await store.getExecutableMatrix(true);
+
+    expect(res.marketReference.executable).toBe(false);
+    expect(res.marketReference.note).toContain('NADIE puede ejecutar');
+    expect(res.executableMatrix.cells).toBeDefined();
   });
 });
 
@@ -943,47 +970,54 @@ describe('live capture and historical persistence are different cadences', () =>
 });
 
 describe('provenance (phase C1)', () => {
-  it('marks a bank/amount cell REAL when an ad really covers that tier', async () => {
-    // Default fixture ad: min 1000, max 50000 VES.
+  it('marks a bank/amount cell EXECUTABLE when an ad of that bank really covers that tier', async () => {
+    /*
+     * CONTRACT CHANGE: was ratesByAmount['10K'].provenance === 'REAL'.
+     * A cell is now EXECUTABLE only when the ad verified as this bank's, the
+     * amount fits its limits AND its published volume covers the operation -
+     * so the fixture ad has to carry a real volume, which it does.
+     */
     stubBinance([makeAdItem({ price: '918.00' })], [makeAdItem({ price: '921.00' })]);
     const { store } = await freshStore();
 
-    const matrix = await store.getBankMatrix('SELL', true);
-    const cell = matrix.rows[0].ratesByAmount['10K'];
+    const { executableMatrix } = await store.getExecutableMatrix(true);
+    const cell = executableMatrix.cells.BANESCO['10K'];
 
-    expect(cell.provenance).toBe('REAL');
-    expect(cell.provenanceReason).toBeUndefined();
+    expect(cell.sell?.price).toBe(921);
+    expect(cell.buy?.price).toBe(918);
+    expect(cell.status).toBe('EXECUTABLE');
+    expect(cell.provenance).toBe('EXECUTABLE');
   });
 
   it('reports null for a tier no ad can cover, never another tier price', async () => {
-    // 100000 VES exceeds the ad's 50000 max. C2 removed the fallback that
-    // published the bank's top ad as if it were the rate for this amount.
+    // 100000 VES exceeds the ad's 50000 max.
     stubBinance([makeAdItem({ price: '918.00' })], [makeAdItem({ price: '921.00' })]);
     const { store } = await freshStore();
 
-    const matrix = await store.getBankMatrix('SELL', true);
-    const cell = matrix.rows[0].ratesByAmount['100K'];
+    const { executableMatrix } = await store.getExecutableMatrix(true);
+    const cell = executableMatrix.cells.BANESCO['100K'];
 
-    expect(cell.leaderPrice).toBeNull();
-    expect(cell.suggestedPrice).toBeNull();
+    expect(cell.buy).toBeNull();
+    expect(cell.sell).toBeNull();
     expect(cell.spreadPct).toBeNull();
-    expect(cell.adCount).toBe(0);
-    expect(cell.provenance).toBe('REAL');
-    expect(cell.provenanceReason).toMatch(/Ningun anuncio de venta .* cubre 100000/i);
+    expect(cell.availableUsdt).toBeNull();
+    expect(cell.status).toBe('NO_AD');
+    expect(cell.reason).toMatch(/ningún anuncio verificado/i);
 
-    // The tier that IS covered still reports a real rate.
-    expect(matrix.rows[0].ratesByAmount['10K'].leaderPrice).toBe(921);
+    // The tier that IS covered still reports a real executable rate.
+    expect(executableMatrix.cells.BANESCO['10K'].sell?.price).toBe(921);
   });
 
-  it('marks an empty tier REAL - an absent rate is an honest observation', async () => {
+  it('says NO_AD for an empty side - an absent rate is an honest observation', async () => {
     stubBinance([], [makeAdItem({ price: '921.00' })]);
     const { store } = await freshStore();
 
-    const matrix = await store.getBankMatrix('BUY', true);
-    const cell = matrix.rows[0].ratesByAmount['10K'];
+    const { executableMatrix } = await store.getExecutableMatrix(true);
+    const cell = executableMatrix.cells.BANESCO['10K'];
 
-    expect(cell.leaderPrice).toBeNull();
-    expect(cell.provenance).toBe('REAL');
+    expect(cell.buy).toBeNull();
+    expect(cell.buyStatus).toBe('NO_AD');
+    expect(cell.status).toBe('NO_AD');
   });
 
   it('flags an unfiltered snapshot served in place of a filtered one', async () => {

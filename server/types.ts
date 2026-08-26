@@ -288,6 +288,15 @@ export interface StorageDiagnostics {
   newestTimestamp: string | null;
   /** How many stored records carry strategic prices. */
   strategicRecordCount: number;
+  /**
+   * RETENTION. Records beyond the active window are moved to a dated archive
+   * under history_archive/ - never deleted. These fields make that visible
+   * from /api/health, so a shrinking recordCount can be told apart from data
+   * loss.
+   */
+  maxActiveRecords: number;
+  archivedRecordCount: number;
+  lastArchiveFile: string | null;
 }
 
 export interface HourlyChartPoint {
@@ -482,6 +491,172 @@ export interface BacktestMetrics {
   lastEvaluatedAt: string;
 }
 
+/* ------------------------------------------------------------------------ *
+ * WALK-FORWARD BACKTEST
+ *
+ * Measures the projection engine that production actually publishes, by
+ * calling it. Nothing here re-implements a heuristic: at each past record the
+ * backtest rebuilds the inputs that record carries, invokes analyzeMarket and
+ * generateProjections, and only then looks forward to score the result.
+ * ------------------------------------------------------------------------ */
+
+/** Which series the window resolved to - the same rule production applies. */
+export type SeriesBasis = 'STRATEGIC' | 'RAW';
+
+/** Where the evaluated history came from. Never inferred, always declared. */
+export type BacktestSource = 'REAL_HISTORY' | 'SYNTHETIC_FIXTURE';
+
+/**
+ * Why an anchor produced no scored sample. Counted, never silently dropped -
+ * a horizon reporting 4 samples out of 300 anchors has to say what happened
+ * to the other 296.
+ */
+export type BacktestSkipReason =
+  | 'BELOW_MIN_SAMPLES'
+  | 'PRODUCTION_INSUFFICIENT_DATA'
+  | 'NO_PROJECTION_VALUE'
+  | 'NO_FUTURE_RECORD'
+  | 'FUTURE_RECORD_WRONG_BASIS'
+  | 'NON_POSITIVE_ACTUAL';
+
+/** Error figures for one predictor over one horizon. null when nothing scored. */
+export interface BacktestErrorMetrics {
+  /** Mean Absolute Error, in VES. */
+  mae: number | null;
+  /** Root Mean Squared Error, in VES. */
+  rmse: number | null;
+  /** Mean Absolute Percentage Error, in %. */
+  mapePct: number | null;
+  /**
+   * Share of samples whose predicted direction matched the realised one.
+   *
+   * UP / DOWN / FLAT, where FLAT means the move was below the precision the
+   * history is stored at (prices are persisted to 2 decimals). The persistence
+   * baseline predicts no change by construction, so its directional accuracy
+   * is the share of genuinely flat outcomes - a low number there is the
+   * metric behaving correctly, not the baseline failing.
+   */
+  directionalAccuracyPct: number | null;
+  /**
+   * Mean SIGNED error (predicted - actual), in VES. Positive means the model
+   * runs high. Kept signed on purpose: an absolute value cannot show bias.
+   */
+  biasVes: number | null;
+  biasDirection: 'OVERESTIMATES' | 'UNDERESTIMATES' | 'BALANCED' | null;
+}
+
+export interface HorizonBacktestResult {
+  /** '+1H' ... '+24H', exactly the label generateProjections emits. */
+  horizon: string;
+  hours: number;
+  status: 'OK' | 'INSUFFICIENT_DATA';
+  /** Present whenever status is INSUFFICIENT_DATA. */
+  reason: string | null;
+
+  /** Past records considered as a standing point. */
+  evaluatedSamples: number;
+  /** Of those, the ones that produced a prediction AND had a real future. */
+  validSamples: number;
+  skippedSamples: number;
+  skipReasons: Partial<Record<BacktestSkipReason, number>>;
+
+  /** The production projection engine. */
+  model: BacktestErrorMetrics;
+  /** future = current price. The bar the model has to clear to be worth its constants. */
+  persistence: BacktestErrorMetrics;
+
+  /**
+   * (persistence.mae - model.mae) / persistence.mae * 100.
+   * Positive means the model beat doing nothing. null when either is null.
+   */
+  maeImprovementPct: number | null;
+  beatsPersistence: boolean | null;
+
+  /**
+   * How often the realised price landed inside [rangeMin, rangeMax].
+   *
+   * This is a PROJECTION BAND - current price times a hand-picked multiple of
+   * measured volatility. It is NOT a confidence interval and carries no
+   * nominal coverage, so there is no advertised percentage for the observed
+   * one to be compared against.
+   */
+  bandCoveragePct: number | null;
+  bandSamples: number;
+}
+
+export interface WalkForwardBacktestResult {
+  status: 'ok' | 'insufficient_data';
+  /**
+   * True only when this run actually scored the production engine on at least
+   * one horizon. An implemented backtest with nothing to measure validates
+   * nothing, and says so.
+   */
+  validatesProductionModel: boolean;
+  method: 'WALK_FORWARD_PRODUCTION_MODEL';
+  modelDescription: string;
+  source: BacktestSource;
+  baseline: 'PERSISTENCE';
+
+  /** Basis of the last anchor evaluated, and the tally across all of them. */
+  basis: SeriesBasis | null;
+  basisCounts: { strategic: number; raw: number };
+
+  totalRecords: number;
+  strategicRecords: number;
+  spanMinutes: number | null;
+  medianIntervalSeconds: number | null;
+  minSamplesForProjection: number;
+  projectionWindowSize: number;
+  anchorsConsidered: number;
+
+  horizons: HorizonBacktestResult[];
+
+  /**
+   * Everything production computes that this backtest cannot reproduce from
+   * stored history, named explicitly. An empty list would mean exact
+   * reproduction; it is not empty, and pretending otherwise would be the
+   * dishonest part.
+   */
+  reproductionGaps: string[];
+
+  /** Always false here. Metrics are reported; confidence is not published. */
+  confidencePublished: false;
+  evaluatedAt: string;
+}
+
+/* ------------------------------------------------------------------------ *
+ * TELEGRAM - SYSTEM ALERTS AND OPPORTUNITY LIFECYCLE
+ * ------------------------------------------------------------------------ */
+
+/**
+ * Conditions about the SYSTEM, not about the market. They fire when the bot
+ * stops being able to see or record the market - the cases where silence
+ * would otherwise look identical to a calm market.
+ */
+export type SystemAlertKind =
+  | 'BINANCE_OFFLINE'
+  | 'BINANCE_RECOVERED'
+  | 'DATA_STALE'
+  | 'STORAGE_ERROR';
+
+export interface TelegramSystemAlert {
+  kind: SystemAlertKind;
+  timestamp: number;
+  /**
+   * Identity of the CONDITION, not of the message. Two polls describing the
+   * same outage share a state and only the first is sent.
+   */
+  state: string;
+  detail: string;
+}
+
+/**
+ * An opportunity is a position - one bank at one amount - that opens, moves
+ * and closes. Reporting the phase is what keeps a live position from being
+ * re-announced every poll.
+ */
+export type OpportunityPhase = 'DETECTED' | 'UPDATED' | 'CLOSED';
+
 /** How a bank's ad population splits across the three verification verdicts. */
 export interface BankVerificationCounts {
   verified: number;
@@ -569,6 +744,138 @@ export interface BankAmountExecutability {
   /** How every evaluated ad was classified. Nothing is silently dropped. */
   buyRejections: Record<string, number>;
   sellRejections: Record<string, number>;
+  /**
+   * What Binance published about volume, per side, across every evaluated ad.
+   *
+   * ADDITIVE and purely descriptive - it changes no decision. It exists so a
+   * cell can tell "nobody published any volume at all" (NO_LIQUIDITY) from
+   * "volume exists but does not cover this amount" (INSUFFICIENT_LIQUIDITY).
+   * evaluateAd rejects both as LIQUIDITY_INSUFFICIENT, correctly, but the two
+   * mean very different things to someone deciding whether to wait.
+   */
+  buyLiquidity: Record<LiquidityStatus, number>;
+  sellLiquidity: Record<LiquidityStatus, number>;
+}
+
+/* ------------------------------------------------------------------------ *
+ * EXECUTABLE MATRIX
+ *
+ * The single structure the interface is allowed to present as a RATE.
+ *
+ * Every cell is one BANK x one AMOUNT, built from ads that passed evaluateAd
+ * for that bank and that amount - bank verified by exact payType, amount
+ * inside the ad's own limits, and published volume covering the operation.
+ * A global best price can never reach this structure.
+ * ------------------------------------------------------------------------ */
+
+/**
+ * What a cell is, in one word.
+ *
+ * EXECUTABLE is the ONLY value that means "you can run this operation at a
+ * profit right now". Everything else is a specific, named absence - never a
+ * zero, never a dash standing in for a price.
+ */
+export type CellStatus =
+  /** Both legs executable AND the signed spread is strictly positive. */
+  | 'EXECUTABLE'
+  /** Both legs executable, but the spread is zero or negative. A loss is not an opportunity. */
+  | 'NO_OPPORTUNITY'
+  /** Ads exist for this bank and amount, but none published any volume above zero. */
+  | 'NO_LIQUIDITY'
+  /** Volume was published, and it does not cover this amount. */
+  | 'INSUFFICIENT_LIQUIDITY'
+  /** No ad of this bank covers this amount. */
+  | 'NO_AD'
+  /** The book behind this cell is older than the freshness window. */
+  | 'STALE'
+  /** A condition could not be established - unknown bank, or unpublished volume. */
+  | 'NOT_VERIFIABLE'
+  /** The query for this bank failed. Not the same as an empty book. */
+  | 'ERROR';
+
+/** One executable leg of a cell. Every field comes from the ad it names. */
+export interface ExecutableSideView {
+  price: number;
+  advNo: string;
+  merchant: string;
+  /** The canonical Binance code that matched this bank exactly. */
+  payType: string | null;
+  paymentMethod: string | null;
+  /** null when Binance published no volume. Never 0 standing in for unknown. */
+  availableUsdt: number | null;
+  minAmountVes: number;
+  maxAmountVes: number;
+  liquidityStatus: LiquidityStatus;
+}
+
+export interface ExecutableCell {
+  bank: string;
+  bankDisplayName: string;
+  amountKey: string;
+  amountVes: number;
+
+  status: CellStatus;
+  /** Why the status is what it is. Always present unless EXECUTABLE. */
+  reason: string | null;
+
+  /** RECOMPRA - what I pay. null when no ad of this bank can serve this amount. */
+  buy: ExecutableSideView | null;
+  /** VENTA - what I receive. */
+  sell: ExecutableSideView | null;
+
+  /**
+   * ((venta - recompra) / recompra) * 100. SIGNED, denominator always the
+   * repurchase. null unless both legs exist. Never absolute-valued.
+   */
+  spreadPct: number | null;
+  /** min(buy, sell) when both published volume; null otherwise. Never invented. */
+  availableUsdt: number | null;
+
+  /** Per-leg diagnosis, so a blocked cell says which leg blocked it. */
+  buyStatus: CellStatus;
+  sellStatus: CellStatus;
+  buyReason: string | null;
+  sellReason: string | null;
+  buyRejections: Record<string, number>;
+  sellRejections: Record<string, number>;
+
+  /** When the book behind this cell was captured. Real, never synthesised. */
+  capturedAt: number;
+  ageSeconds: number;
+  provenance: DataProvenance;
+}
+
+export interface ExecutableMatrix {
+  capturedAt: number;
+  ageSeconds: number;
+  stale: boolean;
+  staleAfterSeconds: number;
+  bankOrder: string[];
+  bankDisplayNames: Record<string, string>;
+  amountKeys: string[];
+  /** cells[bank][amountKey] */
+  cells: Record<string, Record<string, ExecutableCell>>;
+}
+
+/**
+ * The global market, kept deliberately apart from the matrix above.
+ *
+ * These prices are the level of the whole book with no bank filter and no
+ * amount filter. They are legitimate CONTEXT and illegitimate as a quote:
+ * nobody can execute at the median of every advertiser at once. The field
+ * names say reference so no consumer has to remember the distinction.
+ */
+export interface MarketReference {
+  referenceBuyPrice: number | null;
+  referenceSellPrice: number | null;
+  referenceSpreadPct: number | null;
+  provenance: DataProvenance;
+  capturedAt: number;
+  ageSeconds: number;
+  status: 'LIVE' | 'STALE' | 'OFFLINE';
+  /** Stated in the payload itself, so it travels with the data. */
+  executable: false;
+  note: string;
 }
 
 /**
@@ -733,38 +1040,15 @@ export interface OpportunityEngineResult {
   context: Record<string, Record<string, OpportunityContext>>;
 }
 
-export interface BankMatrixRow {
-  bankKey: string;
-  bankDisplayName: string;
-  iconName?: string;
-  /**
-   * FASE 3: how many of this bank's ads could be positively verified as
-   * belonging to it by exact canonical payType equality.
-   *
-   * Reported, NOT yet enforced. The rates below are still computed over every
-   * ad Binance returned for the bank filter. Once these counts confirm what
-   * Binance really sends in payType, FASE 4 can filter on them.
-   */
-  verificationBuy?: BankVerificationCounts;
-  verificationSell?: BankVerificationCounts;
-  ratesByAmount: {
-    [amountKey: string]: {
-      leaderPrice: number | null;
-      suggestedPrice: number | null;
-      spreadPct: number | null;
-      availableMerchant?: string;
-      orderCount?: number;
-      adCount: number;
-      /**
-       * REAL when an ad actually covers this amount tier; HEURISTIC when no ad
-       * matched and the bank's top ad was used instead - that rate is not
-       * executable at this amount.
-       */
-      provenance: DataProvenance;
-      provenanceReason?: string;
-    };
-  };
-}
+/*
+ * BankMatrixRow / BankRateCell REMOVED in FASE 5.
+ *
+ * They described a matrix built from ads filtered only by min/max - no bank
+ * verification, no liquidity - whose "spreadPct" was the 0.01 VES undercut of
+ * the leader expressed as a percentage. It was a second, weaker answer over
+ * the same ads that evaluateBankTiers already answers correctly, and it was
+ * the one the interface rendered. ExecutableCell / ExecutableMatrix replace it.
+ */
 
 export interface AlertRule {
   id: string;

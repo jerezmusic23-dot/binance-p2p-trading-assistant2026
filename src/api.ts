@@ -2,7 +2,8 @@ import {
   LatestApiResponse,
   MarketAnalysis,
   MarketProjections,
-  BankMatrixRow,
+  ExecutableMatrixResponse,
+  OpportunitiesResponse,
   HistoryRecord,
   HistorySummary,
   BacktestMetrics,
@@ -59,14 +60,29 @@ export class ApiService {
     return requestJson<{ projections: MarketProjections | null }>(`/api/market/projections${qs}`);
   }
 
-  public static async getBankMatrix(
-    tradeType: 'BUY' | 'SELL' = 'SELL',
+  /**
+   * The executable matrix and the global reference, in one response.
+   *
+   * Deliberately returns both together and named apart: a consumer has to
+   * choose `executableMatrix` or `marketReference` explicitly, and cannot pick
+   * up a global price by reaching for a field that merely sounds like a rate.
+   */
+  public static async getExecutableMatrix(
     refresh = false
-  ): Promise<{ rows: BankMatrixRow[]; timestamp: number; tradeType: 'BUY' | 'SELL' }> {
-    return requestJson<{ rows: BankMatrixRow[]; timestamp: number; tradeType: 'BUY' | 'SELL' }>(
-      `/api/market/matrix?tradeType=${encodeURIComponent(tradeType)}&refresh=${refresh}`
+  ): Promise<ExecutableMatrixResponse> {
+    return requestJson<ExecutableMatrixResponse>(
+      `/api/market/matrix?refresh=${refresh}`
     );
   }
+
+  /**
+   * The operations the backend judged executable. The SAME objects Telegram
+   * receives - the UI never recomputes an opportunity of its own.
+   */
+  public static async getOpportunities(): Promise<OpportunitiesResponse> {
+    return requestJson<OpportunitiesResponse>('/api/market/opportunities');
+  }
+
 
   public static async getHistory(
     range = '24h'

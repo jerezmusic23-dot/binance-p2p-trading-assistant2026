@@ -10,7 +10,6 @@ import {
   MarketAnalysis,
   MarketProjections,
   BankAmountExecutability,
-  BankMatrixRow,
   Opportunity,
   OpportunityEngineResult,
   PayTypeMappingReport,
@@ -18,11 +17,20 @@ import {
   AlertRule,
   AlertTriggerLog,
   BacktestMetrics,
+  WalkForwardBacktestResult,
+  ExecutableMatrix,
+  MarketReference,
 } from './types.js';
 import { BinanceP2PService, BANK_CODE_MAP } from './binanceP2PService.js';
 import { countVerifications } from './bankMatching.js';
 import { AMOUNT_TIERS, evaluateBankTiers } from './executability.js';
 import { runOpportunityEngine } from './opportunityEngine.js';
+import { BacktestEngine } from './backtestEngine.js';
+import {
+  MATRIX_STALE_AFTER_MS,
+  buildExecutableMatrix,
+  buildMarketReference,
+} from './executableMatrix.js';
 import { assessPayTypeMapping, describeMappingForLog } from './payTypeMappingStatus.js';
 import { StorageEngine } from './storage.js';
 import { ProjectionEngine } from './projectionEngine.js';
@@ -54,17 +62,20 @@ export class CentralMarketStore {
   private isPolling = false;
   private bankMatrixCache: {
     timestamp: number;
-    buyMatrix: BankMatrixRow[];
-    sellMatrix: BankMatrixRow[];
+    /**
+     * Banks whose Binance query threw. An ERROR cell is not an empty book, and
+     * conflating them is how a broken query comes to look like a calm market.
+     */
+    failedBanks: Set<string>;
+    /** Ads actually evaluated per bank and side, for diagnosing a blocked cell. */
+    adCounts: Record<string, { buy: number; sell: number }>;
     /*
      * FASE 3: the normalized ads behind the matrix, kept per bank and side.
      *
-     * refreshBankMatrix already issues exactly ONE query per bank per side and
-     * filters the amount tiers in memory. It used to throw the ads away and
-     * keep only leaderPrice/suggestedPrice, so anything needing the ads again
-     * (executability by bank x amount) would have had to re-query - turning
-     * 14 requests per cycle into 84. Retaining them here keeps the request
-     * budget flat while making BANK x AMOUNT x SIDE derivable in memory.
+     * refreshBankMatrix issues exactly ONE query per bank per side and
+     * evaluates the amount tiers in memory. Retaining the ads keeps the
+     * request budget at 14 per cycle while making BANK x AMOUNT x SIDE
+     * derivable without a single extra call.
      */
     adsByBank: Record<string, { buy: NormalizedAd[]; sell: NormalizedAd[] }>;
   } | null = null;
@@ -88,6 +99,15 @@ export class CentralMarketStore {
    */
   private payTypeMapping: PayTypeMappingReport | null = null;
   private mappingStatusLogged: string | null = null;
+
+  /**
+   * Last capture state announced, and last storage failure seen.
+   *
+   * null means nothing has been announced yet, which is why a process that
+   * starts healthy does not announce a recovery it never had.
+   */
+  private lastCaptureState: 'LIVE' | 'STALE' | 'OFFLINE' | null = null;
+  private lastStorageError: string | null = null;
   private matrixPollingInProgress = false;
   private filteredCache = new Map<
     string,
@@ -228,9 +248,23 @@ export class CentralMarketStore {
           snapshot.timestamp - this.lastPersistedAt >= this.historyIntervalMs;
 
         if (due) {
-          StorageEngine.appendRecord(record);
-          this.lastPersistedAt = snapshot.timestamp;
-          this.pendingRecord = null;
+          /*
+           * A failed write must never take down capture, but it must never be
+           * silent either: the dashboard keeps showing live prices while the
+           * history quietly stops growing, and the projections degrade weeks
+           * later for no visible reason.
+           */
+          try {
+            StorageEngine.appendRecord(record);
+            this.lastPersistedAt = snapshot.timestamp;
+            this.pendingRecord = null;
+            this.reportStorageState(snapshot.timestamp, null);
+          } catch (storageErr: any) {
+            const detail = String(storageErr?.message ?? storageErr);
+            console.error(`[CentralStore] CRITICAL STORAGE ERROR: ${detail}`);
+            this.pendingRecord = record;
+            this.reportStorageState(snapshot.timestamp, detail);
+          }
         } else {
           this.pendingRecord = record;
         }
@@ -263,6 +297,13 @@ export class CentralMarketStore {
         if (this.payTypeMapping.status === 'NOT_VERIFIED') console.error(line);
         else console.warn(line);
       }
+
+      /*
+       * Capture is healthy. Announced only as a TRANSITION - if the previous
+       * state was already LIVE the notifier returns UNCHANGED and nothing is
+       * sent.
+       */
+      this.reportCaptureState(snapshot.status, snapshot.timestamp, null);
 
       // Evaluate alert rules
       this.evaluateAlerts(snapshot);
@@ -319,10 +360,79 @@ export class CentralMarketStore {
           strategicProvenance: 'STRATEGIC',
         };
       }
+      this.reportCaptureState(
+        this.currentSnapshot.status,
+        this.currentSnapshot.timestamp,
+        this.currentSnapshot.lastError
+      );
+
       return this.currentSnapshot;
     } finally {
       this.isPolling = false;
     }
+  }
+
+  /**
+   * Reports how capture is doing, as a TRANSITION.
+   *
+   * The notifier suppresses an unchanged state, so a two-hour outage polled
+   * every six seconds produces one message, not twelve hundred. RECOVERED is
+   * sent as its own condition because "the alerts stopped" is not evidence
+   * that anything was fixed.
+   */
+  private reportCaptureState(
+    status: 'LIVE' | 'STALE' | 'OFFLINE',
+    timestamp: number,
+    lastError: string | null
+  ): void {
+    const notifier = TelegramNotifier.getInstance();
+
+    if (status === 'LIVE') {
+      if (this.lastCaptureState !== null && this.lastCaptureState !== 'LIVE') {
+        void notifier.notifySystemAlert({
+          kind: 'BINANCE_RECOVERED',
+          timestamp,
+          state: 'LIVE',
+          detail: 'La captura de Binance P2P vuelve a responder con datos completos.',
+        });
+      }
+      this.lastCaptureState = 'LIVE';
+      return;
+    }
+
+    this.lastCaptureState = status;
+    const reason = lastError ?? 'Sin detalle del fallo de captura.';
+    void notifier.notifySystemAlert({
+      kind: status === 'OFFLINE' ? 'BINANCE_OFFLINE' : 'DATA_STALE',
+      timestamp,
+      /*
+       * The state is the KIND plus the reason, not the timestamp: two polls
+       * failing the same way share a state and only the first is sent.
+       */
+      state: `${status}:${reason}`,
+      detail:
+        status === 'OFFLINE'
+          ? `Binance P2P no responde: ${reason}`
+          : `Los datos de mercado no se han podido refrescar: ${reason}`,
+    });
+  }
+
+  /** Same transition discipline for the history file. */
+  private reportStorageState(timestamp: number, error: string | null): void {
+    const notifier = TelegramNotifier.getInstance();
+
+    if (error === null) {
+      this.lastStorageError = null;
+      return;
+    }
+
+    this.lastStorageError = error;
+    void notifier.notifySystemAlert({
+      kind: 'STORAGE_ERROR',
+      timestamp,
+      state: `STORAGE_ERROR:${error}`,
+      detail: `No se ha podido escribir el historico: ${error}`,
+    });
   }
 
   /**
@@ -541,41 +651,62 @@ export class CentralMarketStore {
   }
 
   /**
+   * Walk-forward backtest of the production projection engine.
+   *
+   * source is REAL_HISTORY because StorageEngine is the persisted store this
+   * process actually writes to - the file under DATA_DIR, not a fixture. A
+   * test calling BacktestEngine.run directly passes SYNTHETIC_FIXTURE and its
+   * output can never be mistaken for market evidence.
+   */
+  public getWalkForwardBacktest(): WalkForwardBacktestResult {
+    const history = StorageEngine.getHistory();
+    return BacktestEngine.run(history, 'REAL_HISTORY');
+  }
+
+  /**
    * Bank Multi-Filter Matrix Aggregator
    * Queries real Binance order book across requested banks and amounts
    */
-  public async getBankMatrix(tradeType: 'BUY' | 'SELL' = 'SELL', forceRefresh = false): Promise<{
-    rows: BankMatrixRow[];
-    timestamp: number;
-    tradeType: 'BUY' | 'SELL';
+  public async getExecutableMatrix(forceRefresh = false): Promise<{
+    executableMatrix: ExecutableMatrix;
+    marketReference: MarketReference;
   }> {
-    const amounts = [10000, 20000, 30000, 40000, 50000, 100000];
-    const amountKeys = ['10K', '20K', '30K', '40K', '50K', '100K'];
-
-    // Check cache (valid for 45 seconds)
-    const isCacheFresh = this.bankMatrixCache && Date.now() - this.bankMatrixCache.timestamp < 45000;
-    if (isCacheFresh && !forceRefresh) {
-      const rows = tradeType === 'SELL' ? this.bankMatrixCache!.sellMatrix : this.bankMatrixCache!.buyMatrix;
-      return {
-        rows,
-        timestamp: this.bankMatrixCache!.timestamp,
-        tradeType,
-      };
+    const isCacheFresh =
+      this.bankMatrixCache && Date.now() - this.bankMatrixCache.timestamp < MATRIX_STALE_AFTER_MS;
+    if (forceRefresh || !isCacheFresh) {
+      await this.refreshBankMatrix();
     }
 
-    await this.refreshBankMatrix();
+    const cache = this.bankMatrixCache;
+    const bankOrder = Object.keys(BANK_CODE_MAP);
+    const bankDisplayNames: Record<string, string> = {};
+    for (const bank of bankOrder) bankDisplayNames[bank] = BANK_CODE_MAP[bank].displayName;
 
-    const rows =
-      this.bankMatrixCache && tradeType === 'SELL'
-        ? this.bankMatrixCache.sellMatrix
-        : this.bankMatrixCache
-        ? this.bankMatrixCache.buyMatrix
-        : [];
+    /*
+     * ONE derivation, shared with the opportunity engine and therefore with
+     * Telegram. The matrix the interface renders and the opportunity the bot
+     * announces are computed from the same evaluateBankTiers result over the
+     * same captured book - there is no second calculation to disagree with.
+     */
+    const executableMatrix = buildExecutableMatrix({
+      byBank: this.deriveExecutability(cache?.adsByBank ?? {}),
+      bankOrder,
+      bankDisplayNames,
+      amountKeys: AMOUNT_TIERS.map((t) => t.key),
+      adCounts: cache?.adCounts ?? {},
+      failedBanks: cache?.failedBanks,
+      /*
+       * The real capture instant of the book behind every cell. Never Date.now()
+       * at render time: that would make a stale cell look fresh.
+       */
+      capturedAt: cache?.timestamp ?? 0,
+    });
+
+    const { snapshot, effectiveStatus, ageSeconds } = this.getCurrentSnapshot();
 
     return {
-      rows,
-      timestamp: this.bankMatrixCache?.timestamp || Date.now(),
-      tradeType,
+      executableMatrix,
+      marketReference: buildMarketReference(snapshot, effectiveStatus, ageSeconds),
     };
   }
 
@@ -593,7 +724,7 @@ export class CentralMarketStore {
     byBank: Record<string, Record<string, BankAmountExecutability>>;
     amountKeys: string[];
   }> {
-    const isCacheFresh = this.bankMatrixCache && Date.now() - this.bankMatrixCache.timestamp < 45000;
+    const isCacheFresh = this.bankMatrixCache && Date.now() - this.bankMatrixCache.timestamp < MATRIX_STALE_AFTER_MS;
     if (forceRefresh || !isCacheFresh) {
       await this.refreshBankMatrix();
     }
@@ -619,7 +750,7 @@ export class CentralMarketStore {
     timestamp: number;
     result: OpportunityEngineResult;
   }> {
-    const isCacheFresh = this.bankMatrixCache && Date.now() - this.bankMatrixCache.timestamp < 45000;
+    const isCacheFresh = this.bankMatrixCache && Date.now() - this.bankMatrixCache.timestamp < MATRIX_STALE_AFTER_MS;
     if (forceRefresh || !isCacheFresh || this.lastOpportunities === null) {
       await this.refreshBankMatrix();
     }
@@ -687,27 +818,20 @@ export class CentralMarketStore {
         { key: '100K', val: 100000 },
       ];
 
-      const buyRows: BankMatrixRow[] = [];
-      const sellRows: BankMatrixRow[] = [];
       const adsByBank: Record<string, { buy: NormalizedAd[]; sell: NormalizedAd[] }> = {};
+      const adCounts: Record<string, { buy: number; sell: number }> = {};
+      const failedBanks = new Set<string>();
 
       // Query banks in sequence or controlled chunks to avoid rate limits
       for (const bankKey of banks) {
         const bankConfig = BANK_CODE_MAP[bankKey];
 
-        const buyRow: BankMatrixRow = {
-          bankKey,
-          bankDisplayName: bankConfig.displayName,
-          ratesByAmount: {},
-        };
-
-        const sellRow: BankMatrixRow = {
-          bankKey,
-          bankDisplayName: bankConfig.displayName,
-          ratesByAmount: {},
-        };
-
-        // Query both BUY and SELL for each amount or for the primary bank query
+        /*
+         * ONE query per bank per side. Unchanged: 7 banks x 2 sides = 14
+         * requests per cycle. The six amount tiers are evaluated in memory by
+         * evaluateBankTiers over these same ads, so adding tiers costs nothing
+         * and no tier is ever served a price fetched for a different amount.
+         */
         try {
           const [rawBuyAds, rawSellAds] = await Promise.all([
             /*
@@ -745,99 +869,38 @@ export class CentralMarketStore {
           // Reusable by FASE 4 without a single extra request to Binance.
           adsByBank[bankKey] = { buy: normalizedBuy, sell: normalizedSell };
 
+          adCounts[bankKey] = { buy: normalizedBuy.length, sell: normalizedSell.length };
+
           /*
-           * FASE 3: how many of these ads can be positively verified as this
-           * bank's by exact canonical payType equality.
+           * FASE 5: bank verification is now ENFORCED, not merely reported.
            *
-           * REPORTED, NOT ENFORCED. The rates below are still computed over
-           * every ad Binance returned for the payTypes filter. Filtering on
-           * this now would silently empty the matrix if Binance's real payType
-           * values differ from BANK_CODE_MAP.apiPayTypes - and this
-           * environment cannot reach Binance to check. Surfacing the counts
-           * makes the gap visible in Render instead of guessing at it.
+           * evaluateAd rejects any ad whose payType does not match one of this
+           * bank's canonical codes exactly, so an ad that reached this response
+           * without belonging to the bank can no longer produce a rate. The
+           * count is still logged because an all-zero bank is the signature of
+           * a wrong code in BANK_CODE_MAP, and that has to stay visible.
            */
-          buyRow.verificationBuy = countVerifications(normalizedBuy, bankConfig.apiPayTypes);
-          sellRow.verificationSell = countVerifications(normalizedSell, bankConfig.apiPayTypes);
-
-          for (const amt of amounts) {
-            // Find best matching ads within min-max limits for this amount
-            const matchingBuyAds = normalizedBuy.filter(
-              (ad) => amt.val >= ad.minAmountVes && (ad.maxAmountVes === 0 || amt.val <= ad.maxAmountVes)
+          const verifiedBuy = countVerifications(normalizedBuy, bankConfig.apiPayTypes);
+          const verifiedSell = countVerifications(normalizedSell, bankConfig.apiPayTypes);
+          if (verifiedBuy.verified === 0 && verifiedSell.verified === 0 &&
+              normalizedBuy.length + normalizedSell.length > 0) {
+            console.warn(
+              `[CentralStore] ${bankKey}: ninguno de los ` +
+                `${normalizedBuy.length + normalizedSell.length} anuncios devueltos verifica ` +
+                `contra sus codigos canonicos. Revisar BANK_CODE_MAP.`
             );
-            const matchingSellAds = normalizedSell.filter(
-              (ad) => amt.val >= ad.minAmountVes && (ad.maxAmountVes === 0 || amt.val <= ad.maxAmountVes)
-            );
-
-            // Buy Side
-            if (matchingBuyAds.length > 0) {
-              const bestBuy = matchingBuyAds.sort((a, b) => a.price - b.price)[0];
-              const suggested = Number((bestBuy.price + 0.01).toFixed(2));
-              buyRow.ratesByAmount[amt.key] = {
-                leaderPrice: bestBuy.price,
-                suggestedPrice: suggested,
-                spreadPct: Number((((suggested - bestBuy.price) / bestBuy.price) * 100).toFixed(2)),
-                availableMerchant: bestBuy.merchantName,
-                orderCount: bestBuy.ordersCount,
-                adCount: matchingBuyAds.length,
-                provenance: 'REAL',
-              };
-            } else {
-              /*
-               * C2: no fallback to another tier's price. If no ad covers this
-               * amount there is no executable rate, and null says exactly that.
-               */
-              buyRow.ratesByAmount[amt.key] = {
-                leaderPrice: null,
-                suggestedPrice: null,
-                spreadPct: null,
-                adCount: 0,
-                provenance: 'REAL',
-                provenanceReason:
-                  normalizedBuy.length > 0
-                    ? `Ningun anuncio de compra de este banco cubre ${amt.val} VES.`
-                    : 'El banco no devolvio ningun anuncio de compra.',
-              };
-            }
-
-            // Sell Side
-            if (matchingSellAds.length > 0) {
-              const bestSell = matchingSellAds.sort((a, b) => b.price - a.price)[0];
-              const suggested = Number((bestSell.price + 0.01).toFixed(2));
-              sellRow.ratesByAmount[amt.key] = {
-                leaderPrice: bestSell.price,
-                suggestedPrice: suggested,
-                spreadPct: Number((((suggested - bestSell.price) / bestSell.price) * 100).toFixed(2)),
-                availableMerchant: bestSell.merchantName,
-                orderCount: bestSell.ordersCount,
-                adCount: matchingSellAds.length,
-                provenance: 'REAL',
-              };
-            } else {
-              sellRow.ratesByAmount[amt.key] = {
-                leaderPrice: null,
-                suggestedPrice: null,
-                spreadPct: null,
-                adCount: 0,
-                provenance: 'REAL',
-                provenanceReason:
-                  normalizedSell.length > 0
-                    ? `Ningun anuncio de venta de este banco cubre ${amt.val} VES.`
-                    : 'El banco no devolvio ningun anuncio de venta.',
-              };
-            }
           }
         } catch (err) {
           console.warn(`[CentralStore] Bank matrix fetch failed for ${bankKey}:`, err);
+          failedBanks.add(bankKey);
+          adCounts[bankKey] = { buy: 0, sell: 0 };
         }
-
-        buyRows.push(buyRow);
-        sellRows.push(sellRow);
       }
 
       this.bankMatrixCache = {
         timestamp: Date.now(),
-        buyMatrix: buyRows,
-        sellMatrix: sellRows,
+        failedBanks,
+        adCounts,
         adsByBank,
       };
 
@@ -857,6 +920,25 @@ export class CentralMarketStore {
   }
 
   private evaluateAlerts(snapshot: MarketSnapshot): void {
+    /*
+     * Opportunity lifecycle, once per pass and independent of the alert rules.
+     *
+     * Guarded on lastOpportunities having been computed at all: null there
+     * means "not evaluated yet", which must never be reported as a position
+     * closing. Only once the engine has produced an answer does a null best
+     * opportunity mean the book no longer holds one.
+     *
+     * The notifier dedups by position, so calling this every poll produces one
+     * DETECTED, then silence until the cooldown allows an UPDATED.
+     */
+    if (this.lastOpportunities !== null) {
+      void TelegramNotifier.getInstance().notifyOpportunityLifecycle(
+        this.lastOpportunities.bestOpportunity ?? null,
+        snapshot.timestamp,
+        this.bankMatrixCache?.timestamp ?? null
+      );
+    }
+
     const rules = StorageEngine.getAlerts().filter((r) => r.enabled);
     const now = Date.now();
 
