@@ -54,13 +54,23 @@ afterEach(() => {
 });
 
 describe('A/B - a normal write lands correctly', () => {
-  it('writes exactly the expected JSON, formatted as before', async () => {
+  it('writes exactly the expected JSON, byte for byte', async () => {
+    /*
+     * CONTRACT CHANGE: compact, no longer JSON.stringify(records, null, 2).
+     *
+     * The intent of this test is unchanged - the file must be exactly the
+     * records and nothing else. What changed is the formatting: this file is
+     * machine-written every 60s and rewritten in full each time, and the
+     * indentation cost 21% of every byte for the benefit of no reader.
+     * A separate test covers that a pretty-printed file written before this
+     * change still loads.
+     */
     const StorageEngine = await freshStorage();
     const records = makeHistory(3, { drift: 0.5 });
     for (const rec of records) StorageEngine.appendRecord(rec);
 
     expect(fs.existsSync(historyFile())).toBe(true);
-    expect(readText(historyFile())).toBe(JSON.stringify(records, null, 2));
+    expect(readText(historyFile())).toBe(JSON.stringify(records));
   });
 
   it('leaves no temp file behind after a successful write', async () => {
