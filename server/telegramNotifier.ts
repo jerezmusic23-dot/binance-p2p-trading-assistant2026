@@ -14,7 +14,14 @@
  *  - Starts disabled and silent when credentials are absent.
  */
 
-import { AlertRule, AlertTriggerLog, MarketSnapshot, Opportunity } from './types.js';
+import {
+  AlertRule,
+  AlertTriggerLog,
+  MarketSnapshot,
+  Opportunity,
+  OpportunityPhase,
+  TelegramSystemAlert,
+} from './types.js';
 
 /**
  * Default gap between two Telegram messages for the same alert type.
@@ -29,6 +36,17 @@ export const DEFAULT_ALERT_COOLDOWN_MS = 300_000;
 /** Short by design: a hung request must not hold up the alert loop. */
 export const DEFAULT_TIMEOUT_MS = 5_000;
 
+/**
+ * Floor between two messages about the same system condition.
+ *
+ * A system alert is already gated on the condition CHANGING, so this only
+ * bounds flapping: a capture that drops in and out at the poll rate would
+ * otherwise announce every flip. Fifteen minutes is long enough to collapse a
+ * flapping outage into one message and short enough that a genuine second
+ * outage an hour later is still reported.
+ */
+export const DEFAULT_SYSTEM_ALERT_COOLDOWN_MS = 900_000;
+
 export interface TelegramConfig {
   botToken: string;
   chatId: string;
@@ -40,6 +58,14 @@ export type TelegramOutcome =
   | 'SENT'
   | 'DISABLED'
   | 'COOLDOWN'
+  /**
+   * The condition has not changed since the last message about it.
+   *
+   * Distinct from COOLDOWN on purpose: COOLDOWN means "something new, too
+   * soon"; UNCHANGED means "nothing new at all". A six-second poll of a
+   * two-hour outage produces UNCHANGED 1200 times and sends once.
+   */
+  | 'UNCHANGED'
   | 'HTTP_ERROR'
   | 'TIMEOUT'
   | 'NETWORK_ERROR';
@@ -312,10 +338,152 @@ export function formatAlertMessage(
   ].join('\n');
 }
 
+/**
+ * Identity of an opportunity POSITION: one bank, one amount.
+ *
+ * Deliberately NOT keyed on the prices. Prices move on every poll, so a
+ * price-keyed identity would treat each tick as a brand new opportunity and
+ * defeat the very deduplication it looks like it provides. The position is
+ * what opens, moves and closes; the prices are what it currently shows.
+ */
+export function opportunityIdentity(opportunity: Opportunity): string {
+  return `${opportunity.bank}|${opportunity.amountVes}`;
+}
+
+/**
+ * The lifecycle message for a position.
+ *
+ * DETECTED once, UPDATED while it stays open and the cooldown allows, CLOSED
+ * when it leaves the book. The reader can follow one position instead of
+ * receiving the same paragraph every few seconds.
+ */
+export function formatOpportunityLifecycleMessage(
+  phase: OpportunityPhase,
+  opportunity: Opportunity,
+  timestamp: number,
+  capturedAt?: number | null
+): string {
+  const n = (value: number, decimals = 2) => escapeHtml(value.toFixed(decimals));
+  const heading =
+    phase === 'DETECTED'
+      ? '🚨 <b>OPORTUNIDAD DETECTADA</b>'
+      : phase === 'UPDATED'
+      ? '🔄 <b>OPORTUNIDAD ACTUALIZADA</b>'
+      : '✅ <b>OPORTUNIDAD CERRADA</b>';
+
+  const lines = [
+    heading,
+    '',
+    'USDT/VES',
+    '',
+    `Banco: <b>${escapeHtml(opportunity.bank)}</b>`,
+    `Monto: <b>${escapeHtml(opportunity.amountVes.toLocaleString('es-VE'))} VES</b>`,
+  ];
+
+  if (phase === 'CLOSED') {
+    lines.push(
+      '',
+      'Esta operación ya no está en el libro con las condiciones anteriores.',
+      '',
+      `Hora: ${formatVenezuelaClock(timestamp)}`
+    );
+    return lines.join('\n');
+  }
+
+  lines.push(
+    '',
+    `Recompra ejecutable: <b>${n(opportunity.buyPrice)} VES</b>`,
+    `Venta ejecutable: <b>${n(opportunity.sellPrice)} VES</b>`,
+    '',
+    `Margen BRUTO: <b>${n(opportunity.spreadPct, 4)}%</b> ` +
+      `(${n(opportunity.marginAbsolute)} VES por USDT)`,
+    ''
+  );
+
+  /*
+   * EXECUTABLE, not STRATEGIC. These prices come from a bank/amount cell that
+   * passed evaluateAd - a real operation - not from the median of the book.
+   * The distinction is printed so the reader never has to assume it.
+   */
+  lines.push(
+    `Ejecutable: ${opportunity.verification === 'VERIFIED' ? '✅' : '❌'}`,
+    `Banco verificado: ${opportunity.verification === 'VERIFIED' ? '✅' : '❌'}`,
+    opportunity.availableUsdt !== null
+      ? `Liquidez: <b>${n(opportunity.availableUsdt)} USDT</b>`
+      : 'Liquidez: no verificable'
+  );
+
+  if (capturedAt !== null && capturedAt !== undefined && Number.isFinite(capturedAt)) {
+    const ageSeconds = Math.max(0, Math.round((timestamp - capturedAt) / 1000));
+    lines.push(`Antiguedad del dato: ${escapeHtml(String(ageSeconds))}s`);
+  } else {
+    lines.push('Antiguedad del dato: no verificable');
+  }
+
+  lines.push(
+    '',
+    'Fuente: Binance P2P LIVE',
+    `Procedencia: ${escapeHtml(opportunity.verification)} / EXECUTABLE`,
+    '',
+    'MARGEN BRUTO: no descuenta comision de Binance,',
+    'transferencia bancaria, slippage, redondeos',
+    'ni otros costes operativos. NO es beneficio neto.',
+    '',
+    `Hora: ${formatVenezuelaClock(timestamp)}`
+  );
+
+  return lines.join('\n');
+}
+
+/**
+ * The system-condition message.
+ *
+ * These are the alerts that fire when the bot stops being able to SEE the
+ * market. Without them an outage is indistinguishable from a quiet market:
+ * both produce no opportunity messages.
+ */
+export function formatSystemAlertMessage(alert: TelegramSystemAlert): string {
+  const heading: Record<TelegramSystemAlert['kind'], string> = {
+    BINANCE_OFFLINE: '⛔ <b>BINANCE NO DISPONIBLE</b>',
+    BINANCE_RECOVERED: '✅ <b>CAPTURA RESTABLECIDA</b>',
+    DATA_STALE: '⚠️ <b>DATOS DESACTUALIZADOS</b>',
+    STORAGE_ERROR: '🛑 <b>CRITICAL STORAGE ERROR</b>',
+  };
+
+  const consequence: Record<TelegramSystemAlert['kind'], string> = {
+    BINANCE_OFFLINE:
+      'No hay captura de mercado. Los precios mostrados son los ultimos conocidos, ' +
+      'no el mercado actual.',
+    BINANCE_RECOVERED: 'La captura de Binance P2P vuelve a responder.',
+    DATA_STALE:
+      'La ultima captura valida supera el umbral. No operar sobre estos precios ' +
+      'sin refrescar.',
+    STORAGE_ERROR:
+      'El historico ha dejado de poder escribirse. Se siguen sirviendo datos en vivo, ' +
+      'pero NO se esta acumulando historico y las proyecciones se degradaran.',
+  };
+
+  return [
+    heading[alert.kind],
+    '',
+    escapeHtml(alert.detail),
+    '',
+    consequence[alert.kind],
+    '',
+    'Procedencia: SYSTEM (no es una señal de mercado).',
+    '',
+    `Hora: ${formatVenezuelaClock(alert.timestamp)}`,
+  ].join('\n');
+}
+
 export class TelegramNotifier {
   private static instance: TelegramNotifier | null = null;
 
   private readonly lastSentAt = new Map<string, number>();
+  /** Last state announced per system condition, so an unchanged one stays quiet. */
+  private readonly lastSystemState = new Map<string, string>();
+  /** Positions currently announced as open, so CLOSED can be detected. */
+  private readonly openOpportunities = new Map<string, number>();
   private startupLogged = false;
 
   constructor(private readonly config: TelegramConfig | null) {}
@@ -332,6 +500,18 @@ export class TelegramNotifier {
   /** Test seam: drops the cached instance. */
   public static resetInstance(): void {
     TelegramNotifier.instance = null;
+  }
+
+  /** Test seam: forgets every dedup/cooldown record without rebuilding config. */
+  public resetState(): void {
+    this.lastSentAt.clear();
+    this.lastSystemState.clear();
+    this.openOpportunities.clear();
+  }
+
+  /** Positions currently held open, for assertions and diagnostics. */
+  public openOpportunityKeys(): string[] {
+    return [...this.openOpportunities.keys()];
   }
 
   public isEnabled(): boolean {
@@ -437,6 +617,150 @@ export class TelegramNotifier {
   private describe(err: unknown): string {
     const raw = err instanceof Error ? err.message : String(err);
     return redactSecrets(raw, this.config);
+  }
+
+  /**
+   * Forwards a system condition. Never rejects and never throws.
+   *
+   * Gated on the CONDITION changing, not on time alone: a stable outage is
+   * announced once. The cooldown is a second gate that only bounds flapping.
+   *
+   * The state is recorded only when a message is actually attempted, so a
+   * transition suppressed by the cooldown is retried on the next poll instead
+   * of being lost.
+   */
+  public async notifySystemAlert(alert: TelegramSystemAlert): Promise<TelegramResult> {
+    try {
+      if (!this.config) return { outcome: 'DISABLED' };
+
+      const key = `system:${alert.kind}`;
+      const now = alert.timestamp || Date.now();
+
+      if (this.lastSystemState.get(key) === alert.state) {
+        return { outcome: 'UNCHANGED' };
+      }
+
+      const previous = this.lastSentAt.get(key);
+      const cooldownMs = Math.max(this.config.cooldownMs, DEFAULT_SYSTEM_ALERT_COOLDOWN_MS);
+      if (previous !== undefined && now - previous < cooldownMs) {
+        return { outcome: 'COOLDOWN' };
+      }
+
+      this.lastSystemState.set(key, alert.state);
+      this.lastSentAt.set(key, now);
+      this.prune(now);
+
+      return await this.send(formatSystemAlertMessage(alert));
+    } catch (err) {
+      console.warn(`[Telegram] Unexpected notifier error: ${this.describe(err)}`);
+      return { outcome: 'NETWORK_ERROR', detail: this.describe(err) };
+    }
+  }
+
+  /**
+   * Announces an opportunity position by phase.
+   *
+   * DETECTED the first time the position appears - never suppressed by the
+   * cooldown, because the first sighting is the message that matters. UPDATED
+   * while it stays open, and only once per cooldown window. Passing null means
+   * no position is open, which closes whatever was.
+   *
+   * Only VERIFIED / EXECUTABLE opportunities reach here; a strategic median is
+   * not a position and has no lifecycle.
+   */
+  public async notifyOpportunityLifecycle(
+    opportunity: Opportunity | null,
+    timestamp: number,
+    capturedAt?: number | null
+  ): Promise<TelegramResult> {
+    try {
+      if (!this.config) return { outcome: 'DISABLED' };
+      const now = timestamp || Date.now();
+
+      if (opportunity === null) {
+        return await this.closeOpenOpportunities(now);
+      }
+
+      if (opportunity.verification !== 'VERIFIED') {
+        return { outcome: 'UNCHANGED' };
+      }
+
+      const identity = opportunityIdentity(opportunity);
+
+      /* A different position opened: the previous one is no longer current. */
+      for (const key of this.openOpportunities.keys()) {
+        if (key !== identity) {
+          await this.closeOpportunity(key, now);
+        }
+      }
+
+      const isNew = !this.openOpportunities.has(identity);
+      const phase: OpportunityPhase = isNew ? 'DETECTED' : 'UPDATED';
+      const cooldownKeyForPosition = `opportunity:${identity}`;
+
+      if (!isNew) {
+        const previous = this.lastSentAt.get(cooldownKeyForPosition);
+        if (previous !== undefined && now - previous < this.config.cooldownMs) {
+          this.openOpportunities.set(identity, now);
+          return { outcome: 'COOLDOWN' };
+        }
+      }
+
+      this.openOpportunities.set(identity, now);
+      this.lastSentAt.set(cooldownKeyForPosition, now);
+      this.prune(now);
+
+      return await this.send(
+        formatOpportunityLifecycleMessage(phase, opportunity, now, capturedAt)
+      );
+    } catch (err) {
+      console.warn(`[Telegram] Unexpected notifier error: ${this.describe(err)}`);
+      return { outcome: 'NETWORK_ERROR', detail: this.describe(err) };
+    }
+  }
+
+  /** CLOSED for every position still marked open. */
+  private async closeOpenOpportunities(now: number): Promise<TelegramResult> {
+    const keys = [...this.openOpportunities.keys()];
+    if (keys.length === 0) return { outcome: 'UNCHANGED' };
+
+    let last: TelegramResult = { outcome: 'UNCHANGED' };
+    for (const key of keys) {
+      last = await this.closeOpportunity(key, now);
+    }
+    return last;
+  }
+
+  /**
+   * CLOSED is not rate-limited.
+   *
+   * A position announced as open must always be announced as gone, or the
+   * reader is left believing an operation is still on the book. Silence here
+   * is the one failure mode this layer must not have.
+   */
+  private async closeOpportunity(identity: string, now: number): Promise<TelegramResult> {
+    this.openOpportunities.delete(identity);
+    this.lastSentAt.delete(`opportunity:${identity}`);
+
+    const [bank, amountRaw] = identity.split('|');
+    const amountVes = Number(amountRaw);
+
+    return await this.send(
+      [
+        '✅ <b>OPORTUNIDAD CERRADA</b>',
+        '',
+        'USDT/VES',
+        '',
+        `Banco: <b>${escapeHtml(bank)}</b>`,
+        `Monto: <b>${escapeHtml(
+          Number.isFinite(amountVes) ? amountVes.toLocaleString('es-VE') : amountRaw
+        )} VES</b>`,
+        '',
+        'Esta operación ya no está en el libro con las condiciones anteriores.',
+        '',
+        `Hora: ${formatVenezuelaClock(now)}`,
+      ].join('\n')
+    );
   }
 
   /** Keeps the cooldown map bounded; rules are few but the map is long-lived. */
