@@ -20,6 +20,47 @@ export type TradeType = 'BUY' | 'SELL';
  * A value that would otherwise be unknown is HEURISTIC, never REAL. Phase C2
  * replaces those with null; C1 only labels them.
  */
+/* ==========================================================================
+ * BINANCE tradeType  <->  ARBITRAGE LEG
+ *
+ * The single authoritative statement of this mapping. Every module that
+ * touches a price depends on it, and getting it backwards inverts the sign of
+ * every spread in the system, so it is written down once, here.
+ *
+ *   tradeType: 'BUY'   ->  ARBITRAGE BUY LEG   (the acquisition)
+ *                          I pay VES and receive USDT.
+ *                          These are the ASKS. Best = the LOWEST price.
+ *                          Stored as buyPrice / bestBuyPrice / strategicBuyPrice.
+ *
+ *   tradeType: 'SELL'  ->  ARBITRAGE SELL LEG  (the disposal)
+ *                          I hand over USDT and receive VES.
+ *                          These are the BIDS. Best = the HIGHEST price.
+ *                          Stored as sellPrice / bestSellPrice / strategicSellPrice.
+ *
+ * WHY THIS WAY ROUND, AND HOW TO CHECK IT
+ *
+ * The parameter is the SEARCHER's intent, not the advertiser's action. Asking
+ * Binance for tradeType=BUY is the API equivalent of pressing "Buy USDT" on
+ * p2p.binance.com: it returns the ads you can buy FROM. The advertisers behind
+ * those ads are selling, which is the reading that makes this easy to invert
+ * by accident - and inverting it turns the market's own bid-ask spread into a
+ * permanent, fictitious profit on every bank and every amount.
+ *
+ * The check is empirical and takes one request per side: in any functioning
+ * market the ask is at or above the bid. Observed in production on the
+ * strategic medians - the robust estimator, not the raw extremes:
+ *
+ *     median(tradeType=BUY)  = 945.75      <- higher: the ask side
+ *     median(tradeType=SELL) = 944.75      <- lower:  the bid side
+ *
+ * Crossing that costs 0.11%, which is what a taker pays and why no
+ * opportunity exists at the market level. If a future observation ever shows
+ * median(SELL) ABOVE median(BUY) persistently, this mapping is wrong and the
+ * whole chain must be re-derived from that evidence - not from these words.
+ *
+ * tests/arbitrageSideSemantics.test.ts pins every link in the chain.
+ * ========================================================================== */
+
 export type DataProvenance =
   | 'REAL'
   | 'AGGREGATED'

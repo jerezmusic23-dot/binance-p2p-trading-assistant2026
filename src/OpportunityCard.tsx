@@ -100,10 +100,16 @@ export const OpportunityCard: React.FC = () => {
               {best.amountVes.toLocaleString('es-VE')} VES
             </span>
 
-            <span className="text-[#848e9c]">Recompra (pago)</span>
+            <span className="text-[#848e9c]">
+              COMPRA arbitraje
+              <span className="block text-[9px] text-[#5e6673]">lado Binance BUY · pago VES</span>
+            </span>
             <span className="text-[#02c076] text-right">{fmtVes(best.buyPrice)} VES</span>
 
-            <span className="text-[#848e9c]">Venta (recibo)</span>
+            <span className="text-[#848e9c]">
+              VENTA arbitraje
+              <span className="block text-[9px] text-[#5e6673]">lado Binance SELL · recibo VES</span>
+            </span>
             <span className="text-[#FCD535] text-right">{fmtVes(best.sellPrice)} VES</span>
 
             <span className="text-[#848e9c]">Spread</span>

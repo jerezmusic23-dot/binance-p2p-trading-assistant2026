@@ -396,8 +396,8 @@ describe('Telegram: EXECUTABLE is never confused with STRATEGIC', () => {
 
     expect(body).toContain('EXECUTABLE');
     expect(body).toContain('Banco de Venezuela');
-    expect(body).toContain('Recompra ejecutable');
-    expect(body).toContain('Venta ejecutable');
+    expect(body).toContain('COMPRA arbitraje (lado Binance BUY)');
+    expect(body).toContain('VENTA arbitraje (lado Binance SELL)');
     expect(body).not.toContain('STRATEGIC');
     expect(body).not.toContain('mediana');
   });

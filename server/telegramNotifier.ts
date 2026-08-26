@@ -167,8 +167,8 @@ function strategicLines(snapshot: MarketSnapshot | null): string[] {
   }
   return [
     '',
-    `Recompra (BUY): <b>${escapeHtml(recompra.toFixed(2))} VES</b>`,
-    `Venta (SELL): <b>${escapeHtml(venta.toFixed(2))} VES</b>`,
+    `Referencia compra (lado Binance BUY): <b>${escapeHtml(recompra.toFixed(2))} VES</b>`,
+    `Referencia venta (lado Binance SELL): <b>${escapeHtml(venta.toFixed(2))} VES</b>`,
   ];
 }
 
@@ -198,8 +198,13 @@ export function formatOpportunityMessage(
     `Banco: <b>${escapeHtml(opportunity.bank)}</b>`,
     `Monto: <b>${escapeHtml(opportunity.amountVes.toLocaleString('es-VE'))} VES</b>`,
     '',
-    `Recompra (BUY): <b>${n(opportunity.buyPrice)} VES</b>`,
-    `Venta (SELL): <b>${n(opportunity.sellPrice)} VES</b>`,
+    /*
+     * Both legs name the Binance side they came from. "Recompra" alone reads
+     * as the advertiser's action to anyone thinking in ad direction, which is
+     * exactly the inversion this wording exists to prevent.
+     */
+    `COMPRA arbitraje (lado Binance BUY): <b>${n(opportunity.buyPrice)} VES</b>`,
+    `VENTA arbitraje (lado Binance SELL): <b>${n(opportunity.sellPrice)} VES</b>`,
     '',
     `Spread: <b>${n(opportunity.spreadPct, 4)}%</b>`,
     `Margen BRUTO: <b>${n(opportunity.marginAbsolute)} VES por USDT</b>`,
@@ -392,8 +397,8 @@ export function formatOpportunityLifecycleMessage(
 
   lines.push(
     '',
-    `Recompra ejecutable: <b>${n(opportunity.buyPrice)} VES</b>`,
-    `Venta ejecutable: <b>${n(opportunity.sellPrice)} VES</b>`,
+    `COMPRA arbitraje (lado Binance BUY): <b>${n(opportunity.buyPrice)} VES</b>`,
+    `VENTA arbitraje (lado Binance SELL): <b>${n(opportunity.sellPrice)} VES</b>`,
     '',
     `Margen BRUTO: <b>${n(opportunity.spreadPct, 4)}%</b> ` +
       `(${n(opportunity.marginAbsolute)} VES por USDT)`,

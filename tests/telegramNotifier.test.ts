@@ -501,8 +501,14 @@ describe('message formatting', () => {
       makeSnapshot({ strategicBuyPrice: 921.39, strategicSellPrice: 921.79 })
     );
 
-    expect(text).toContain('Recompra (BUY): <b>921.39 VES</b>');
-    expect(text).toContain('Venta (SELL): <b>921.79 VES</b>');
+    /*
+     * A SPREAD_ABOVE alert is about the MARKET level, not about an operation,
+     * so its lines say "Referencia". The word arbitraje is reserved for a real
+     * bank-and-amount operation; using it here would let a market threshold
+     * read as something executable.
+     */
+    expect(text).toContain('Referencia compra (lado Binance BUY): <b>921.39 VES</b>');
+    expect(text).toContain('Referencia venta (lado Binance SELL): <b>921.79 VES</b>');
   });
 
   it('FASE 2: omits both levels rather than inventing one when a side is empty', () => {
@@ -512,8 +518,8 @@ describe('message formatting', () => {
       makeSnapshot({ strategicBuyPrice: null, strategicSellPrice: 921.79 })
     );
 
-    expect(text).not.toContain('Recompra (BUY)');
-    expect(text).not.toContain('Venta (SELL)');
+    expect(text).not.toContain('Referencia compra');
+    expect(text).not.toContain('Referencia venta');
   });
 
   it('escapes HTML so a crafted rule name cannot break the message', () => {
@@ -635,8 +641,10 @@ describe('BEST_OPPORTUNITY message', () => {
 
     expect(text).toContain('BEST OPPORTUNITY');
     expect(text).toContain('Banco: <b>BANESCO</b>');
-    expect(text).toContain('Recompra (BUY): <b>921.39 VES</b>');
-    expect(text).toContain('Venta (SELL): <b>921.79 VES</b>');
+    // Each leg names the Binance side it came from, so the reader never has
+    // to infer it from the direction of the advertiser's ad.
+    expect(text).toContain('COMPRA arbitraje (lado Binance BUY): <b>921.39 VES</b>');
+    expect(text).toContain('VENTA arbitraje (lado Binance SELL): <b>921.79 VES</b>');
     expect(text).toContain('0.0434%');
     expect(text).toContain('480.00 USDT');
     expect(text).toContain('VERIFIED');
