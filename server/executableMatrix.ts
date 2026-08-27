@@ -46,7 +46,22 @@ import type {
  * often refreshBankMatrix re-queries Binance. A cell can never be fresher than
  * the cache that produced it, so the same window decides both.
  */
-export const MATRIX_STALE_AFTER_MS = 45_000;
+export const MATRIX_REFRESH_MS = 45_000;
+
+/**
+ * How old a CELL may be and still be presented as executable.
+ *
+ * Longer than the refresh interval on purpose. Each refresh asks Binance about
+ * one amount tier - the tier it is about to evaluate, so the ads it gets back
+ * are the ads that actually accept that amount - and the six-tier sweep
+ * therefore takes six ticks. A cell is at most one full sweep old, plus one
+ * tick of margin, and its own capturedAt says exactly how old it is.
+ *
+ * The alternative was asking for all six tiers every tick: 84 requests every
+ * 45s instead of 14, a different rate-limit risk for freshness nobody needs at
+ * this cadence.
+ */
+export const MATRIX_STALE_AFTER_MS = MATRIX_REFRESH_MS * 7;
 
 function toSideView(quote: ExecutableQuote | null): ExecutableSideView | null {
   if (quote === null) return null;
@@ -253,8 +268,11 @@ export function buildExecutableMatrix(params: {
   bankOrder: string[];
   bankDisplayNames: Record<string, string>;
   amountKeys: string[];
-  adCounts: Record<string, { buy: number; sell: number }>;
-  failedBanks?: ReadonlySet<string>;
+  /** adCountsByTier[amountKey][bank] - each tier has its own captured book. */
+  adCountsByTier: Record<string, Record<string, { buy: number; sell: number }>>;
+  failedBanksByTier: Record<string, ReadonlySet<string>>;
+  capturedAtByTier: Record<string, number>;
+  /** Newest capture across all tiers, for the matrix header. */
   capturedAt: number;
   nowMs?: number;
 }): ExecutableMatrix {
@@ -264,19 +282,26 @@ export function buildExecutableMatrix(params: {
   for (const bank of params.bankOrder) {
     cells[bank] = {};
     const tiers = params.byBank[bank] ?? {};
-    const counts = params.adCounts[bank] ?? { buy: 0, sell: 0 };
 
     for (const amountKey of params.amountKeys) {
       const cell = tiers[amountKey];
       if (cell === undefined) continue;
 
+      const counts = params.adCountsByTier[amountKey]?.[bank] ?? { buy: 0, sell: 0 };
+      /*
+       * A tier never captured yet has no capturedAt. 0 makes it maximally old,
+       * so it reports STALE rather than borrowing another tier's freshness -
+       * the sweep fills it within six ticks and it says so meanwhile.
+       */
+      const capturedAt = params.capturedAtByTier[amountKey] ?? 0;
+
       cells[bank][amountKey] = buildCell({
         cell,
         bankDisplayName: params.bankDisplayNames[bank] ?? bank,
         amountKey,
-        capturedAt: params.capturedAt,
+        capturedAt,
         nowMs,
-        failed: params.failedBanks?.has(bank),
+        failed: params.failedBanksByTier[amountKey]?.has(bank),
         buyAdsEvaluated: counts.buy,
         sellAdsEvaluated: counts.sell,
       });

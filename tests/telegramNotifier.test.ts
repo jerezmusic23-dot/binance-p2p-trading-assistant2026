@@ -622,6 +622,9 @@ describe('BEST_OPPORTUNITY message', () => {
     amountVes: 50_000,
     buyPrice: 921.39,
     sellPrice: 921.79,
+    // Same values under the unambiguous names.
+    arbitrageBuyPrice: 921.39,
+    arbitrageSellPrice: 921.79,
     buyAdvNo: 'b',
     sellAdvNo: 's',
     spreadAbsolute: 0.4,
@@ -698,6 +701,7 @@ describe('data age in the opportunity message', () => {
   };
   const opportunity = {
     bank: 'BANESCO', amountVes: 50_000, buyPrice: 921.39, sellPrice: 921.79,
+    arbitrageBuyPrice: 921.39, arbitrageSellPrice: 921.79,
     buyAdvNo: 'b', sellAdvNo: 's', spreadAbsolute: 0.4, spreadPct: 0.0434,
     marginAbsolute: 0.4, marginPct: 0.0434, buyAvailableUsdt: 900,
     sellAvailableUsdt: 480, availableUsdt: 480,

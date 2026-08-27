@@ -350,7 +350,9 @@ describe('TEST 10 / 11 - no bleeding between banks or amounts', () => {
       bankOrder: ['BANESCO', 'BNC'],
       bankDisplayNames: { BANESCO: 'Banesco', BNC: 'BNC' },
       amountKeys: ['20K'],
-      adCounts: { BANESCO: { buy: 2, sell: 1 }, BNC: { buy: 2, sell: 1 } },
+      adCountsByTier: { '20K': { BANESCO: { buy: 2, sell: 1 }, BNC: { buy: 2, sell: 1 } } },
+      failedBanksByTier: {},
+      capturedAtByTier: { '20K': NOW },
       capturedAt: NOW,
       nowMs: NOW,
     });
@@ -396,7 +398,9 @@ describe('TEST 10 / 11 - no bleeding between banks or amounts', () => {
       bankOrder: ['BANESCO', 'BNC'],
       bankDisplayNames: { BANESCO: 'Banesco', BNC: 'BNC' },
       amountKeys: ['20K'],
-      adCounts: { BNC: { buy: 1, sell: 1 } },
+      adCountsByTier: { '20K': { BNC: { buy: 1, sell: 1 } } },
+      failedBanksByTier: {},
+      capturedAtByTier: { '20K': NOW },
       capturedAt: NOW,
       nowMs: NOW,
     });

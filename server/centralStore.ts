@@ -23,7 +23,7 @@ import {
 } from './types.js';
 import { BinanceP2PService, BANK_CODE_MAP } from './binanceP2PService.js';
 import { countVerifications } from './bankMatching.js';
-import { AMOUNT_TIERS, evaluateBankTiers } from './executability.js';
+import { AMOUNT_TIERS, evaluateBankAmount } from './executability.js';
 import { runOpportunityEngine } from './opportunityEngine.js';
 import { BacktestEngine } from './backtestEngine.js';
 
@@ -36,10 +36,12 @@ import { BacktestEngine } from './backtestEngine.js';
  */
 const TIMELINE_WINDOW_MS = 24 * 60 * 60 * 1000;
 import {
+  MATRIX_REFRESH_MS,
   MATRIX_STALE_AFTER_MS,
   buildExecutableMatrix,
   buildMarketReference,
 } from './executableMatrix.js';
+import { mapBinanceAdToArbitrageLeg } from './arbitrageSides.js';
 import { assessPayTypeMapping, describeMappingForLog } from './payTypeMappingStatus.js';
 import { StorageEngine } from './storage.js';
 import { ProjectionEngine } from './projectionEngine.js';
@@ -71,6 +73,8 @@ export class CentralMarketStore {
   /** Autonomous bank-matrix refresh, so opportunities do not depend on a viewer. */
   private matrixTimer: NodeJS.Timeout | null = null;
   private matrixBootTimer: NodeJS.Timeout | null = null;
+  /** Which amount tier the next refresh will ask Binance about. */
+  private matrixTierCursor = 0;
 
   /**
    * How often a capture arrived too incomplete to record, and in what way.
@@ -92,24 +96,27 @@ export class CentralMarketStore {
     lastAt: null as number | null,
   };
   private isPolling = false;
+  /**
+   * The captured book, PER AMOUNT TIER.
+   *
+   * Each tier holds the ads Binance returned for THAT amount, and nothing is
+   * ever shared between tiers: a cell can only be built from ads fetched for
+   * its own amount, so no price can leak from 20K into 50K. Each tier carries
+   * its own capturedAt, because they are refreshed on a rotation and their
+   * ages genuinely differ.
+   */
   private bankMatrixCache: {
+    /** Last time ANY tier was refreshed. */
     timestamp: number;
-    /**
-     * Banks whose Binance query threw. An ERROR cell is not an empty book, and
-     * conflating them is how a broken query comes to look like a calm market.
-     */
-    failedBanks: Set<string>;
-    /** Ads actually evaluated per bank and side, for diagnosing a blocked cell. */
-    adCounts: Record<string, { buy: number; sell: number }>;
-    /*
-     * FASE 3: the normalized ads behind the matrix, kept per bank and side.
-     *
-     * refreshBankMatrix issues exactly ONE query per bank per side and
-     * evaluates the amount tiers in memory. Retaining the ads keeps the
-     * request budget at 14 per cycle while making BANK x AMOUNT x SIDE
-     * derivable without a single extra call.
-     */
-    adsByBank: Record<string, { buy: NormalizedAd[]; sell: NormalizedAd[] }>;
+    tiers: Record<
+      string,
+      {
+        capturedAt: number;
+        adsByBank: Record<string, { buy: NormalizedAd[]; sell: NormalizedAd[] }>;
+        adCounts: Record<string, { buy: number; sell: number }>;
+        failedBanks: Set<string>;
+      }
+    >;
   } | null = null;
   /*
    * The opportunity engine's answer for the book the bank matrix last
@@ -183,7 +190,7 @@ export class CentralMarketStore {
     // First bank matrix population, shortly after the first snapshot.
     this.matrixBootTimer = setTimeout(() => {
       this.matrixBootTimer = null;
-      void this.refreshBankMatrix();
+      void this.refreshBankMatrix(true);
     }, 2000);
 
     /*
@@ -204,7 +211,7 @@ export class CentralMarketStore {
      */
     this.matrixTimer = setInterval(() => {
       void this.refreshBankMatrix();
-    }, MATRIX_STALE_AFTER_MS);
+    }, MATRIX_REFRESH_MS);
   }
 
   public stop(): void {
@@ -788,7 +795,7 @@ export class CentralMarketStore {
     const isCacheFresh =
       this.bankMatrixCache && Date.now() - this.bankMatrixCache.timestamp < MATRIX_STALE_AFTER_MS;
     if (forceRefresh || !isCacheFresh) {
-      await this.refreshBankMatrix();
+      await this.refreshBankMatrix(true);
     }
 
     const cache = this.bankMatrixCache;
@@ -803,16 +810,18 @@ export class CentralMarketStore {
      * same captured book - there is no second calculation to disagree with.
      */
     const executableMatrix = buildExecutableMatrix({
-      byBank: this.deriveExecutability(cache?.adsByBank ?? {}),
+      byBank: this.deriveExecutability(),
       bankOrder,
       bankDisplayNames,
       amountKeys: AMOUNT_TIERS.map((t) => t.key),
-      adCounts: cache?.adCounts ?? {},
-      failedBanks: cache?.failedBanks,
       /*
-       * The real capture instant of the book behind every cell. Never Date.now()
-       * at render time: that would make a stale cell look fresh.
+       * Per-tier, because the tiers are refreshed on a rotation and a cell must
+       * report the age of ITS OWN book. A single capturedAt would make five of
+       * the six tiers look fresher than they are.
        */
+      adCountsByTier: this.tierAdCounts(),
+      failedBanksByTier: this.tierFailedBanks(),
+      capturedAtByTier: this.tierCapturedAt(),
       capturedAt: cache?.timestamp ?? 0,
     });
 
@@ -840,11 +849,11 @@ export class CentralMarketStore {
   }> {
     const isCacheFresh = this.bankMatrixCache && Date.now() - this.bankMatrixCache.timestamp < MATRIX_STALE_AFTER_MS;
     if (forceRefresh || !isCacheFresh) {
-      await this.refreshBankMatrix();
+      await this.refreshBankMatrix(true);
     }
 
     const cache = this.bankMatrixCache;
-    const byBank = this.deriveExecutability(cache?.adsByBank ?? {});
+    const byBank = this.deriveExecutability();
 
     return {
       timestamp: cache?.timestamp ?? Date.now(),
@@ -866,7 +875,7 @@ export class CentralMarketStore {
   }> {
     const isCacheFresh = this.bankMatrixCache && Date.now() - this.bankMatrixCache.timestamp < MATRIX_STALE_AFTER_MS;
     if (forceRefresh || !isCacheFresh || this.lastOpportunities === null) {
-      await this.refreshBankMatrix();
+      await this.refreshBankMatrix(true);
     }
 
     return {
@@ -937,28 +946,78 @@ export class CentralMarketStore {
   }
 
   /** One executability evaluation, shared by the matrix and the opportunities. */
-  private deriveExecutability(
-    adsByBank: Record<string, { buy: NormalizedAd[]; sell: NormalizedAd[] }>
-  ): Record<string, Record<string, BankAmountExecutability>> {
+  /**
+   * BANK x AMOUNT executability, each cell from the ads fetched for ITS amount.
+   *
+   * Every tier owns its own captured book, so nothing here can serve a 50K
+   * cell a price that Binance returned for a 20K question. evaluateAd still
+   * re-checks the ad's own min/max as a second guard: transAmount is Binance
+   * filtering for us, and trusting a remote filter we cannot inspect would be
+   * exactly the kind of assumption this project keeps paying for.
+   */
+  private deriveExecutability(): Record<string, Record<string, BankAmountExecutability>> {
     const byBank: Record<string, Record<string, BankAmountExecutability>> = {};
+    const tiers = this.bankMatrixCache?.tiers ?? {};
+
     for (const bankKey of Object.keys(BANK_CODE_MAP)) {
-      const ads = adsByBank[bankKey];
-      byBank[bankKey] = evaluateBankTiers({
-        bank: bankKey,
-        allowedCodes: BANK_CODE_MAP[bankKey].apiPayTypes,
-        buyAds: ads?.buy ?? [],
-        sellAds: ads?.sell ?? [],
-      });
+      byBank[bankKey] = {};
+      for (const tier of AMOUNT_TIERS) {
+        const captured = tiers[tier.key];
+        const ads = captured?.adsByBank[bankKey];
+        byBank[bankKey][tier.key] = evaluateBankAmount({
+          bank: bankKey,
+          allowedCodes: BANK_CODE_MAP[bankKey].apiPayTypes,
+          amountVes: tier.val,
+          buyAds: ads?.buy ?? [],
+          sellAds: ads?.sell ?? [],
+        });
+      }
     }
     return byBank;
   }
 
-  private async refreshBankMatrix(): Promise<void> {
+  /** When each tier was captured, for per-cell freshness. */
+  private tierCapturedAt(): Record<string, number> {
+    const out: Record<string, number> = {};
+    for (const [key, tier] of Object.entries(this.bankMatrixCache?.tiers ?? {})) {
+      out[key] = tier.capturedAt;
+    }
+    return out;
+  }
+
+  private tierAdCounts(): Record<string, Record<string, { buy: number; sell: number }>> {
+    const out: Record<string, Record<string, { buy: number; sell: number }>> = {};
+    for (const [key, tier] of Object.entries(this.bankMatrixCache?.tiers ?? {})) {
+      out[key] = tier.adCounts;
+    }
+    return out;
+  }
+
+  private tierFailedBanks(): Record<string, ReadonlySet<string>> {
+    const out: Record<string, ReadonlySet<string>> = {};
+    for (const [key, tier] of Object.entries(this.bankMatrixCache?.tiers ?? {})) {
+      out[key] = tier.failedBanks;
+    }
+    return out;
+  }
+
+  /**
+   * Refreshes the bank matrix.
+   *
+   * `fullSweep` fetches every amount tier in one pass - 7 banks x 2 sides x 6
+   * tiers = 84 requests. That is the right cost exactly once, at boot or when
+   * a caller finds the cache cold, because a matrix showing one populated tier
+   * and five STALE ones is not a usable answer.
+   *
+   * Steady state rotates instead: one tier per tick, 14 requests, full sweep
+   * every six ticks.
+   */
+  private async refreshBankMatrix(fullSweep = false): Promise<void> {
     /*
      * One refresh at a time.
      *
      * Now load-bearing for the autonomous interval as well as for concurrent
-     * HTTP readers: if a refresh takes longer than MATRIX_STALE_AFTER_MS the
+     * HTTP readers: if a refresh takes longer than MATRIX_REFRESH_MS the
      * next tick returns immediately instead of starting a second pass, so 14
      * requests can never become 28 and two engine runs can never race to
      * overwrite lastOpportunities out of order.
@@ -968,14 +1027,23 @@ export class CentralMarketStore {
 
     try {
       const banks = Object.keys(BANK_CODE_MAP);
-      const amounts = [
-        { key: '10K', val: 10000 },
-        { key: '20K', val: 20000 },
-        { key: '30K', val: 30000 },
-        { key: '40K', val: 40000 },
-        { key: '50K', val: 50000 },
-        { key: '100K', val: 100000 },
-      ];
+
+      /*
+       * ONE TIER PER REFRESH, rotating.
+       *
+       * Each tick asks Binance for the amount it is about to evaluate, so the
+       * ads it gets back are the ads that actually accept that amount. The
+       * request count per tick is unchanged - 7 banks x 2 sides = 14 - and the
+       * whole six-tier sweep completes in six ticks.
+       */
+      const tiersToFetch = fullSweep
+        ? [...AMOUNT_TIERS]
+        : [AMOUNT_TIERS[this.matrixTierCursor % AMOUNT_TIERS.length]];
+      if (!fullSweep) {
+        this.matrixTierCursor = (this.matrixTierCursor + 1) % AMOUNT_TIERS.length;
+      }
+
+      for (const tier of tiersToFetch) {
 
       const adsByBank: Record<string, { buy: NormalizedAd[]; sell: NormalizedAd[] }> = {};
       const adCounts: Record<string, { buy: number; sell: number }> = {};
@@ -985,39 +1053,37 @@ export class CentralMarketStore {
       for (const bankKey of banks) {
         const bankConfig = BANK_CODE_MAP[bankKey];
 
-        /*
-         * ONE query per bank per side. Unchanged: 7 banks x 2 sides = 14
-         * requests per cycle. The six amount tiers are evaluated in memory by
-         * evaluateBankTiers over these same ads, so adding tiers costs nothing
-         * and no tier is ever served a price fetched for a different amount.
-         */
         try {
+          /*
+           * transAmount, so the depth problem stops costing real operations.
+           *
+           * Without it Binance returns the top 20 ads ORDERED BY PRICE, and a
+           * cheap ad that only accepts 50K sits below twenty ads that do not -
+           * invisible, so the 50K cell reported NO_AD while the operation
+           * existed. That is a false negative, and the honest fix is to ask
+           * Binance the question the cell actually asks.
+           *
+           * One tier per refresh, all banks, both sides: still 14 requests per
+           * tick, and the full six-tier sweep completes in six ticks. Asking
+           * for every tier at once would be 84 requests every 45s, which is a
+           * different system with a different rate-limit risk.
+           *
+           * A tier's ads are ONLY ever used for that tier. Nothing is shared
+           * across amounts, so no cell can inherit a price fetched for another.
+           */
           const [rawBuyAds, rawSellAds] = await Promise.all([
-            /*
-             * rows: 20, the only page size this project has OBSERVED Binance
-             * accept - it is what the unfiltered snapshot query uses, and that
-             * query works in production.
-             *
-             * This was 50, introduced with a comment asserting 50 was
-             * Binance's page size. That was an assumption, not an
-             * observation, and production answered every bank query with
-             * "000002 illegal parameter" - including BANESCO, whose payType
-             * Binance demonstrably publishes. A valid filter with an invalid
-             * page size leaves the page size as the cause.
-             *
-             * The request count is unchanged: one query per bank per side.
-             * Depth drops from 50 ads to 20, which may leave the 50K/100K
-             * tiers empty for want of book rather than for want of an offer -
-             * a smaller problem than the entire matrix being down.
-             */
             BinanceP2PService.queryP2PAds({
-              tradeType: 'BUY',
+              // ASK side: ads SELLING USDT, which is my purchase.
+              tradeType: mapBinanceAdToArbitrageLeg('BUY').tradeType,
               payTypes: bankConfig.apiPayTypes,
+              transAmount: tier.val,
               rows: 20,
             }),
             BinanceP2PService.queryP2PAds({
-              tradeType: 'SELL',
+              // BID side: ads BUYING USDT, which is my sale.
+              tradeType: mapBinanceAdToArbitrageLeg('SELL').tradeType,
               payTypes: bankConfig.apiPayTypes,
+              transAmount: tier.val,
               rows: 20,
             }),
           ]);
@@ -1056,19 +1122,30 @@ export class CentralMarketStore {
         }
       }
 
+      /*
+       * MERGE, not replace. Only this tick's tier was refetched; the other
+       * tiers keep the book and the capturedAt they were captured with.
+       */
       this.bankMatrixCache = {
         timestamp: Date.now(),
-        failedBanks,
-        adCounts,
-        adsByBank,
+        tiers: {
+          ...(this.bankMatrixCache?.tiers ?? {}),
+          [tier.key]: {
+            capturedAt: Date.now(),
+            adsByBank,
+            adCounts,
+            failedBanks,
+          },
+        },
       };
+      }
 
       /*
        * EXECUTABLE -> OPPORTUNITY, from the book just captured. Pure
        * computation over data already in memory: zero additional requests.
        */
       this.lastOpportunities = runOpportunityEngine({
-        byBank: this.deriveExecutability(adsByBank),
+        byBank: this.deriveExecutability(),
         bankOrder: Object.keys(BANK_CODE_MAP),
       });
     } catch (err) {

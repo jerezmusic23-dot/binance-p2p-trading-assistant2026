@@ -148,9 +148,9 @@ const CellView: React.FC<{ cell: ExecutableCell; onSelect?: () => void }> = ({
           */}
           <span
             className="text-[#848e9c]"
-            title="COMPRA ARBITRAJE: el precio al que YO compro USDT. Fuente: Binance ASK (anuncio que vende USDT). tradeType/API: BUY."
+            title="MI COMPRA: el precio al que YO compro USDT. Fuente: anuncio que VENDE USDT · Binance ASK · tradeType=BUY."
           >
-            Compra <span className="text-[8px] text-[#5e6673]">ASK</span>
+            MI COMPRA <span className="text-[8px] text-[#5e6673]">ASK</span>
           </span>
           <span className={buyPrice ? 'text-[#e0e0e0]' : 'text-[#5e6673] italic'}>
             {buyPrice ?? '—'}
@@ -159,9 +159,9 @@ const CellView: React.FC<{ cell: ExecutableCell; onSelect?: () => void }> = ({
         <div className="flex justify-between gap-1">
           <span
             className="text-[#848e9c]"
-            title="VENTA ARBITRAJE: el precio al que YO vendo USDT. Fuente: Binance BID (anuncio que compra USDT). tradeType/API: SELL."
+            title="MI VENTA: el precio al que YO vendo USDT. Fuente: anuncio que COMPRA USDT · Binance BID · tradeType=SELL."
           >
-            Venta <span className="text-[8px] text-[#5e6673]">BID</span>
+            MI VENTA <span className="text-[8px] text-[#5e6673]">BID</span>
           </span>
           <span className={sellPrice ? 'text-[#e0e0e0]' : 'text-[#5e6673] italic'}>
             {sellPrice ?? '—'}
@@ -258,7 +258,7 @@ export const BankMatrix: React.FC<BankMatrixProps> = ({
         <div>
           <h2 className="text-sm font-bold text-[#e0e0e0] uppercase tracking-wide flex items-center gap-2">
             <Building2 className="w-4 h-4 text-[#FCD535]" />
-            Tasas ejecutables
+            Mis operaciones por banco y monto
           </h2>
           <p className="text-[10px] text-[#848e9c] mt-0.5">
             Cada celda proviene de anuncios verificados de ese banco que aceptan ese monto y
@@ -353,11 +353,11 @@ export const BankMatrix: React.FC<BankMatrixProps> = ({
       </div>
 
       <p className="text-[10px] text-[#848e9c]">
-        <strong>COMPRA ARBITRAJE</strong> = el precio al que <em>tú</em> compras USDT ·
-        fuente <strong>Binance ASK</strong> (anuncio que vende USDT) · <code>tradeType=BUY</code>.
+        <strong>MI COMPRA</strong> = lo que <em>tú</em> pagas por cada USDT · anuncio que{' '}
+        <strong>VENDE</strong> USDT · Binance ASK · <code>tradeType=BUY</code>.
         <br />
-        <strong>VENTA ARBITRAJE</strong> = el precio al que <em>tú</em> vendes USDT ·
-        fuente <strong>Binance BID</strong> (anuncio que compra USDT) · <code>tradeType=SELL</code>.
+        <strong>MI VENTA</strong> = lo que <em>tú</em> recibes por cada USDT · anuncio que{' '}
+        <strong>COMPRA</strong> USDT · Binance BID · <code>tradeType=SELL</code>.
         <br />
         SPREAD firmado: <strong>((venta − recompra) / recompra) × 100</strong>. Un valor negativo
         se muestra negativo y se clasifica SIN ARBITRAJE — nunca se convierte en oportunidad.

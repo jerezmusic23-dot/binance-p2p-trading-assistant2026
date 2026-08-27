@@ -256,6 +256,9 @@ describe('the labels state the economics before the API parameter', () => {
     amountVes: 20_000,
     buyPrice: 940,
     sellPrice: 950,
+    // Same values under the unambiguous names.
+    arbitrageBuyPrice: 940,
+    arbitrageSellPrice: 950,
     buyAdvNo: 'a',
     sellAdvNo: 'b',
     spreadAbsolute: 10,

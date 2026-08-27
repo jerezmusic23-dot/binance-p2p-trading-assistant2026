@@ -19,6 +19,7 @@
  * layer decides executability - not the UI, not the notifier.
  */
 
+import { mapBinanceAdToArbitrageLeg } from './arbitrageSides.js';
 import {
   BankAmountExecutability,
   ExecutabilityRejection,
@@ -40,6 +41,11 @@ export const AMOUNT_TIERS: { key: string; val: number }[] = [
 ];
 
 /** What Binance published about this ad's volume, without interpretation. */
+/**
+ * ARBITRAGE_BUY quotes come from tradeType 'BUY' - ads SELLING USDT, my entry.
+ * ARBITRAGE_SELL quotes come from tradeType 'SELL' - ads BUYING USDT, my exit.
+ * Both statements are made by arbitrageSides.ts and read from it here.
+ */
 export function classifyLiquidity(availableUsdtReported: number | null): LiquidityStatus {
   if (availableUsdtReported === null || !Number.isFinite(availableUsdtReported)) {
     return 'LIQUIDITY_NOT_VERIFIABLE';
@@ -202,9 +208,19 @@ export function evaluateBankAmount(params: {
   const buyQuotes = allBuy.filter((q) => q.provenance === 'EXECUTABLE');
   const sellQuotes = allSell.filter((q) => q.provenance === 'EXECUTABLE');
 
-  // RECOMPRA: I want to pay the least.  VENTA: I want to receive the most.
-  const bestExecutableBuy = pickBest(buyQuotes, (c, i) => c < i);
-  const bestExecutableSell = pickBest(sellQuotes, (c, i) => c > i);
+  /*
+   * Which extreme is best comes from the leg definition, not from a comment.
+   * mapBinanceAdToArbitrageLeg is the only place that knows a tradeType 'BUY'
+   * ad is my purchase; asking it here means this file cannot drift from it.
+   */
+  const askLeg = mapBinanceAdToArbitrageLeg('BUY');
+  const bidLeg = mapBinanceAdToArbitrageLeg('SELL');
+  const bestExecutableBuy = pickBest(buyQuotes, (c, i) =>
+    askLeg.bestIs === 'LOWEST' ? c < i : c > i
+  );
+  const bestExecutableSell = pickBest(sellQuotes, (c, i) =>
+    bidLeg.bestIs === 'LOWEST' ? c < i : c > i
+  );
 
   const noneReason = (side: 'compra' | 'venta', evaluated: number) =>
     evaluated === 0

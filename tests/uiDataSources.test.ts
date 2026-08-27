@@ -54,7 +54,7 @@ describe('TEST 8 - the Header never presents an executable rate', () => {
 describe('TEST 9 - MainOverview never builds an opportunity from the global snapshot', () => {
   it('delegates the opportunity to the card fed by the backend', () => {
     const overview = code(SRC, 'MainOverview.tsx');
-    expect(overview).toMatch(/OpportunityCard/);
+    expect(overview).toMatch(/MyOperationPanel/);
   });
 
   it('labels its global card as reference, not as a rate', () => {
@@ -81,7 +81,7 @@ describe('TEST 9 - MainOverview never builds an opportunity from the global snap
       overview.indexOf('const getTrendIcon')
     );
 
-    expect(guard).toMatch(/<OpportunityCard \/>/);
+    expect(guard).toMatch(/<MyOperationPanel \/>/);
   });
 });
 
@@ -91,7 +91,7 @@ describe('TEST 14 - no component derives an opportunity from global prices', () 
    * they are the market level and that is legitimate. What they may never do
    * is appear in a component that declares an opportunity.
    */
-  const OPPORTUNITY_COMPONENTS = ['OpportunityCard.tsx', 'BankMatrix.tsx'];
+  const OPPORTUNITY_COMPONENTS = ['MyOperationPanel.tsx', 'BankMatrix.tsx'];
 
   for (const file of OPPORTUNITY_COMPONENTS) {
     it(`${file} never reads a global price`, () => {
@@ -163,8 +163,9 @@ describe('TEST 10 - BankMatrix consumes the executable matrix and nothing else',
 
     expect(matrix).toMatch(/bankDisplayNames/);
     expect(matrix).toMatch(/amountKeys/);
-    expect(matrix).toMatch(/Compra/);
-    expect(matrix).toMatch(/Venta/);
+    // Economics first: the column says what the user does, not what the API calls it.
+    expect(matrix).toMatch(/MI COMPRA/);
+    expect(matrix).toMatch(/MI VENTA/);
     expect(matrix).toMatch(/Spread/);
     expect(matrix).toMatch(/Liquidez/);
   });
@@ -172,7 +173,7 @@ describe('TEST 10 - BankMatrix consumes the executable matrix and nothing else',
 
 describe('TEST 11 / 12 - one source of truth for the opportunity', () => {
   it('the UI reads the same endpoint the notifier is fed from', () => {
-    const card = code(SRC, 'OpportunityCard.tsx');
+    const card = code(SRC, 'MyOperationPanel.tsx');
     expect(card).toMatch(/getOpportunities/);
 
     const api = code(SRC, 'api.ts');
@@ -261,7 +262,7 @@ describe('TEST 12 (backend) - no Math.abs on an economic spread', () => {
     expect(occurrences).toHaveLength(1);
     expect(service).toMatch(/spreadAbsolute[\s\S]{0,200}Math\.abs/);
 
-    for (const file of ['MainOverview.tsx', 'BankMatrix.tsx', 'OpportunityCard.tsx', 'Header.tsx']) {
+    for (const file of ['MainOverview.tsx', 'BankMatrix.tsx', 'MyOperationPanel.tsx', 'Header.tsx']) {
       expect(code(SRC, file)).not.toMatch(/Math\.abs/);
     }
   });
@@ -278,7 +279,7 @@ describe('TEST 13 - the leader-plus-one-cent path is gone', () => {
   });
 
   it('no client module does either', () => {
-    for (const file of ['BankMatrix.tsx', 'OpportunityCard.tsx', 'types.ts', 'api.ts']) {
+    for (const file of ['BankMatrix.tsx', 'MyOperationPanel.tsx', 'types.ts', 'api.ts']) {
       const src = code(SRC, file);
       expect(src).not.toMatch(/leaderPrice/);
       expect(src).not.toMatch(/suggestedPrice/);
@@ -294,7 +295,7 @@ describe('TEST 13 - the leader-plus-one-cent path is gone', () => {
 });
 
 describe('the request budget stayed flat', () => {
-  it('the matrix refresh issues one query per bank per side and no transAmount', () => {
+  it('the matrix refresh issues one query per bank per side, for ONE amount tier', () => {
     const store = code(SERVER, 'centralStore.ts');
 
     // Exactly two queryP2PAds calls inside refreshBankMatrix.
@@ -304,8 +305,16 @@ describe('the request budget stayed flat', () => {
     );
     const calls = refresh.match(/BinanceP2PService\.queryP2PAds\(/g) ?? [];
 
+    /*
+     * Still two queryP2PAds calls inside the bank loop - 7 banks x 2 sides =
+     * 14 requests per tick, unchanged. What changed is that each tick asks
+     * about ONE amount tier and rotates, so Binance filters by transAmount and
+     * the top-20 depth problem stops hiding ads that accept the amount. The
+     * full six-tier sweep takes six ticks.
+     */
     expect(calls).toHaveLength(2);
-    expect(refresh).not.toMatch(/transAmount/);
+    expect(refresh).toMatch(/transAmount: tier\.val/);
+    expect(refresh).toMatch(/matrixTierCursor/);
     expect(refresh).toMatch(/rows: 20/);
   });
 });

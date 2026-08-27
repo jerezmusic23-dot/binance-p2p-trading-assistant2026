@@ -576,7 +576,19 @@ describe('FASE 5 - the matrix is the executable matrix', () => {
     const { executableMatrix } = await store.getExecutableMatrix(true);
 
     const bankCount = Object.keys(BANK_CODE_MAP).length;
-    expect(mock).toHaveBeenCalledTimes(bankCount * 2);
+    /*
+     * CONTRACT CHANGE: a cold cache does a FULL SWEEP.
+     *
+     * The tiers used to be filtered in memory from one book per bank per side,
+     * which is why this asserted 14. That book was Binance's top 20 ORDERED BY
+     * PRICE, so a cheap ad accepting only 50K sat below twenty ads that did
+     * not and never reached the 50K cell - a false negative on a real
+     * operation. Each tier is now its own question, with transAmount.
+     *
+     * 7 banks x 2 sides x 6 tiers = 84, paid once when the cache is cold.
+     * Steady state rotates one tier per tick and stays at 14.
+     */
+    expect(mock).toHaveBeenCalledTimes(bankCount * 2 * 6);
     expect(executableMatrix.amountKeys).toEqual(['10K', '20K', '30K', '40K', '50K', '100K']);
     expect(Object.keys(executableMatrix.cells.BANESCO)).toEqual([
       '10K',
@@ -664,7 +676,19 @@ describe('FASE 4 - executability from the captured book', () => {
 
     const result = await store.getExecutability(true);
 
-    expect(mock).toHaveBeenCalledTimes(Object.keys(BANK_CODE_MAP).length * 2);
+    /*
+     * CONTRACT CHANGE: a cold cache does a FULL SWEEP.
+     *
+     * The tiers used to be filtered in memory from one book per bank per side,
+     * which is why this asserted 14. That book was Binance's top 20 ORDERED BY
+     * PRICE, so a cheap ad accepting only 50K sat below twenty ads that did
+     * not and never reached the 50K cell - a false negative on a real
+     * operation. Each tier is now its own question, with transAmount.
+     *
+     * 7 banks x 2 sides x 6 tiers = 84, paid once when the cache is cold.
+     * Steady state rotates one tier per tick and stays at 14.
+     */
+    expect(mock).toHaveBeenCalledTimes(Object.keys(BANK_CODE_MAP).length * 2 * 6);
     expect(result.amountKeys).toEqual(['10K', '20K', '30K', '40K', '50K', '100K']);
   });
 
@@ -753,7 +777,19 @@ describe('FASE 6 - BEST_OPPORTUNITY end to end', () => {
 
     const { result } = await store.getOpportunities(true);
 
-    expect(mock).toHaveBeenCalledTimes(Object.keys(BANK_CODE_MAP).length * 2);
+    /*
+     * CONTRACT CHANGE: a cold cache does a FULL SWEEP.
+     *
+     * The tiers used to be filtered in memory from one book per bank per side,
+     * which is why this asserted 14. That book was Binance's top 20 ORDERED BY
+     * PRICE, so a cheap ad accepting only 50K sat below twenty ads that did
+     * not and never reached the 50K cell - a false negative on a real
+     * operation. Each tier is now its own question, with transAmount.
+     *
+     * 7 banks x 2 sides x 6 tiers = 84, paid once when the cache is cold.
+     * Steady state rotates one tier per tick and stays at 14.
+     */
+    expect(mock).toHaveBeenCalledTimes(Object.keys(BANK_CODE_MAP).length * 2 * 6);
     expect(result.bestOpportunity?.bank).toBe('BANESCO');
     expect(result.bestOpportunity?.buyPrice).toBe(919);
     expect(result.bestOpportunity?.sellPrice).toBe(921.5);

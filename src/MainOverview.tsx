@@ -18,7 +18,7 @@ import {
 } from 'lucide-react';
 import { MarketSnapshot, MarketAnalysis, MarketProjections } from './types';
 import { ProvenanceTag, InsufficientDataNotice, StaleTag } from './ProvenanceTag';
-import { OpportunityCard } from './OpportunityCard';
+import { MyOperationPanel } from './MyOperationPanel';
 import { fmt, fmtPct, fmtSignedPct, fmtInt, fmtText, NO_DATA } from './format';
 
 interface MainOverviewProps {
@@ -56,10 +56,7 @@ export const MainOverview: React.FC<MainOverviewProps> = ({
     return (
       <div className="space-y-4">
         <section aria-label="Oportunidades ejecutables">
-          <h2 className="text-[10px] uppercase text-[#FCD535] font-bold tracking-wider mb-2">
-            Oportunidades ejecutables (banco + monto)
-          </h2>
-          <OpportunityCard />
+          <MyOperationPanel />
         </section>
 
         <div id="overview-loading" className="p-8 text-center bg-[#181a20] rounded-lg border border-[#2b2f36]">
@@ -253,10 +250,7 @@ export const MainOverview: React.FC<MainOverviewProps> = ({
         bank and one amount. The cards below it are market context.
       */}
       <section aria-label="Oportunidades ejecutables">
-        <h2 className="text-[10px] uppercase text-[#FCD535] font-bold tracking-wider mb-2">
-          Oportunidades ejecutables (banco + monto)
-        </h2>
-        <OpportunityCard />
+        <MyOperationPanel />
       </section>
 
       {/* 4 Primary Metric Cards - MERCADO GLOBAL: contexto, no cotizacion */}

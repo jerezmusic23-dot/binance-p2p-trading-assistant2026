@@ -500,6 +500,19 @@ export interface Opportunity {
   amountVes: number;
   buyPrice: number;
   sellPrice: number;
+  /**
+   * THE UNAMBIGUOUS NAMES. Identical values to buyPrice / sellPrice above.
+   *
+   * arbitrageBuyPrice is what I PAY to acquire USDT - the ASK, from an ad that
+   * SELLS USDT, fetched with tradeType 'BUY'. arbitrageSellPrice is what I
+   * RECEIVE - the BID, from an ad that BUYS USDT, tradeType 'SELL'.
+   *
+   * The short names are kept for the persisted history and existing consumers;
+   * every human-facing surface reads these, because "buyPrice" on its own has
+   * meant two opposite things to two readers.
+   */
+  arbitrageBuyPrice: number;
+  arbitrageSellPrice: number;
   buyAdvNo: string;
   sellAdvNo: string;
   spreadAbsolute: number;

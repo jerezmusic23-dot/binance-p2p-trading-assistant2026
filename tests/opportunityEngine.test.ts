@@ -568,6 +568,9 @@ describe('TEST 25 / 26 / 27 / 28 / 29 - BEST_OPPORTUNITY', () => {
       amountVes: 20_000,
       buyPrice,
       sellPrice,
+      // Same values under the unambiguous names.
+      arbitrageBuyPrice: buyPrice,
+      arbitrageSellPrice: sellPrice,
       buyAdvNo: 'b',
       sellAdvNo: 's',
       spreadAbsolute: sellPrice - buyPrice,
@@ -799,9 +802,17 @@ describe('TEST 30 / 31 / 32 / 33 / 36 - purity of the engine', () => {
         `from './${forbidden.toLowerCase()}`
       );
     }
-    // Its only import is the type module.
+    /*
+     * Only PURE modules. arbitrageSides.js joins types.js: it holds the
+     * Binance-to-user translation and the spread formula as constants and pure
+     * functions, with no state, no I/O and no imports of its own. Owning the
+     * sign convention in one place is what keeps this engine from carrying a
+     * second copy of it.
+     */
     const imports = source.match(/from '[^']+'/g) ?? [];
-    expect(imports).toEqual(["from './types.js'"]);
+    expect(new Set(imports)).toEqual(
+      new Set(["from './types.js'", "from './arbitrageSides.js'"])
+    );
   });
 
   it('TEST 30: introduces no heuristic scoring', () => {

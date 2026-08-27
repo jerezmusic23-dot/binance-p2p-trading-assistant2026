@@ -43,6 +43,9 @@ function makeOpportunity(overrides: Partial<Opportunity> = {}): Opportunity {
     amountVes: 50_000,
     buyPrice,
     sellPrice,
+    // Same values under the unambiguous names.
+    arbitrageBuyPrice: buyPrice,
+    arbitrageSellPrice: sellPrice,
     buyAdvNo: 'BUY-1',
     sellAdvNo: 'SELL-1',
     spreadAbsolute: sellPrice - buyPrice,

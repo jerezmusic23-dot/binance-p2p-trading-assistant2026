@@ -19,6 +19,7 @@
  * can feed it without this module knowing the store exists.
  */
 
+import { arbitrageSpreadPct, arbitrageSpreadVes } from './arbitrageSides.js';
 import {
   BankAmountExecutability,
   ExecutableQuote,
@@ -67,8 +68,12 @@ export function buildOpportunity(cell: BankAmountExecutability): Opportunity | n
    * decimal (0.0858%), and rounding would collapse genuinely different
    * opportunities into artificial ties during selection.
    */
-  const spreadAbsolute = sellPrice - buyPrice;
-  const spreadPct = ((sellPrice - buyPrice) / buyPrice) * 100;
+  /*
+   * Computed by arbitrageSides.ts, which owns the formula. Two copies of a
+   * sign convention is one copy too many.
+   */
+  const spreadAbsolute = arbitrageSpreadVes(buyPrice, sellPrice);
+  const spreadPct = arbitrageSpreadPct(buyPrice, sellPrice);
 
   const buyAvailableUsdt = buy.availableUsdt;
   const sellAvailableUsdt = sell.availableUsdt;
@@ -92,6 +97,15 @@ export function buildOpportunity(cell: BankAmountExecutability): Opportunity | n
     amountVes: cell.amountVes,
     buyPrice,
     sellPrice,
+    /*
+     * The same two numbers under names that cannot be misread. buyPrice and
+     * sellPrice stay because the persisted history and every existing consumer
+     * use them; these are what new code and every human-facing surface read,
+     * because "buyPrice" alone has meant two different things to two readers
+     * and that is precisely the defect.
+     */
+    arbitrageBuyPrice: buyPrice,
+    arbitrageSellPrice: sellPrice,
     buyAdvNo: buy.advNo,
     sellAdvNo: sell.advNo,
     spreadAbsolute,
