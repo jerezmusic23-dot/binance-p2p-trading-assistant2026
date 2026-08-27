@@ -19,6 +19,7 @@ import {
 import { MarketSnapshot, MarketAnalysis, MarketProjections } from './types';
 import { ProvenanceTag, InsufficientDataNotice, StaleTag } from './ProvenanceTag';
 import { MyOperationPanel } from './MyOperationPanel';
+import { PublishPanel } from './PublishPanel';
 import { fmt, fmtPct, fmtSignedPct, fmtInt, fmtText, NO_DATA } from './format';
 
 interface MainOverviewProps {
@@ -31,7 +32,7 @@ interface MainOverviewProps {
   /** True when analysis/projections could not be refreshed and are the last known good values. */
   derivedStale?: boolean;
   derivedAgeSeconds?: number;
-  onNavigateTab: (tab: 'projections' | 'matrix' | 'orderbook' | 'history') => void;
+  onNavigateTab: (tab: 'publish' | 'projections' | 'matrix' | 'orderbook' | 'history') => void;
 }
 
 export const MainOverview: React.FC<MainOverviewProps> = ({
@@ -55,6 +56,10 @@ export const MainOverview: React.FC<MainOverviewProps> = ({
   if (!snapshot || snapshot.strategicBuyPrice === null) {
     return (
       <div className="space-y-4">
+        <section aria-label="Precios a publicar">
+          <PublishPanel onOpenMatrix={() => onNavigateTab('publish')} />
+        </section>
+
         <section aria-label="Oportunidades ejecutables">
           <MyOperationPanel />
         </section>
@@ -249,6 +254,15 @@ export const MainOverview: React.FC<MainOverviewProps> = ({
         fed by /market/opportunities, which is the executability cell for one
         bank and one amount. The cards below it are market context.
       */}
+      {/*
+        WHAT TO PUBLISH, first. The operator is a maker: this is the question
+        they open the app to answer, and it comes before anything about taking
+        somebody else's ad.
+      */}
+      <section aria-label="Precios a publicar">
+        <PublishPanel onOpenMatrix={() => onNavigateTab('publish')} />
+      </section>
+
       <section aria-label="Oportunidades ejecutables">
         <MyOperationPanel />
       </section>

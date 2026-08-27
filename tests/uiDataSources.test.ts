@@ -268,8 +268,24 @@ describe('TEST 12 (backend) - no Math.abs on an economic spread', () => {
   });
 });
 
-describe('TEST 13 - the leader-plus-one-cent path is gone', () => {
-  it('no server module builds a suggested price by undercutting the leader', () => {
+/*
+ * TEST 13, REWRITTEN - and the rewrite is the point.
+ *
+ * This block used to assert that the string `leaderPrice` appeared nowhere,
+ * because the old dashboard undercut the leader by a hardcoded 0.01 and
+ * presented the result as an executable rate. That WAS wrong: as an arbitrage
+ * quote it measured nothing, and its "spread" column was that same cent
+ * expressed as a percentage.
+ *
+ * What the ban got wrong is that beating the leader by one tick is exactly
+ * right for a MAKER - it is the whole question "what price do I publish?" -
+ * and the operator publishes ads. So the rule is not "never beat the leader".
+ * It is: only the maker modules may, the step must be observed rather than
+ * hardcoded, and the result must never be presented as a rate someone can
+ * take. Those three are what this block now pins.
+ */
+describe('TEST 13 - only the maker path may price against the leader', () => {
+  it('no taker module builds a rate by undercutting the leader', () => {
     for (const file of ['centralStore.ts', 'executableMatrix.ts', 'executability.ts']) {
       const src = code(SERVER, file);
       expect(src).not.toMatch(/leaderPrice/);
@@ -278,12 +294,38 @@ describe('TEST 13 - the leader-plus-one-cent path is gone', () => {
     }
   });
 
-  it('no client module does either', () => {
-    for (const file of ['BankMatrix.tsx', 'MyOperationPanel.tsx', 'types.ts', 'api.ts']) {
+  it('no taker client module does either', () => {
+    for (const file of ['BankMatrix.tsx', 'MyOperationPanel.tsx', 'api.ts']) {
       const src = code(SRC, file);
       expect(src).not.toMatch(/leaderPrice/);
       expect(src).not.toMatch(/suggestedPrice/);
     }
+  });
+
+  it('the maker engine never hardcodes the cent it beats the leader by', () => {
+    for (const file of ['makerStrategy.ts', 'makerRecommendation.ts', 'makerMatrix.ts']) {
+      const src = code(SERVER, file);
+      expect(src).not.toMatch(/\+ 0\.01/);
+      expect(src).not.toMatch(/= 0\.01/);
+    }
+    // The step is derived from observed decimals, and can come back unknown.
+    expect(code(SERVER, 'makerStrategy.ts')).toMatch(/export function deriveTick/);
+    expect(code(SERVER, 'makerStrategy.ts')).toMatch(/tickProvenance/);
+  });
+
+  it('no minimum-margin constant was invented to decide what to publish', () => {
+    const src = code(SERVER, 'makerRecommendation.ts');
+    // 0.30%, 0.50% and friends: a threshold nobody measured.
+    expect(src).not.toMatch(/0\.3|0\.5|MIN_MARGIN|minMargin/);
+    // Break-even, which is arithmetic rather than a tuned parameter.
+    expect(src).toMatch(/grossMarginVes > 0/);
+  });
+
+  it('the maker price is never presented as a rate someone can take', () => {
+    const src = code(SRC, 'MakerMatrix.tsx');
+    expect(src).toMatch(/MARGEN BRUTO/);
+    expect(src).not.toMatch(/ganancia|beneficio neto\b(?!\.)/i);
+    expect(src).toMatch(/ESTIMACIÓN/);
   });
 
   it('the parallel min/max filter no longer exists', () => {
@@ -316,6 +358,52 @@ describe('the request budget stayed flat', () => {
     expect(refresh).toMatch(/transAmount: tier\.val/);
     expect(refresh).toMatch(/matrixTierCursor/);
     expect(refresh).toMatch(/rows: 20/);
+  });
+});
+
+/*
+ * The maker screens are new, and the wiring defect they could develop is the
+ * same one FASE 5 removed from the taker screens: a component reaching for a
+ * number it can derive itself instead of the one the backend decided. These
+ * assertions close that door before it opens.
+ */
+describe('the maker interface renders decisions rather than making them', () => {
+  it('neither maker component derives a price, a tick or a margin', () => {
+    for (const file of ['MakerMatrix.tsx', 'PublishPanel.tsx']) {
+      const src = code(SRC, file);
+      // No price arithmetic: the server already produced every number shown.
+      expect(src).not.toMatch(/priceToBeat|deriveTick|grossMarginVes\s*=/);
+      expect(src).not.toMatch(/\+ 0\.01|- 0\.01/);
+      // No re-ranking of cells: `best` is chosen server-side.
+      expect(src).not.toMatch(/\.sort\(/);
+    }
+  });
+
+  it('reads the maker matrix and nothing else', () => {
+    for (const file of ['MakerMatrix.tsx', 'PublishPanel.tsx']) {
+      const src = code(SRC, file);
+      expect(src).toMatch(/ApiService\.getMakerMatrix/);
+      expect(src).not.toMatch(/strategicBuyPrice|strategicSellPrice|bestBuyPrice|bestSellPrice/);
+      expect(src).not.toMatch(/getExecutableMatrix|getOpportunities/);
+    }
+  });
+
+  it('never prints an unknown as a number', () => {
+    for (const file of ['MakerMatrix.tsx', 'PublishPanel.tsx']) {
+      const src = code(SRC, file);
+      // Every nullable figure is guarded and rendered in words.
+      expect(src).toMatch(/queueAheadUsdt === null/);
+      expect(src).toMatch(/no verificable/);
+      expect(src).not.toMatch(/\?\? 0\b/);
+    }
+  });
+
+  it('the panel and Telegram cannot disagree about what to publish', () => {
+    const routes = code(SERVER, 'routes.ts');
+    const store = code(SERVER, 'centralStore.ts');
+    // One function decides the best cell for both surfaces.
+    expect(routes).toMatch(/selectBestMakerCell\(makerMatrix\)/);
+    expect(store).toMatch(/selectBestMakerCell\(matrix\)/);
   });
 });
 

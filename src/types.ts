@@ -488,6 +488,158 @@ export interface ExecutableMatrixResponse {
   executableMatrix: ExecutableMatrix;
 }
 
+/* ==========================================================================
+ * THE MAKER SIDE: what price MY ad should carry.
+ *
+ * Mirrors server/makerStrategy.ts, server/makerRecommendation.ts and
+ * server/makerMatrix.ts field for field. The frontend computes NOTHING from
+ * these: not a price, not a position, not a margin. Every number was decided
+ * server-side over a captured book, and this file exists so the UI can render
+ * that decision without being able to reach a second one.
+ *
+ * The vocabulary is the operator's, not Binance's. MAKER_BUY is "publico un
+ * anuncio que COMPRA USDT", and the ads it competes with are the ones Binance
+ * returns under tradeType=SELL - the mirror lives on the server and is not
+ * re-derived here.
+ * ========================================================================== */
+
+export type MakerSide = 'MAKER_BUY' | 'MAKER_SELL';
+
+export interface MakerSideDefinition {
+  side: MakerSide;
+  myAction: 'COMPRO USDT' | 'VENDO USDT';
+  iHave: 'VES' | 'USDT';
+  seenBy: string;
+  listingTradeType: 'BUY' | 'SELL';
+  competitorsAre: string;
+  leaderIs: 'HIGHEST' | 'LOWEST';
+  beatDirection: 'UP' | 'DOWN';
+  label: string;
+}
+
+export interface MakerLadderEntry {
+  position: number;
+  price: number;
+  priceToBeat: number | null;
+  deltaFromLeader: number;
+  advNo: string;
+  merchant: string;
+  availableUsdt: number | null;
+}
+
+export interface MakerSideAnalysis {
+  side: MakerSide;
+  definition: MakerSideDefinition;
+  bank: string;
+  amountVes: number;
+  adsExamined: number;
+  competitors: number;
+  irrelevanceTally: Record<string, number>;
+  ladder: MakerLadderEntry[];
+  leaderPrice: number | null;
+  secondPrice: number | null;
+  thirdPrice: number | null;
+  tick: number | null;
+  tickProvenance: 'OBSERVED' | 'NOT_VERIFIABLE';
+  priceToBeFirst: number | null;
+  capturedAt: number;
+  reason: string | null;
+}
+
+export interface MakerPricePoint {
+  side: MakerSide;
+  position: number;
+  price: number;
+  beatsAdvNo: string;
+  beatsPrice: number;
+  beatsMerchant: string;
+  gapBehindLeader: number;
+  /** null means unknown volume, never zero volume. */
+  queueAheadUsdt: number | null;
+  queueAheadVerifiable: boolean;
+}
+
+export interface MakerPairing {
+  position: number;
+  buy: MakerPricePoint;
+  sell: MakerPricePoint;
+  /** MARGEN BRUTO in VES per USDT. Signed: a losing pair reads negative. */
+  grossMarginVes: number;
+  grossMarginPct: number | null;
+}
+
+export type MakerRecommendationBasis =
+  | 'FIRST_POSITION_PROFITABLE'
+  | 'DEEPER_POSITION_REQUIRED'
+  | 'NO_PROFITABLE_POSITION'
+  | 'INSUFFICIENT_DATA';
+
+export interface MakerRecommendation {
+  bank: string;
+  amountVes: number;
+  capturedAt: number;
+  buyAnalysis: MakerSideAnalysis;
+  sellAnalysis: MakerSideAnalysis;
+  /** Always present, even when the engine recommends a deeper position. */
+  priceToBeFirstBuy: number | null;
+  priceToBeFirstSell: number | null;
+  firstPositionPairing: MakerPairing | null;
+  recommended: MakerPairing | null;
+  basis: MakerRecommendationBasis;
+  alternatives: MakerPairing[];
+  bestMarginPairing: MakerPairing | null;
+  reason: string | null;
+}
+
+export type MakerCellStatus =
+  | 'PUBLISH_AT_TOP'
+  | 'PUBLISH_DEEPER'
+  | 'NO_MARGIN'
+  | 'NO_DATA'
+  | 'FETCH_FAILED'
+  | 'STALE';
+
+export interface MakerMatrixCell {
+  bank: string;
+  bankDisplayName: string;
+  amountKey: string;
+  amountVes: number;
+  status: MakerCellStatus;
+  recommendation: MakerRecommendation | null;
+  capturedAt: number;
+  ageSeconds: number;
+  adsReturned: { buyListing: number; sellListing: number };
+  reason: string | null;
+}
+
+export interface MakerConfig {
+  excludeMerchants: string[];
+  publisherFilter: 'ALL' | 'MERCHANT_ONLY' | 'NON_MERCHANT_ONLY';
+  ladderDepth: number;
+}
+
+export interface MakerMatrix {
+  capturedAt: number;
+  ageSeconds: number;
+  stale: boolean;
+  staleAfterSeconds: number;
+  bankOrder: string[];
+  bankDisplayNames: Record<string, string>;
+  amountKeys: string[];
+  cells: Record<string, Record<string, MakerMatrixCell>>;
+  config: MakerConfig;
+}
+
+export interface MakerMatrixResponse {
+  makerMatrix: MakerMatrix;
+  /**
+   * The cell with the largest MARGEN BRUTO right now, chosen server-side by
+   * the same function that decides what Telegram announces. The interface
+   * never ranks cells itself.
+   */
+  best: MakerMatrixCell | null;
+}
+
 /**
  * One real operation: a bank, an amount, two executable legs.
  *

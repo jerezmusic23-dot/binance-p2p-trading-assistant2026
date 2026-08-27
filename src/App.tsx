@@ -21,6 +21,7 @@ import {
 import { MainOverview } from './MainOverview';
 import { DailyFluctuationChart } from './DailyFluctuationChart';
 import { BankMatrix } from './BankMatrix';
+import { MakerMatrix } from './MakerMatrix';
 import { OrderBookView } from './OrderBookView';
 import { HistoryAndBacktest } from './HistoryAndBacktest';
 import { AlertsManager } from './AlertsManager';
@@ -38,6 +39,7 @@ import type {
 
 type TabType =
   | 'overview'
+  | 'publish'
   | 'projections'
   | 'matrix'
   | 'orderbook'
@@ -520,6 +522,9 @@ export default function App() {
             analysis={analysis}
           />
         )}
+
+        {/* WHAT PRICE MY OWN AD SHOULD CARRY */}
+        {activeTab === 'publish' && <MakerMatrix />}
 
         {/* MATRIX */}
         {activeTab === 'matrix' && (

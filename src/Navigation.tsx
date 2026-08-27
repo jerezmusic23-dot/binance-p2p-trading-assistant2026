@@ -6,9 +6,17 @@ import {
   BookOpen,
   History,
   Bell,
+  Tag,
 } from 'lucide-react';
 
-export type TabType = 'overview' | 'projections' | 'matrix' | 'orderbook' | 'history' | 'alerts';
+export type TabType =
+  | 'overview'
+  | 'publish'
+  | 'projections'
+  | 'matrix'
+  | 'orderbook'
+  | 'history'
+  | 'alerts';
 
 interface NavigationProps {
   activeTab: TabType;
@@ -26,6 +34,13 @@ export const Navigation: React.FC<NavigationProps> = ({
       id: 'overview',
       label: 'Panel Principal',
       icon: <LayoutDashboard className="w-4 h-4" />,
+    },
+    {
+      /* The maker screen sits right after the dashboard: it is the answer the
+         operator opens the app for. */
+      id: 'publish',
+      label: 'Mis Precios para Publicar',
+      icon: <Tag className="w-4 h-4" />,
     },
     {
       id: 'projections',

@@ -24,6 +24,10 @@ import {
 import { BinanceP2PService, BANK_CODE_MAP } from './binanceP2PService.js';
 import { countVerifications } from './bankMatching.js';
 import { AMOUNT_TIERS, evaluateBankAmount } from './executability.js';
+import { evaluateMakerAlerts, type AnnouncedPublication } from './makerAlerts.js';
+import { buildMakerMatrix, selectBestMakerCell, type MakerMatrix } from './makerMatrix.js';
+import type { CapturedListings } from './makerRecommendation.js';
+import { readMakerConfig, type MakerConfig } from './makerStrategy.js';
 import { runOpportunityEngine } from './opportunityEngine.js';
 import { BacktestEngine } from './backtestEngine.js';
 
@@ -105,6 +109,16 @@ export class CentralMarketStore {
    * its own capturedAt, because they are refreshed on a rotation and their
    * ages genuinely differ.
    */
+  /**
+   * Read once at construction. Empty by design: the operator asked for the
+   * exclusion capability to exist and to stay unconfigured until they publish
+   * ads under a nickname worth excluding.
+   */
+  private readonly makerConfig: MakerConfig = readMakerConfig();
+
+  /** The last price pair the operator was told to publish. */
+  private announcedPublication: AnnouncedPublication | null = null;
+
   private bankMatrixCache: {
     /** Last time ANY tier was refreshed. */
     timestamp: number;
@@ -955,6 +969,106 @@ export class CentralMarketStore {
    * filtering for us, and trusting a remote filter we cannot inspect would be
    * exactly the kind of assumption this project keeps paying for.
    */
+  /**
+   * THE MAKER MATRIX: what price to publish at every BANCO x MONTO.
+   *
+   * Reads the SAME captured book the executable matrix reads and issues no
+   * request of its own. The two matrices answer different questions - "what
+   * should I publish?" against "could I take an ad?" - over one capture.
+   *
+   * The listings are handed over keyed by the tradeType they were REQUESTED
+   * with, not by what they mean to me. `adsByBank[bank].buy` is the answer to
+   * tradeType='BUY' and `.sell` the answer to tradeType='SELL'; which of the
+   * two my buy ad competes in is makerStrategy's business, not this method's,
+   * and that is the whole reason the mirror is applied in exactly one place.
+   */
+  public async getMakerMatrix(forceRefresh = false): Promise<MakerMatrix> {
+    const isCacheFresh =
+      this.bankMatrixCache && Date.now() - this.bankMatrixCache.timestamp < MATRIX_STALE_AFTER_MS;
+    if (forceRefresh || !isCacheFresh) {
+      await this.refreshBankMatrix(true);
+    }
+
+    const bankOrder = Object.keys(BANK_CODE_MAP);
+    const bankDisplayNames: Record<string, string> = {};
+    const bankAllowedCodes: Record<string, readonly string[]> = {};
+    for (const bank of bankOrder) {
+      bankDisplayNames[bank] = BANK_CODE_MAP[bank].displayName;
+      bankAllowedCodes[bank] = BANK_CODE_MAP[bank].apiPayTypes;
+    }
+
+    return buildMakerMatrix({
+      bankOrder,
+      bankDisplayNames,
+      bankAllowedCodes,
+      amounts: AMOUNT_TIERS,
+      listingsByTier: this.tierListings(),
+      failedBanksByTier: this.tierFailedBanks(),
+      capturedAtByTier: this.tierCapturedAt(),
+      capturedAt: this.bankMatrixCache?.timestamp ?? 0,
+      config: this.makerConfig,
+    });
+  }
+
+  /**
+   * Builds the maker matrix from the book just captured and sends whatever it
+   * changed.
+   *
+   * Failures here must never take down a refresh: the matrix, the executable
+   * cells and the opportunity engine are all already computed by this point,
+   * and a Telegram outage is not a reason to lose them.
+   */
+  private announceMakerAlerts(): void {
+    try {
+      const bankOrder = Object.keys(BANK_CODE_MAP);
+      const bankDisplayNames: Record<string, string> = {};
+      const bankAllowedCodes: Record<string, readonly string[]> = {};
+      for (const bank of bankOrder) {
+        bankDisplayNames[bank] = BANK_CODE_MAP[bank].displayName;
+        bankAllowedCodes[bank] = BANK_CODE_MAP[bank].apiPayTypes;
+      }
+
+      const matrix = buildMakerMatrix({
+        bankOrder,
+        bankDisplayNames,
+        bankAllowedCodes,
+        amounts: AMOUNT_TIERS,
+        listingsByTier: this.tierListings(),
+        failedBanksByTier: this.tierFailedBanks(),
+        capturedAtByTier: this.tierCapturedAt(),
+        capturedAt: this.bankMatrixCache?.timestamp ?? 0,
+        config: this.makerConfig,
+      });
+
+      const now = Date.now();
+      const { alerts, announced } = evaluateMakerAlerts({
+        matrix,
+        announced: this.announcedPublication,
+        best: selectBestMakerCell(matrix),
+        nowMs: now,
+      });
+
+      this.announcedPublication = announced;
+      if (alerts.length > 0) {
+        void TelegramNotifier.getInstance().notifyMakerAlerts(alerts, now);
+      }
+    } catch (err) {
+      console.warn('[CentralStore] Maker alert evaluation failed:', err);
+    }
+  }
+
+  /** The captured books, keyed by the tradeType each was requested with. */
+  private tierListings(): Record<string, Record<string, CapturedListings>> {
+    const out: Record<string, Record<string, CapturedListings>> = {};
+    for (const [key, tier] of Object.entries(this.bankMatrixCache?.tiers ?? {})) {
+      out[key] = {};
+      for (const [bank, ads] of Object.entries(tier.adsByBank)) {
+        out[key][bank] = { BUY: ads.buy, SELL: ads.sell };
+      }
+    }
+    return out;
+  }
+
   private deriveExecutability(): Record<string, Record<string, BankAmountExecutability>> {
     const byBank: Record<string, Record<string, BankAmountExecutability>> = {};
     const tiers = this.bankMatrixCache?.tiers ?? {};
@@ -1148,6 +1262,15 @@ export class CentralMarketStore {
         byBank: this.deriveExecutability(),
         bankOrder: Object.keys(BANK_CODE_MAP),
       });
+
+      /*
+       * MAKER SIDE, from the same capture and with no request of its own.
+       *
+       * Announced BEFORE the opportunity lifecycle in wall-clock terms only
+       * because this is where the book has just landed; the two are
+       * independent, answer different questions and share no state.
+       */
+      this.announceMakerAlerts();
     } catch (err) {
       console.error('[CentralStore] Error refreshing bank matrix:', err);
     } finally {

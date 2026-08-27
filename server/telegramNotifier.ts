@@ -22,6 +22,9 @@ import {
   OpportunityPhase,
   TelegramSystemAlert,
 } from './types.js';
+import type { MakerAlert } from './makerAlerts.js';
+import type { MakerMatrixCell } from './makerMatrix.js';
+import type { MakerPairing } from './makerRecommendation.js';
 
 /**
  * Default gap between two Telegram messages for the same alert type.
@@ -461,6 +464,139 @@ export function formatOpportunityLifecycleMessage(
  * market. Without them an outage is indistinguishable from a quiet market:
  * both produce no opportunity messages.
  */
+/**
+ * 🟢 PRECIO RECOMENDADO PARA PUBLICAR.
+ *
+ * Written for a MAKER. Every line answers "what do I type into the ad form?",
+ * and the ad each price steps ahead of is named so the operator can open
+ * Binance and check the recommendation against the book themselves.
+ *
+ * The price that would take first place is printed even when the engine
+ * recommends a different one - the operator asked never to lose sight of it.
+ */
+export function formatMakerPublishMessage(
+  cell: MakerMatrixCell,
+  pairing: MakerPairing,
+  timestamp: number
+): string {
+  const n = (value: number, decimals = 2) => escapeHtml(value.toFixed(decimals));
+  const signed = (value: number, decimals = 2) =>
+    `${value >= 0 ? '+' : ''}${escapeHtml(value.toFixed(decimals))}`;
+  const rec = cell.recommendation;
+
+  const lines = [
+    '🟢 <b>PRECIO RECOMENDADO PARA PUBLICAR</b>',
+    '',
+    'USDT/VES · anuncios propios (maker)',
+    '',
+    `Banco: <b>${escapeHtml(cell.bankDisplayName)}</b>`,
+    `Monto: <b>${escapeHtml(cell.amountVes.toLocaleString('es-VE'))} VES</b>`,
+    '',
+    '<b>MI COMPRA DE USDT</b> (publico: COMPRO USDT)',
+    'Compito contra: compradores de USDT · listado tradeType SELL',
+    `Líder actual: <b>${rec?.buyAnalysis.leaderPrice !== null && rec !== null ? n(rec.buyAnalysis.leaderPrice as number) : 'no verificable'} VES</b>`,
+    `PUBLICAR A: <b>${n(pairing.buy.price)} VES</b>`,
+    `Posición estimada: <b>${escapeHtml(String(pairing.buy.position))}</b>`,
+    `Supera al anuncio ${escapeHtml(pairing.buy.beatsAdvNo)} de ${escapeHtml(pairing.buy.beatsMerchant)} (${n(pairing.buy.beatsPrice)} VES)`,
+    '',
+    '<b>MI VENTA DE USDT</b> (publico: VENDO USDT)',
+    'Compito contra: vendedores de USDT · listado tradeType BUY',
+    `Líder actual: <b>${rec?.sellAnalysis.leaderPrice !== null && rec !== null ? n(rec.sellAnalysis.leaderPrice as number) : 'no verificable'} VES</b>`,
+    `PUBLICAR A: <b>${n(pairing.sell.price)} VES</b>`,
+    `Posición estimada: <b>${escapeHtml(String(pairing.sell.position))}</b>`,
+    `Supera al anuncio ${escapeHtml(pairing.sell.beatsAdvNo)} de ${escapeHtml(pairing.sell.beatsMerchant)} (${n(pairing.sell.beatsPrice)} VES)`,
+    '',
+    `MARGEN BRUTO: <b>${signed(pairing.grossMarginVes)} VES por USDT</b>`,
+    pairing.grossMarginPct !== null
+      ? `MARGEN BRUTO: <b>${signed(pairing.grossMarginPct, 4)}%</b>`
+      : 'MARGEN BRUTO %: no verificable',
+  ];
+
+  /* Being first is always reported, whatever the engine chose to recommend. */
+  if (rec !== null && pairing.position !== 1) {
+    lines.push(
+      '',
+      'Ser #1 en ambos lados no es lo recomendado aquí.',
+      `Precio para ser #1 comprando: <b>${rec.priceToBeFirstBuy !== null ? n(rec.priceToBeFirstBuy) : 'no verificable'} VES</b>`,
+      `Precio para ser #1 vendiendo: <b>${rec.priceToBeFirstSell !== null ? n(rec.priceToBeFirstSell) : 'no verificable'} VES</b>`,
+      rec.firstPositionPairing !== null
+        ? `Margen en la posición 1: <b>${signed(rec.firstPositionPairing.grossMarginVes)} VES por USDT</b>`
+        : 'Margen en la posición 1: no verificable'
+    );
+  }
+
+  // Absent volume is never printed as a number.
+  lines.push(
+    '',
+    pairing.buy.queueAheadUsdt !== null
+      ? `Volumen por delante (compra): <b>${n(pairing.buy.queueAheadUsdt)} USDT</b>`
+      : 'Volumen por delante (compra): no verificable',
+    pairing.sell.queueAheadUsdt !== null
+      ? `Volumen por delante (venta): <b>${n(pairing.sell.queueAheadUsdt)} USDT</b>`
+      : 'Volumen por delante (venta): no verificable',
+    `Antiguedad del dato: ${escapeHtml(String(cell.ageSeconds))}s`,
+    '',
+    'MARGEN BRUTO: no descuenta comision de Binance,',
+    'transferencia bancaria, slippage, redondeos',
+    'ni otros costes operativos. NO es beneficio neto.',
+    'La posición es una ESTIMACION: Binance ordena tambien',
+    'por factores que esta captura no expone.',
+    '',
+    `Hora: ${formatVenezuelaClock(timestamp)}`
+  );
+
+  return lines.join('\n');
+}
+
+/**
+ * 🔔 CAMBIO DE PRECIO — somebody moved ahead of the price I recommended.
+ *
+ * Only ever about a price this robot actually announced. A leader moving in a
+ * cell nobody was told to publish in is market noise, not news.
+ */
+export function formatMakerDisplacedMessage(
+  announced: {
+    bankDisplayName: string;
+    amountVes: number;
+    buyPrice: number;
+    sellPrice: number;
+    buyPosition: number;
+    sellPosition: number;
+  },
+  current: {
+    buyPosition: number;
+    sellPosition: number;
+    priceToBeFirstBuy: number | null;
+    priceToBeFirstSell: number | null;
+  },
+  timestamp: number
+): string {
+  const n = (value: number, decimals = 2) => escapeHtml(value.toFixed(decimals));
+  const pos = (value: number) => escapeHtml(String(value));
+
+  return [
+    '🔔 <b>CAMBIO DE PRECIO</b>',
+    '',
+    'USDT/VES · anuncios propios (maker)',
+    '',
+    `Banco: <b>${escapeHtml(announced.bankDisplayName)}</b>`,
+    `Monto: <b>${escapeHtml(announced.amountVes.toLocaleString('es-VE'))} VES</b>`,
+    '',
+    'El precio recomendado ya no ocupa la posición que ocupaba.',
+    '',
+    `MI COMPRA a ${n(announced.buyPrice)} VES: posición ${pos(announced.buyPosition)} → <b>${pos(current.buyPosition)}</b>`,
+    `MI VENTA a ${n(announced.sellPrice)} VES: posición ${pos(announced.sellPosition)} → <b>${pos(current.sellPosition)}</b>`,
+    '',
+    `Para ser #1 comprando: <b>${current.priceToBeFirstBuy !== null ? n(current.priceToBeFirstBuy) : 'no verificable'} VES</b>`,
+    `Para ser #1 vendiendo: <b>${current.priceToBeFirstSell !== null ? n(current.priceToBeFirstSell) : 'no verificable'} VES</b>`,
+    '',
+    'Recuperar la primera posición no siempre conviene:',
+    'revisa el margen antes de republicar.',
+    '',
+    `Hora: ${formatVenezuelaClock(timestamp)}`,
+  ].join('\n');
+}
+
 export function formatSystemAlertMessage(alert: TelegramSystemAlert): string {
   const heading: Record<TelegramSystemAlert['kind'], string> = {
     BINANCE_OFFLINE: '⛔ <b>BINANCE NO DISPONIBLE</b>',
@@ -674,6 +810,77 @@ export class TelegramNotifier {
       console.warn(`[Telegram] Unexpected notifier error: ${this.describe(err)}`);
       return { outcome: 'NETWORK_ERROR', detail: this.describe(err) };
     }
+  }
+
+  /**
+   * Sends the maker alerts a refresh produced.
+   *
+   * A PUBLISH alert is a new instruction - a bank, an amount and two prices
+   * this robot has not asked for before - so it is never suppressed by the
+   * cooldown: withholding it would mean withholding the only thing the
+   * operator is meant to act on. A DISPLACED alert is about a price already
+   * announced and can repeat as the book moves, so it is rate-limited per
+   * cell.
+   *
+   * The caller decides WHAT changed (evaluateMakerAlerts, which is pure). This
+   * method only decides whether to put it on the wire.
+   */
+  public async notifyMakerAlerts(
+    alerts: readonly MakerAlert[],
+    timestamp: number
+  ): Promise<TelegramResult[]> {
+    const results: TelegramResult[] = [];
+    if (!this.config) return alerts.map(() => ({ outcome: 'DISABLED' as const }));
+
+    const now = timestamp || Date.now();
+
+    for (const alert of alerts) {
+      try {
+        if (alert.kind === 'PUBLISH') {
+          const key = `maker:publish:${alert.cell.bank}:${alert.cell.amountKey}:${alert.pairing.buy.price}:${alert.pairing.sell.price}`;
+          if (this.lastSentAt.has(key)) {
+            results.push({ outcome: 'UNCHANGED' });
+            continue;
+          }
+          this.lastSentAt.set(key, now);
+          this.prune(now);
+          results.push(
+            await this.send(formatMakerPublishMessage(alert.cell, alert.pairing, now))
+          );
+          continue;
+        }
+
+        const key = `maker:displaced:${alert.cell.bank}:${alert.cell.amountKey}`;
+        const previous = this.lastSentAt.get(key);
+        if (previous !== undefined && now - previous < this.config.cooldownMs) {
+          results.push({ outcome: 'COOLDOWN' });
+          continue;
+        }
+        this.lastSentAt.set(key, now);
+        this.prune(now);
+        results.push(
+          await this.send(
+            formatMakerDisplacedMessage(
+              {
+                bankDisplayName: alert.announced.bankDisplayName,
+                amountVes: alert.announced.amountVes,
+                buyPrice: alert.announced.buyPrice,
+                sellPrice: alert.announced.sellPrice,
+                buyPosition: alert.announced.buyPosition,
+                sellPosition: alert.announced.sellPosition,
+              },
+              alert,
+              now
+            )
+          )
+        );
+      } catch (err) {
+        console.warn(`[Telegram] Unexpected notifier error: ${this.describe(err)}`);
+        results.push({ outcome: 'NETWORK_ERROR', detail: this.describe(err) });
+      }
+    }
+
+    return results;
   }
 
   /**

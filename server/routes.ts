@@ -4,6 +4,7 @@
  */
 
 import { Router } from 'express';
+import { selectBestMakerCell } from './makerMatrix.js';
 import { CentralMarketStore } from './centralStore.js';
 import { StorageEngine } from './storage.js';
 import { AlertRule } from './types.js';
@@ -70,6 +71,30 @@ apiRouter.get('/market/matrix', async (req, res) => {
     res.json({ marketReference, executableMatrix });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Error fetching executable matrix' });
+  }
+});
+
+/*
+ * THE MAKER MATRIX: what price to publish, per BANCO x MONTO.
+ *
+ * A separate route from /market/matrix on purpose. That one answers the
+ * taker's question - could I take an ad here - and this one answers the
+ * operator's: what should MY ad cost. Both read the same captured book, so
+ * serving both costs Binance nothing extra, and keeping them apart means
+ * neither can quietly inherit the other's vocabulary.
+ */
+apiRouter.get('/market/maker-matrix', async (req, res) => {
+  try {
+    const forceRefresh = req.query.refresh === 'true';
+    const makerMatrix = await centralStore.getMakerMatrix(forceRefresh);
+    /*
+     * The best cell is chosen HERE, by the same function that decides what
+     * Telegram announces. Letting the interface rank the cells would be a
+     * second economic decision, free to disagree with the first.
+     */
+    res.json({ makerMatrix, best: selectBestMakerCell(makerMatrix) });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Error building maker matrix' });
   }
 });
 

@@ -3,6 +3,7 @@ import {
   MarketAnalysis,
   MarketProjections,
   ExecutableMatrixResponse,
+  MakerMatrixResponse,
   OpportunitiesResponse,
   HistoryRecord,
   HistorySummary,
@@ -73,6 +74,17 @@ export class ApiService {
     return requestJson<ExecutableMatrixResponse>(
       `/api/market/matrix?refresh=${refresh}`
     );
+  }
+
+  /**
+   * The maker matrix: what price MY ad should carry at each bank and amount.
+   *
+   * A different question from getExecutableMatrix over the same captured book,
+   * and a different endpoint on purpose - neither answer can be mistaken for
+   * the other by reaching for a field that merely sounds right.
+   */
+  public static async getMakerMatrix(refresh = false): Promise<MakerMatrixResponse> {
+    return requestJson<MakerMatrixResponse>(`/api/market/maker-matrix?refresh=${refresh}`);
   }
 
   /**
