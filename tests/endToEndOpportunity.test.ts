@@ -184,6 +184,58 @@ describe('a book WITH an executable operation reaches Telegram on its own', () =
   });
 });
 
+describe('the mandatory scenario, all the way to Telegram', () => {
+  it('ASK 950.00 / BID 950.50 -> +0.50 VES, +0.0526%, and those exact prices', async () => {
+    vi.useFakeTimers();
+    stubWorld([banesco('ask-1', '950.00')], [banesco('bid-1', '950.50')]);
+
+    const { store } = await freshStore();
+    store.start();
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    const opportunity = store.getCachedBestOpportunity();
+    expect(opportunity?.buyPrice).toBe(950.0);
+    expect(opportunity?.sellPrice).toBe(950.5);
+    expect(opportunity?.spreadAbsolute).toBeCloseTo(0.5, 6);
+    expect(opportunity?.marginPct).toBeCloseTo(0.0526, 4);
+
+    const body = telegramSent.filter((t) => t.includes('ARBITRAJE'))[0];
+    // The prices Telegram prints are the ads' own prices, not a derived figure.
+    expect(body).toContain('950.00 VES');
+    expect(body).toContain('950.50 VES');
+    expect(body).toContain('SPREAD: <b>+0.50 VES</b>');
+    expect(body).toContain('RENDIMIENTO: <b>+0.0526%</b>');
+
+    store.stop();
+  });
+
+  it('the matrix cell and the notifier report the identical operation', async () => {
+    vi.useFakeTimers();
+    stubWorld([banesco('ask-1', '950.00')], [banesco('bid-1', '950.50')]);
+
+    const { store } = await freshStore();
+    store.start();
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    const { executableMatrix } = await store.getExecutableMatrix();
+    const sent = store.getCachedBestOpportunity();
+
+    // Find the cell the notifier's opportunity came from.
+    const cell = executableMatrix.cells[sent!.bank][
+      executableMatrix.amountKeys.find(
+        (k) => executableMatrix.cells[sent!.bank][k].amountVes === sent!.amountVes
+      ) as string
+    ];
+
+    expect(cell.status).toBe('EXECUTABLE');
+    expect(cell.opportunity?.buyPrice).toBe(sent?.buyPrice);
+    expect(cell.opportunity?.sellPrice).toBe(sent?.sellPrice);
+    expect(cell.opportunity?.marginPct).toBe(sent?.marginPct);
+
+    store.stop();
+  });
+});
+
 describe('a book WITHOUT an executable operation stays silent', () => {
   it('ASK 950 / BID 940 is a loss: no opportunity, no message', async () => {
     vi.useFakeTimers();

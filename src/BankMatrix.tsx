@@ -99,9 +99,15 @@ const STATUS_STYLE: Record<
 
 const fmtPrice = (v: number | null) => (v === null ? null : v.toFixed(2));
 
-/** Signed, always. A leading + on a gain, the minus preserved on a loss. */
+/**
+ * Signed, always, and to four decimals.
+ *
+ * Two decimals hid the market: real spreads here live in the third and fourth,
+ * so a genuine +0.0042% opportunity rendered as "0.00%" beside a cell marked
+ * EXECUTABLE. The same four decimals are what Telegram sends.
+ */
 const fmtSpread = (v: number | null) =>
-  v === null ? 'no verificable' : `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`;
+  v === null ? 'no verificable' : `${v >= 0 ? '+' : ''}${v.toFixed(4)}%`;
 
 const fmtUsdt = (v: number | null) =>
   v === null ? 'no verificable' : `${v.toFixed(2)} USDT`;

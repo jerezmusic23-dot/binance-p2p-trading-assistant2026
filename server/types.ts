@@ -891,6 +891,15 @@ export interface ExecutableCell {
   /** min(buy, sell) when both published volume; null otherwise. Never invented. */
   availableUsdt: number | null;
 
+  /**
+   * The operation this cell represents, or null when there is none.
+   *
+   * THE single representation: the matrix, the opportunity card and Telegram
+   * all read this object, so no consumer can arrive at a different price for
+   * the same book.
+   */
+  opportunity: Opportunity | null;
+
   /** Per-leg diagnosis, so a blocked cell says which leg blocked it. */
   buyStatus: CellStatus;
   sellStatus: CellStatus;

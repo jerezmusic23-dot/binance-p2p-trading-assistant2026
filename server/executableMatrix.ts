@@ -24,6 +24,7 @@
  *   saying what is missing, never a number standing in for it.
  */
 
+import { buildOpportunity } from './opportunityEngine.js';
 import type {
   BankAmountExecutability,
   CellStatus,
@@ -35,6 +36,7 @@ import type {
   LiquidityStatus,
   MarketReference,
   MarketSnapshot,
+  Opportunity,
 } from './types.js';
 
 /**
@@ -160,6 +162,17 @@ export function buildCell(params: {
       ? Math.min(buy.availableUsdt, sell.availableUsdt)
       : null;
 
+  /*
+   * ONE representation of the operation, shared.
+   *
+   * The cell used to decide EXECUTABLE from its own spreadPct while the
+   * engine built an Opportunity separately from the same data. Two
+   * computations over one book can disagree, and they did. The cell now
+   * carries the very object the engine produces, so the matrix, the card and
+   * Telegram read identical prices by construction rather than by luck.
+   */
+  const opportunity: Opportunity | null = buildOpportunity(cell);
+
   let status: CellStatus;
   if (failed === true) {
     status = 'ERROR';
@@ -175,7 +188,16 @@ export function buildCell(params: {
      * ((venta - recompra) / recompra) * 100 as computed by evaluateBankAmount.
      * A negative value stays negative and can never reach EXECUTABLE.
      */
-    status = cell.spreadPct !== null && cell.spreadPct > 0 ? 'EXECUTABLE' : 'NO_OPPORTUNITY';
+    /*
+     * Decided on the OPPORTUNITY, not on a second calculation. An operation is
+     * executable exactly when the engine says it is: both legs executable,
+     * liquidity verified on both, and a strictly positive margin. Break-even
+     * is a loss once commission and transfer costs are paid.
+     */
+    status =
+      opportunity !== null && opportunity.verification === 'VERIFIED' && opportunity.marginPct > 0
+        ? 'EXECUTABLE'
+        : 'NO_OPPORTUNITY';
   } else if (buy === null && sell === null) {
     // Both legs blocked: report the repurchase, the leg executed first.
     status = buyStatus;
@@ -201,6 +223,11 @@ export function buildCell(params: {
     sell,
     spreadPct: cell.spreadPct,
     availableUsdt,
+    /*
+     * The operation itself, or null. Whatever reads this cell reads the same
+     * prices the notifier sends - there is nothing left to recompute.
+     */
+    opportunity,
     buyStatus,
     sellStatus,
     buyReason: cell.buyReason,
