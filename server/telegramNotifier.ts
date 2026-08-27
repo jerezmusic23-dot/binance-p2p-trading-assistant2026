@@ -167,8 +167,8 @@ function strategicLines(snapshot: MarketSnapshot | null): string[] {
   }
   return [
     '',
-    `Recompra (BUY): <b>${escapeHtml(recompra.toFixed(2))} VES</b>`,
-    `Venta (SELL): <b>${escapeHtml(venta.toFixed(2))} VES</b>`,
+    `Referencia compra (lado Binance BUY): <b>${escapeHtml(recompra.toFixed(2))} VES</b>`,
+    `Referencia venta (lado Binance SELL): <b>${escapeHtml(venta.toFixed(2))} VES</b>`,
   ];
 }
 
@@ -198,8 +198,13 @@ export function formatOpportunityMessage(
     `Banco: <b>${escapeHtml(opportunity.bank)}</b>`,
     `Monto: <b>${escapeHtml(opportunity.amountVes.toLocaleString('es-VE'))} VES</b>`,
     '',
-    `Recompra (BUY): <b>${n(opportunity.buyPrice)} VES</b>`,
-    `Venta (SELL): <b>${n(opportunity.sellPrice)} VES</b>`,
+    /*
+     * Both legs name the Binance side they came from. "Recompra" alone reads
+     * as the advertiser's action to anyone thinking in ad direction, which is
+     * exactly the inversion this wording exists to prevent.
+     */
+    `COMPRA arbitraje (lado Binance BUY): <b>${n(opportunity.buyPrice)} VES</b>`,
+    `VENTA arbitraje (lado Binance SELL): <b>${n(opportunity.sellPrice)} VES</b>`,
     '',
     `Spread: <b>${n(opportunity.spreadPct, 4)}%</b>`,
     `Margen BRUTO: <b>${n(opportunity.marginAbsolute)} VES por USDT</b>`,
@@ -364,54 +369,69 @@ export function formatOpportunityLifecycleMessage(
   capturedAt?: number | null
 ): string {
   const n = (value: number, decimals = 2) => escapeHtml(value.toFixed(decimals));
-  const heading =
-    phase === 'DETECTED'
-      ? '🚨 <b>OPORTUNIDAD DETECTADA</b>'
-      : phase === 'UPDATED'
-      ? '🔄 <b>OPORTUNIDAD ACTUALIZADA</b>'
-      : '✅ <b>OPORTUNIDAD CERRADA</b>';
-
-  const lines = [
-    heading,
-    '',
-    'USDT/VES',
-    '',
-    `Banco: <b>${escapeHtml(opportunity.bank)}</b>`,
-    `Monto: <b>${escapeHtml(opportunity.amountVes.toLocaleString('es-VE'))} VES</b>`,
-  ];
+  const signed = (value: number, decimals = 2) =>
+    `${value >= 0 ? '+' : ''}${escapeHtml(value.toFixed(decimals))}`;
 
   if (phase === 'CLOSED') {
-    lines.push(
+    return [
+      '✅ <b>OPORTUNIDAD CERRADA</b>',
+      '',
+      'USDT/VES',
+      '',
+      `Banco: <b>${escapeHtml(opportunity.bank)}</b>`,
+      `Monto: <b>${escapeHtml(opportunity.amountVes.toLocaleString('es-VE'))} VES</b>`,
       '',
       'Esta operación ya no está en el libro con las condiciones anteriores.',
       '',
-      `Hora: ${formatVenezuelaClock(timestamp)}`
-    );
-    return lines.join('\n');
+      `Hora: ${formatVenezuelaClock(timestamp)}`,
+    ].join('\n');
   }
 
-  lines.push(
-    '',
-    `Recompra ejecutable: <b>${n(opportunity.buyPrice)} VES</b>`,
-    `Venta ejecutable: <b>${n(opportunity.sellPrice)} VES</b>`,
-    '',
-    `Margen BRUTO: <b>${n(opportunity.spreadPct, 4)}%</b> ` +
-      `(${n(opportunity.marginAbsolute)} VES por USDT)`,
-    ''
-  );
-
   /*
-   * EXECUTABLE, not STRATEGIC. These prices come from a bank/amount cell that
-   * passed evaluateAd - a real operation - not from the median of the book.
-   * The distinction is printed so the reader never has to assume it.
+   * Each leg states the ECONOMICS first, then the Binance side, then the API
+   * parameter. In that order on purpose: "what this does to my money" is the
+   * part that cannot be misread, and it is what the reader needs before the
+   * technical label. tradeType is printed last, and only because someone
+   * verifying against the API by hand needs it.
    */
-  lines.push(
-    `Ejecutable: ${opportunity.verification === 'VERIFIED' ? '✅' : '❌'}`,
-    `Banco verificado: ${opportunity.verification === 'VERIFIED' ? '✅' : '❌'}`,
-    opportunity.availableUsdt !== null
-      ? `Liquidez: <b>${n(opportunity.availableUsdt)} USDT</b>`
-      : 'Liquidez: no verificable'
-  );
+  const lines = [
+    phase === 'DETECTED'
+      ? '🟢 <b>OPORTUNIDAD DE ARBITRAJE</b>'
+      : '🔄 <b>OPORTUNIDAD ACTUALIZADA</b>',
+    '',
+    'USDT/VES',
+    '',
+    '<b>COMPRA USDT</b> (entrada)',
+    'Fuente: Binance ASK · anuncio que vende USDT',
+    'tradeType/API: BUY',
+    `Precio: <b>${n(opportunity.buyPrice)} VES</b>`,
+    '',
+    '<b>VENTA USDT</b> (salida)',
+    'Fuente: Binance BID · anuncio que compra USDT',
+    'tradeType/API: SELL',
+    `Precio: <b>${n(opportunity.sellPrice)} VES</b>`,
+    '',
+    `SPREAD: <b>${signed(opportunity.spreadAbsolute)} VES</b>`,
+    `RENDIMIENTO: <b>${signed(opportunity.marginPct, 4)}%</b>`,
+    '',
+    /*
+     * Both legs are the SAME bank by construction: a purchase at one bank and
+     * a sale at another is not an operation anyone can execute, so the
+     * executability engine never pairs across banks. Printed twice because
+     * that is what makes the constraint visible.
+     */
+    `Banco compra: <b>${escapeHtml(opportunity.bank)}</b>`,
+    `Banco venta: <b>${escapeHtml(opportunity.bank)}</b>`,
+    `Monto: <b>${escapeHtml(opportunity.amountVes.toLocaleString('es-VE'))} VES</b>`,
+    '',
+    // Absent liquidity is never printed as a number.
+    opportunity.buyAvailableUsdt !== null
+      ? `Liquidez compra: <b>${n(opportunity.buyAvailableUsdt)} USDT</b>`
+      : 'Liquidez compra: no verificable',
+    opportunity.sellAvailableUsdt !== null
+      ? `Liquidez venta: <b>${n(opportunity.sellAvailableUsdt)} USDT</b>`
+      : 'Liquidez venta: no verificable',
+  ];
 
   if (capturedAt !== null && capturedAt !== undefined && Number.isFinite(capturedAt)) {
     const ageSeconds = Math.max(0, Math.round((timestamp - capturedAt) / 1000));
@@ -422,8 +442,7 @@ export function formatOpportunityLifecycleMessage(
 
   lines.push(
     '',
-    'Fuente: Binance P2P LIVE',
-    `Procedencia: ${escapeHtml(opportunity.verification)} / EXECUTABLE`,
+    `Estado: ${escapeHtml(opportunity.verification)} / EXECUTABLE`,
     '',
     'MARGEN BRUTO: no descuenta comision de Binance,',
     'transferencia bancaria, slippage, redondeos',
@@ -681,7 +700,21 @@ export class TelegramNotifier {
         return await this.closeOpenOpportunities(now);
       }
 
+      /*
+       * Two independent guards, both required.
+       *
+       * selectBestOpportunity already refuses anything that is not VERIFIED or
+       * whose margin is not strictly positive, so in the normal path these
+       * never fire. They are here because this method is public: a future
+       * caller handing it any Opportunity must not be able to announce a loss,
+       * or an operation whose liquidity could not be established, as something
+       * to execute. Break-even is excluded too - zero before Binance
+       * commission, transfer fees and slippage is a loss once they are paid.
+       */
       if (opportunity.verification !== 'VERIFIED') {
+        return { outcome: 'UNCHANGED' };
+      }
+      if (!(opportunity.marginPct > 0)) {
         return { outcome: 'UNCHANGED' };
       }
 

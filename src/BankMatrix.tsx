@@ -99,9 +99,15 @@ const STATUS_STYLE: Record<
 
 const fmtPrice = (v: number | null) => (v === null ? null : v.toFixed(2));
 
-/** Signed, always. A leading + on a gain, the minus preserved on a loss. */
+/**
+ * Signed, always, and to four decimals.
+ *
+ * Two decimals hid the market: real spreads here live in the third and fourth,
+ * so a genuine +0.0042% opportunity rendered as "0.00%" beside a cell marked
+ * EXECUTABLE. The same four decimals are what Telegram sends.
+ */
 const fmtSpread = (v: number | null) =>
-  v === null ? 'no verificable' : `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`;
+  v === null ? 'no verificable' : `${v >= 0 ? '+' : ''}${v.toFixed(4)}%`;
 
 const fmtUsdt = (v: number | null) =>
   v === null ? 'no verificable' : `${v.toFixed(2)} USDT`;
@@ -134,13 +140,29 @@ const CellView: React.FC<{ cell: ExecutableCell; onSelect?: () => void }> = ({
       */}
       <div className="font-mono text-[11px] leading-tight">
         <div className="flex justify-between gap-1">
-          <span className="text-[#848e9c]">Compra</span>
+          {/*
+            The Binance side is named on the label, not left to the reader.
+            "Compra" alone is ambiguous: an ad you buy from is one the
+            ADVERTISER is selling, so anyone reading in ad direction infers the
+            opposite side and the whole spread flips sign.
+          */}
+          <span
+            className="text-[#848e9c]"
+            title="COMPRA ARBITRAJE: el precio al que YO compro USDT. Fuente: Binance ASK (anuncio que vende USDT). tradeType/API: BUY."
+          >
+            Compra <span className="text-[8px] text-[#5e6673]">ASK</span>
+          </span>
           <span className={buyPrice ? 'text-[#e0e0e0]' : 'text-[#5e6673] italic'}>
             {buyPrice ?? '—'}
           </span>
         </div>
         <div className="flex justify-between gap-1">
-          <span className="text-[#848e9c]">Venta</span>
+          <span
+            className="text-[#848e9c]"
+            title="VENTA ARBITRAJE: el precio al que YO vendo USDT. Fuente: Binance BID (anuncio que compra USDT). tradeType/API: SELL."
+          >
+            Venta <span className="text-[8px] text-[#5e6673]">BID</span>
+          </span>
           <span className={sellPrice ? 'text-[#e0e0e0]' : 'text-[#5e6673] italic'}>
             {sellPrice ?? '—'}
           </span>
@@ -331,6 +353,12 @@ export const BankMatrix: React.FC<BankMatrixProps> = ({
       </div>
 
       <p className="text-[10px] text-[#848e9c]">
+        <strong>COMPRA ARBITRAJE</strong> = el precio al que <em>tú</em> compras USDT ·
+        fuente <strong>Binance ASK</strong> (anuncio que vende USDT) · <code>tradeType=BUY</code>.
+        <br />
+        <strong>VENTA ARBITRAJE</strong> = el precio al que <em>tú</em> vendes USDT ·
+        fuente <strong>Binance BID</strong> (anuncio que compra USDT) · <code>tradeType=SELL</code>.
+        <br />
         SPREAD firmado: <strong>((venta − recompra) / recompra) × 100</strong>. Un valor negativo
         se muestra negativo y se clasifica SIN ARBITRAJE — nunca se convierte en oportunidad.
         MARGEN BRUTO: no descuenta comisiones, transferencias, slippage ni tiempo de ejecución.

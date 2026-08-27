@@ -453,6 +453,108 @@ describe('analysis / projections window', () => {
   });
 });
 
+describe('the bank matrix refreshes on its own, without a viewer', () => {
+  /*
+   * THE BUG THIS PINS
+   *
+   * refreshBankMatrix used to run once at boot and then only when an HTTP
+   * request found the cache cold. With nobody on the dashboard,
+   * lastOpportunities stayed frozen at its boot value for the life of the
+   * process: the lifecycle notifier re-evaluated the same stale answer every
+   * 6s and an opportunity appearing an hour later was never seen. Price
+   * alerts kept arriving because those read the 6s snapshot instead, which is
+   * exactly why the failure looked like "Telegram only sends price alerts".
+   *
+   * These tests drive the timers directly and never touch getBankMatrix,
+   * getExecutableMatrix or getOpportunities - the three calls that used to be
+   * the only way a refresh ever happened.
+   */
+  it('populates the matrix from the timer alone', async () => {
+    vi.useFakeTimers();
+    const mock = stubBinance([makeAdItem({ price: '918.00' })], [makeAdItem({ price: '921.00' })]);
+    const { store } = await freshStore();
+
+    store.start();
+    // Boot snapshot + the 2s boot matrix population.
+    await vi.advanceTimersByTimeAsync(2_100);
+    const afterBoot = mock.mock.calls.length;
+    expect(afterBoot).toBeGreaterThan(0);
+
+    // No HTTP call of any kind, only time passing.
+    await vi.advanceTimersByTimeAsync(46_000);
+    expect(mock.mock.calls.length).toBeGreaterThan(afterBoot);
+
+    store.stop();
+    vi.useRealTimers();
+  });
+
+  it('keeps refreshing on every interval, so a later opportunity is seen', async () => {
+    vi.useFakeTimers();
+    const mock = stubBinance([makeAdItem({ price: '918.00' })], [makeAdItem({ price: '921.00' })]);
+    const { store } = await freshStore();
+
+    store.start();
+    await vi.advanceTimersByTimeAsync(2_100);
+
+    const bankCount = Object.keys(BANK_CODE_MAP).length;
+    const afterBoot = mock.mock.calls.length;
+
+    // Three further matrix windows.
+    await vi.advanceTimersByTimeAsync(45_000 * 3 + 1_000);
+    const added = mock.mock.calls.length - afterBoot;
+
+    // Each window is one query per bank per side; the 6s snapshot poll adds
+    // its own, so this is a floor rather than an equality.
+    expect(added).toBeGreaterThanOrEqual(bankCount * 2 * 3);
+
+    store.stop();
+    vi.useRealTimers();
+  });
+
+  it('never runs two refreshes at once, however slow Binance is', async () => {
+    vi.useFakeTimers();
+
+    // A query that never settles: the refresh started at boot stays in flight
+    // across several interval ticks.
+    let started = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => {
+        started += 1;
+        return new Promise(() => {});
+      })
+    );
+
+    const { store } = await freshStore();
+    store.start();
+    await vi.advanceTimersByTimeAsync(2_100);
+    const afterFirstPass = started;
+
+    // Four more ticks. The in-flight guard must swallow every one of them.
+    await vi.advanceTimersByTimeAsync(45_000 * 4);
+    expect(started).toBe(afterFirstPass);
+
+    store.stop();
+    vi.useRealTimers();
+  });
+
+  it('stop() clears the matrix timer so nothing fires afterwards', async () => {
+    vi.useFakeTimers();
+    const mock = stubBinance([makeAdItem({ price: '918.00' })], [makeAdItem({ price: '921.00' })]);
+    const { store } = await freshStore();
+
+    store.start();
+    await vi.advanceTimersByTimeAsync(2_100);
+    store.stop();
+
+    const afterStop = mock.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(45_000 * 3);
+    expect(mock.mock.calls.length).toBe(afterStop);
+
+    vi.useRealTimers();
+  });
+});
+
 describe('FASE 5 - the matrix is the executable matrix', () => {
   /*
    * CONTRACT CHANGE, deliberate.

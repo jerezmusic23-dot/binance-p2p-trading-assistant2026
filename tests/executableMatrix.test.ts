@@ -165,9 +165,15 @@ describe('TEST 3 / 4 / 14 / 15 - the spread is signed and economic', () => {
     const cell = cellFor([ad({ price: 946 })], [ad({ price: 945 })]);
 
     expect(cell.spreadPct).toBeLessThan(0);
-    // evaluateBankAmount rounds to 2 decimals - -0.10571% becomes -0.11%,
-    // which is exactly the figure that appeared on screen in production.
-    expect(cell.spreadPct).toBe(-0.11);
+    /*
+     * FULL PRECISION now. This used to assert -0.11, the round2 result, and
+     * that rounding was a real defect: a +0.0042% spread rounded to 0.00 and
+     * the cell reported NO_OPPORTUNITY while the engine reported EXECUTABLE on
+     * the same book. Rounding belongs in the view, not in a decision input.
+     * -0.11% is still what the interface shows.
+     */
+    expect(cell.spreadPct).toBeCloseTo(-0.1057, 4);
+    expect(Number((cell.spreadPct as number).toFixed(2))).toBe(-0.11);
   });
 
   it('BUY < SELL yields a POSITIVE spread', () => {
@@ -206,8 +212,63 @@ describe('TEST 3 / 4 / 14 / 15 - the spread is signed and economic', () => {
      */
     const cell = cellFor([ad({ price: 1000 })], [ad({ price: 900 })]);
 
-    expect(cell.spreadPct).toBe(-10);
-    expect(cell.spreadPct).not.toBe(-11.11);
+    expect(cell.spreadPct).toBeCloseTo(-10, 6);
+    expect(cell.spreadPct).not.toBeCloseTo(-11.11, 2);
+  });
+});
+
+describe('the matrix and the engine can never disagree', () => {
+  /*
+   * They used to. The cell decided EXECUTABLE from its own round2 spreadPct
+   * while the engine built an Opportunity at full precision: a real +0.0042%
+   * spread rounded to 0.00, so the matrix said NO_OPPORTUNITY and Telegram
+   * announced the operation. Same book, two answers. The cell now carries the
+   * engine's own Opportunity and decides on it.
+   */
+  it('a spread too small to survive rounding is still an opportunity', () => {
+    const cell = cellFor([ad({ price: 950 })], [ad({ price: 950.04 })]);
+
+    expect(cell.spreadPct).toBeCloseTo(0.0042, 4);
+    expect(cell.status).toBe('EXECUTABLE');
+    expect(cell.opportunity).not.toBeNull();
+    expect(cell.opportunity?.marginPct).toBeGreaterThan(0);
+  });
+
+  it('the cell carries the very operation the engine built', () => {
+    const cell = cellFor([ad({ price: 950 })], [ad({ price: 950.5 })]);
+
+    expect(cell.opportunity?.buyPrice).toBe(cell.buy?.price);
+    expect(cell.opportunity?.sellPrice).toBe(cell.sell?.price);
+    expect(cell.opportunity?.marginPct).toBe(cell.spreadPct);
+    expect(cell.opportunity?.bank).toBe(cell.bank);
+    expect(cell.opportunity?.amountVes).toBe(cell.amountVes);
+  });
+
+  it('the mandatory scenario: ASK 950.00 / BID 950.50', () => {
+    const cell = cellFor([ad({ price: 950.0 })], [ad({ price: 950.5 })]);
+
+    expect(cell.buy?.price).toBe(950.0);
+    expect(cell.sell?.price).toBe(950.5);
+    expect(
+      (cell.sell as { price: number }).price - (cell.buy as { price: number }).price
+    ).toBeCloseTo(0.5, 6);
+    expect(cell.spreadPct).toBeCloseTo(0.0526, 4);
+    expect(cell.status).toBe('EXECUTABLE');
+  });
+
+  it('the mandatory counter-scenario: ASK 950 / BID 940', () => {
+    const cell = cellFor([ad({ price: 950 })], [ad({ price: 940 })]);
+
+    expect(cell.spreadPct).toBeLessThan(0);
+    expect(cell.status).toBe('NO_OPPORTUNITY');
+    expect(cell.opportunity?.marginPct).toBeLessThan(0);
+  });
+
+  it('a cell with no operation carries no opportunity', () => {
+    const cell = cellFor([], []);
+
+    expect(cell.opportunity).toBeNull();
+    expect(cell.status).toBe('NO_AD');
   });
 });
 

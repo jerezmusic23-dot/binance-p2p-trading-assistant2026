@@ -434,6 +434,15 @@ export interface ExecutableCell {
   /** Signed. Negative stays negative. */
   spreadPct: number | null;
   availableUsdt: number | null;
+
+  /**
+   * The operation this cell represents, or null when there is none.
+   *
+   * THE single representation: the matrix, the opportunity card and Telegram
+   * all read this object, so no consumer can arrive at a different price for
+   * the same book.
+   */
+  opportunity: Opportunity | null;
   buyStatus: CellStatus;
   sellStatus: CellStatus;
   buyReason: string | null;

@@ -249,6 +249,12 @@ apiRouter.get('/health', (req, res) => {
      * it did not. A path and some counts only - no environment dump.
      */
     storage: StorageEngine.describeStorage(),
+    /*
+     * How much of the capture is actually being recorded. A history with holes
+     * is either an honest gap in the market or a loss on our side, and from
+     * outside the process those looked identical until these counters existed.
+     */
+    capture: centralStore.getCaptureStats(),
   });
 });
 

@@ -26,6 +26,15 @@ import { countVerifications } from './bankMatching.js';
 import { AMOUNT_TIERS, evaluateBankTiers } from './executability.js';
 import { runOpportunityEngine } from './opportunityEngine.js';
 import { BacktestEngine } from './backtestEngine.js';
+
+/**
+ * How far back the hourly session chart reads.
+ *
+ * 24 hours: the chart renders a 13-hour Venezuelan session (08:00-20:00 VET)
+ * bucketed by hour-of-day, so it needs the whole day behind it. Not a tuning
+ * knob - it is the span the chart already claimed to show.
+ */
+const TIMELINE_WINDOW_MS = 24 * 60 * 60 * 1000;
 import {
   MATRIX_STALE_AFTER_MS,
   buildExecutableMatrix,
@@ -59,6 +68,29 @@ export class CentralMarketStore {
   /** Newest observation not yet written. Flushed on stop(). */
   private pendingRecord: HistoryRecord | null = null;
   private pollTimer: NodeJS.Timeout | null = null;
+  /** Autonomous bank-matrix refresh, so opportunities do not depend on a viewer. */
+  private matrixTimer: NodeJS.Timeout | null = null;
+  private matrixBootTimer: NodeJS.Timeout | null = null;
+
+  /**
+   * How often a capture arrived too incomplete to record, and in what way.
+   *
+   * A gap in the history is either "Binance had nothing to say" or "we lost
+   * it". These counters separate the two from outside the process, which is
+   * the only way to tell whether the skip policy is costing anything real.
+   */
+  private completeSnapshots = 0;
+  private incompleteSnapshots = {
+    total: 0,
+    /** No ad on the ASK side: nothing to buy. */
+    askSideEmpty: 0,
+    /** No ad on the BID side: nothing to sell into. */
+    bidSideEmpty: 0,
+    bothSidesEmpty: 0,
+    /** Both prices present, spread absent. */
+    spreadMissing: 0,
+    lastAt: null as number | null,
+  };
   private isPolling = false;
   private bankMatrixCache: {
     timestamp: number;
@@ -148,10 +180,31 @@ export class CentralMarketStore {
       this.pollMarket();
     }, this.pollingIntervalMs);
 
-    // Also trigger initial bank matrix population
-    setTimeout(() => {
-      this.refreshBankMatrix();
+    // First bank matrix population, shortly after the first snapshot.
+    this.matrixBootTimer = setTimeout(() => {
+      this.matrixBootTimer = null;
+      void this.refreshBankMatrix();
     }, 2000);
+
+    /*
+     * AUTONOMOUS MATRIX REFRESH.
+     *
+     * Until this existed, refreshBankMatrix ran once at boot and then only
+     * when an HTTP request found the cache cold. With nobody on the dashboard
+     * lastOpportunities stayed frozen at its boot value forever, so the
+     * lifecycle notifier re-evaluated the same stale answer every 6s and a
+     * real opportunity appearing later was never seen. Alerts on price kept
+     * arriving because those read the 6s snapshot instead.
+     *
+     * The interval is MATRIX_STALE_AFTER_MS, not a new number: it is the TTL
+     * the cache already used to decide a matrix was too old to serve, so the
+     * loop refreshes exactly when a reader would have forced it to. Request
+     * cost is unchanged per refresh - 14, one per bank per side - and now
+     * predictable at ~18.7/min rather than dependent on who is watching.
+     */
+    this.matrixTimer = setInterval(() => {
+      void this.refreshBankMatrix();
+    }, MATRIX_STALE_AFTER_MS);
   }
 
   public stop(): void {
@@ -159,16 +212,25 @@ export class CentralMarketStore {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
     }
+    if (this.matrixTimer) {
+      clearInterval(this.matrixTimer);
+      this.matrixTimer = null;
+    }
+    if (this.matrixBootTimer) {
+      clearTimeout(this.matrixBootTimer);
+      this.matrixBootTimer = null;
+    }
     this.flushPendingRecord();
   }
 
   /**
    * Writes the newest observation that the sampling interval skipped.
    *
-   * Called from stop(), which is the only shutdown hook this codebase has.
-   * NOTE: nothing currently wires stop() to SIGTERM, so a container recycled
-   * by the platform still loses up to one sampling window. Adding a signal
-   * handler is a separate decision, not something to slip in here.
+   * Called from stop(), which server.ts now wires to SIGTERM and SIGINT, so a
+   * container recycled by the platform flushes the skipped observation before
+   * exiting. The remaining loss window is an UNCLEAN kill - SIGKILL, OOM, a
+   * hardware fault - which costs at most one sampling interval and cannot be
+   * closed from inside the process.
    */
   public flushPendingRecord(): void {
     if (this.pendingRecord === null) return;
@@ -206,6 +268,7 @@ export class CentralMarketStore {
        */
       const { bestBuyPrice, bestSellPrice, spreadPercentage } = snapshot;
       if (bestBuyPrice !== null && bestSellPrice !== null && spreadPercentage !== null) {
+        this.completeSnapshots += 1;
         const record: HistoryRecord = {
           id: `tick-${snapshot.timestamp}`,
           timestamp: snapshot.timestamp,
@@ -269,8 +332,36 @@ export class CentralMarketStore {
           this.pendingRecord = record;
         }
       } else {
+        /*
+         * MEASURED, NOT CHANGED.
+         *
+         * The policy stands: an observation with an empty side has no price to
+         * record, so nothing is written and the gap in the series is the
+         * honest account of what happened. Nothing is invented to fill it.
+         *
+         * What was missing is how OFTEN this happens. A warning line per
+         * occurrence is invisible in a log nobody reads, so the counters are
+         * kept and published on /api/health: a capture that silently drops one
+         * observation in three is a different system from one that drops one a
+         * week, and until now they looked identical from outside.
+         */
+        this.incompleteSnapshots.total += 1;
+        this.incompleteSnapshots.lastAt = snapshot.timestamp;
+        if (snapshot.bestBuyPrice === null && snapshot.bestSellPrice === null) {
+          this.incompleteSnapshots.bothSidesEmpty += 1;
+        } else if (snapshot.bestBuyPrice === null) {
+          this.incompleteSnapshots.askSideEmpty += 1;
+        } else if (snapshot.bestSellPrice === null) {
+          this.incompleteSnapshots.bidSideEmpty += 1;
+        } else {
+          // Both prices exist but the spread did not: a shape worth naming.
+          this.incompleteSnapshots.spreadMissing += 1;
+        }
+
         console.warn(
-          '[CentralStore] Snapshot incompleto (BUY o SELL sin anuncios): no se registra en el histórico.'
+          '[CentralStore] Snapshot incompleto (BUY o SELL sin anuncios): no se registra en el ' +
+            `histórico. Acumulado: ${this.incompleteSnapshots.total} de ` +
+            `${this.completeSnapshots + this.incompleteSnapshots.total} observaciones.`
         );
       }
 
@@ -637,9 +728,32 @@ export class CentralMarketStore {
     const { snapshot } = this.getCurrentSnapshot();
     if (!snapshot) return null;
 
+    /*
+     * TWO WINDOWS, because two consumers need different things.
+     *
+     * `history` is the statistical window: 100 records, unchanged, and the
+     * basis of every projection figure. `timelineHistory` is the session day
+     * the hourly chart draws, which needs every tick of the last 24 hours -
+     * asking it to render thirteen hour-buckets out of 99 minutes of data is
+     * what produced "11 of the 13 past hours have no tick" while those ticks
+     * sat on disk.
+     *
+     * Bounded by TIME, not by count, and read from the same in-memory array,
+     * so it costs a filter rather than a disk read.
+     */
     const history = StorageEngine.getHistory(100);
+    const timelineHistory = StorageEngine.getHistory(
+      undefined,
+      Date.now() - TIMELINE_WINDOW_MS
+    );
     const analysis = ProjectionEngine.analyzeMarket(snapshot, history);
-    return ProjectionEngine.generateProjections(snapshot, history, analysis);
+    return ProjectionEngine.generateProjections(
+      snapshot,
+      history,
+      analysis,
+      undefined,
+      timelineHistory
+    );
   }
 
   /**
@@ -765,6 +879,42 @@ export class CentralMarketStore {
    * The payType mapping assessment. NOT_VERIFIABLE until a poll has observed
    * real ads - never optimistic about a question nobody has answered.
    */
+  /**
+   * Capture completeness, for /api/health.
+   *
+   * Counts since this process started - deliberately not persisted. A number
+   * that survived restarts would mix a fixed problem with a current one.
+   */
+  public getCaptureStats(): {
+    completeSnapshots: number;
+    incompleteSnapshots: number;
+    incompleteRatePct: number | null;
+    askSideEmpty: number;
+    bidSideEmpty: number;
+    bothSidesEmpty: number;
+    spreadMissing: number;
+    lastIncompleteAt: string | null;
+  } {
+    const total = this.completeSnapshots + this.incompleteSnapshots.total;
+    return {
+      completeSnapshots: this.completeSnapshots,
+      incompleteSnapshots: this.incompleteSnapshots.total,
+      // null, not 0: with nothing observed there is no rate to report.
+      incompleteRatePct:
+        total === 0
+          ? null
+          : Number(((this.incompleteSnapshots.total / total) * 100).toFixed(2)),
+      askSideEmpty: this.incompleteSnapshots.askSideEmpty,
+      bidSideEmpty: this.incompleteSnapshots.bidSideEmpty,
+      bothSidesEmpty: this.incompleteSnapshots.bothSidesEmpty,
+      spreadMissing: this.incompleteSnapshots.spreadMissing,
+      lastIncompleteAt:
+        this.incompleteSnapshots.lastAt === null
+          ? null
+          : new Date(this.incompleteSnapshots.lastAt).toISOString(),
+    };
+  }
+
   public getPayTypeMapping(): PayTypeMappingReport {
     if (this.payTypeMapping !== null) return this.payTypeMapping;
 
@@ -804,6 +954,15 @@ export class CentralMarketStore {
   }
 
   private async refreshBankMatrix(): Promise<void> {
+    /*
+     * One refresh at a time.
+     *
+     * Now load-bearing for the autonomous interval as well as for concurrent
+     * HTTP readers: if a refresh takes longer than MATRIX_STALE_AFTER_MS the
+     * next tick returns immediately instead of starting a second pass, so 14
+     * requests can never become 28 and two engine runs can never race to
+     * overwrite lastOpportunities out of order.
+     */
     if (this.matrixPollingInProgress) return;
     this.matrixPollingInProgress = true;
 

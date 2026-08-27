@@ -20,6 +20,66 @@ export type TradeType = 'BUY' | 'SELL';
  * A value that would otherwise be unknown is HEURISTIC, never REAL. Phase C2
  * replaces those with null; C1 only labels them.
  */
+/* ==========================================================================
+ * THE ECONOMIC RULE.  ASK / BID  <->  MY OPERATION  <->  tradeType
+ *
+ * Written from the ECONOMICS of the operation, which is the only reading that
+ * cannot be argued with. Advertiser action, taker action and parameter names
+ * all point in different directions; the money does not.
+ *
+ *   BINANCE ASK   =  the price at which I BUY USDT       =  entry
+ *                 =  an ad that is SELLING USDT
+ *                 =  ARBITRAGE BUY LEG  ->  arbitrageBuyPrice
+ *                 =  best is the LOWEST: I want to pay least
+ *                 =  returned by tradeType: 'BUY'
+ *
+ *   BINANCE BID   =  the price at which I SELL USDT      =  exit
+ *                 =  an ad that is BUYING USDT
+ *                 =  ARBITRAGE SELL LEG  ->  arbitrageSellPrice
+ *                 =  best is the HIGHEST: I want to receive most
+ *                 =  returned by tradeType: 'SELL'
+ *
+ *   OPPORTUNITY  <=>  arbitrageSellPrice > arbitrageBuyPrice
+ *   spreadAbsolute   =  arbitrageSellPrice - arbitrageBuyPrice
+ *   spreadPercentage = ((arbitrageSellPrice - arbitrageBuyPrice)
+ *                        / arbitrageBuyPrice) * 100
+ *
+ *   Signed. Never absolute-valued: a loss must stay a loss.
+ *
+ * WHY tradeType 'BUY' IS THE ASK, WHICH IS THE EASY PART TO GET BACKWARDS
+ *
+ * The parameter carries the SEARCHER's intent, not the advertiser's action.
+ * Asking Binance for tradeType='BUY' is the API equivalent of pressing "Buy
+ * USDT" on p2p.binance.com: it returns the ads you can buy FROM, which are the
+ * asks. The advertisers behind them are selling, and reading the parameter as
+ * the advertiser's side is what inverts the whole chain.
+ *
+ * HOW TO FALSIFY THIS, WITH DATA RATHER THAN WITH WORDS
+ *
+ * In any functioning market the ask sits at or above the bid, because crossing
+ * costs the taker. Observed in production on the strategic medians - the
+ * robust estimator, not the raw extremes:
+ *
+ *     median(tradeType='BUY')  = 945.75      <- higher: the ASK side
+ *     median(tradeType='SELL') = 944.75      <- lower:  the BID side
+ *
+ * Crossing costs 0.11%, which is why no opportunity exists at the market
+ * level. Swap the legs and that cost reads as a gain, on every bank and every
+ * amount, for as long as the market has a spread - a permanent fictitious
+ * profit, which REGLA 5 exists to prevent.
+ *
+ * If a future observation ever shows median(BID) persistently ABOVE
+ * median(ASK), this mapping is wrong and the chain must be re-derived from
+ * that evidence, not from this comment.
+ *
+ * STORAGE NAMES.  buyPrice / bestBuyPrice / strategicBuyPrice carry the ASK
+ * (my purchase); sellPrice / bestSellPrice / strategicSellPrice carry the BID
+ * (my sale). The names predate this vocabulary and are load-bearing in the
+ * persisted history, so they stay; every label a human reads names the side.
+ *
+ * tests/arbitrageSideSemantics.test.ts pins every link in the chain.
+ * ========================================================================== */
+
 export type DataProvenance =
   | 'REAL'
   | 'AGGREGATED'
@@ -830,6 +890,15 @@ export interface ExecutableCell {
   spreadPct: number | null;
   /** min(buy, sell) when both published volume; null otherwise. Never invented. */
   availableUsdt: number | null;
+
+  /**
+   * The operation this cell represents, or null when there is none.
+   *
+   * THE single representation: the matrix, the opportunity card and Telegram
+   * all read this object, so no consumer can arrive at a different price for
+   * the same book.
+   */
+  opportunity: Opportunity | null;
 
   /** Per-leg diagnosis, so a blocked cell says which leg blocked it. */
   buyStatus: CellStatus;

@@ -218,9 +218,21 @@ export function evaluateBankAmount(params: {
     sellQuotes,
     bestExecutableBuy,
     bestExecutableSell,
+    /*
+     * FULL PRECISION, not rounded.
+     *
+     * This was round2, and rounding a DECISION input silently broke the one
+     * rule the system is built on: matrix and engine must agree. A real spread
+     * of +0.0042% rounded to 0.00, so the cell reported NO_OPPORTUNITY while
+     * the opportunity engine - which never rounded - reported EXECUTABLE and
+     * Telegram announced it. Same book, two answers.
+     *
+     * Real spreads in this market live in the third and fourth decimal.
+     * Rounding is a presentation concern and belongs in the view.
+     */
     spreadPct:
       bestExecutableBuy !== null && bestExecutableSell !== null
-        ? round2(signedSpreadPct(bestExecutableSell.price, bestExecutableBuy.price))
+        ? signedSpreadPct(bestExecutableSell.price, bestExecutableBuy.price)
         : null,
     buyReason: bestExecutableBuy === null ? noneReason('compra', allBuy.length) : null,
     sellReason: bestExecutableSell === null ? noneReason('venta', allSell.length) : null,
