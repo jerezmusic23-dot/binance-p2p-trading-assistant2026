@@ -58,6 +58,25 @@ export class StorageEngine {
   private static ARCHIVE_DIR = path.join(StorageEngine.DATA_DIR, 'history_archive');
   private static lastArchiveFile: string | null = null;
   private static archivedRecordCount = 0;
+  /**
+   * Summary of what the archive holds, WITHOUT holding the archive.
+   *
+   * Built once at boot by reading each archive file, keeping three numbers and
+   * discarding the content. Memory is O(1) in the number of records: a year of
+   * archives is a few dozen files and the index that survives is a count and
+   * two timestamps.
+   *
+   * It exists because getHistorySummary reported the range of the ACTIVE
+   * window only, so once records began moving to the archive the summary would
+   * claim the history started the day the active window did - understating a
+   * history that was intact on disk.
+   */
+  private static archiveIndex: {
+    fileCount: number;
+    recordCount: number;
+    oldestTimestamp: number | null;
+    newestTimestamp: number | null;
+  } = { fileCount: 0, recordCount: 0, oldestTimestamp: null, newestTimestamp: null };
 
   /**
    * HISTORY_MAX_RECORDS overrides the cap. A value of 0 disables archiving
@@ -209,6 +228,8 @@ export class StorageEngine {
         this.saveHistory();
       }
 
+      this.buildArchiveIndex();
+
       // Load Alerts
       if (fs.existsSync(this.ALERTS_FILE)) {
         const raw = fs.readFileSync(this.ALERTS_FILE, 'utf-8');
@@ -316,6 +337,34 @@ export class StorageEngine {
       this.history = this.history.slice(batch);
       this.archivedRecordCount += overflow.length;
       this.lastArchiveFile = archiveFile;
+
+      /*
+       * Fold the batch into the index as it leaves.
+       *
+       * The index is built at boot; without this it would not learn about
+       * batches archived DURING the session, and getHistorySummary would
+       * under-report the history until the next restart - the same
+       * archive-blindness this index exists to remove, just with a shorter
+       * blind spot. The batch is already in hand, so this costs a scan of it
+       * and retains nothing.
+       */
+      this.archiveIndex.fileCount += 1;
+      this.archiveIndex.recordCount += overflow.length;
+      for (const rec of overflow) {
+        if (typeof rec?.timestamp !== 'number') continue;
+        if (
+          this.archiveIndex.oldestTimestamp === null ||
+          rec.timestamp < this.archiveIndex.oldestTimestamp
+        ) {
+          this.archiveIndex.oldestTimestamp = rec.timestamp;
+        }
+        if (
+          this.archiveIndex.newestTimestamp === null ||
+          rec.timestamp > this.archiveIndex.newestTimestamp
+        ) {
+          this.archiveIndex.newestTimestamp = rec.timestamp;
+        }
+      }
 
       console.log(
         `[Storage] Archived ${overflow.length} records to ${path.basename(archiveFile)}; ` +
@@ -434,6 +483,75 @@ export class StorageEngine {
     return records;
   }
 
+  /**
+   * Reads every archive file once, keeps a count and a range, drops the rest.
+   *
+   * Deliberately NOT lazy: it runs at boot, when the process has nothing else
+   * to do, so no later request pays for it. Deliberately NOT cached to disk:
+   * a stale index that disagrees with the files would be worse than no index.
+   *
+   * A file that fails to parse is counted as unreadable and skipped rather
+   * than throwing - one damaged archive must not stop the process from
+   * starting, and quarantining it here would risk touching data this method
+   * has no business writing to.
+   */
+  private static buildArchiveIndex(): void {
+    const index = {
+      fileCount: 0,
+      recordCount: 0,
+      oldestTimestamp: null as number | null,
+      newestTimestamp: null as number | null,
+    };
+
+    try {
+      if (!fs.existsSync(this.ARCHIVE_DIR)) {
+        this.archiveIndex = index;
+        return;
+      }
+
+      for (const name of fs.readdirSync(this.ARCHIVE_DIR)) {
+        if (!name.endsWith('.json')) continue;
+        try {
+          const parsed = JSON.parse(
+            fs.readFileSync(path.join(this.ARCHIVE_DIR, name), 'utf-8')
+          ) as HistoryRecord[];
+          if (!Array.isArray(parsed) || parsed.length === 0) continue;
+
+          index.fileCount += 1;
+          index.recordCount += parsed.length;
+
+          for (const rec of parsed) {
+            if (typeof rec?.timestamp !== 'number') continue;
+            if (index.oldestTimestamp === null || rec.timestamp < index.oldestTimestamp) {
+              index.oldestTimestamp = rec.timestamp;
+            }
+            if (index.newestTimestamp === null || rec.timestamp > index.newestTimestamp) {
+              index.newestTimestamp = rec.timestamp;
+            }
+          }
+          // parsed goes out of scope here: nothing from the archive is retained.
+        } catch (e) {
+          console.warn(`[Storage] Archive file unreadable, skipped: ${name}`);
+        }
+      }
+    } catch (err) {
+      console.warn('[Storage] Could not index the archive:', err);
+    }
+
+    this.archiveIndex = index;
+  }
+
+  /** What the archive holds, for diagnostics. Never the records themselves. */
+  public static describeArchive(): {
+    fileCount: number;
+    recordCount: number;
+    oldestTimestamp: number | null;
+    newestTimestamp: number | null;
+  } {
+    this.initialize();
+    return { ...this.archiveIndex };
+  }
+
   public static getHistorySummary(): {
     totalRecords: number;
     oldestTimestamp: number | null;
@@ -442,7 +560,19 @@ export class StorageEngine {
     availableHours: number;
   } {
     this.initialize();
-    if (this.history.length === 0) {
+
+    /*
+     * The LOGICAL history, not just the active window.
+     *
+     * Records moved to the archive are still history; reporting only the
+     * active window made a bounded window look like a short history. The
+     * archive contributes its count and its range from the boot index, so this
+     * stays O(1) and reads no archive file.
+     */
+    const archive = this.archiveIndex;
+    const totalRecords = this.history.length + archive.recordCount;
+
+    if (totalRecords === 0) {
       return {
         totalRecords: 0,
         oldestTimestamp: null,
@@ -452,14 +582,22 @@ export class StorageEngine {
       };
     }
 
-    const oldest = this.history[0].timestamp;
-    const newest = this.history[this.history.length - 1].timestamp;
+    const activeOldest = this.history[0]?.timestamp ?? null;
+    const activeNewest = this.history[this.history.length - 1]?.timestamp ?? null;
+
+    const candidates = (values: (number | null)[]) =>
+      values.filter((v): v is number => v !== null);
+
+    const oldestCandidates = candidates([archive.oldestTimestamp, activeOldest]);
+    const newestCandidates = candidates([archive.newestTimestamp, activeNewest]);
+    const oldest = Math.min(...oldestCandidates);
+    const newest = Math.max(...newestCandidates);
     const diffMs = Math.max(0, newest - oldest);
     const availableHours = Number((diffMs / (1000 * 60 * 60)).toFixed(1));
     const availableDays = Number((diffMs / (1000 * 60 * 60 * 24)).toFixed(2));
 
     return {
-      totalRecords: this.history.length,
+      totalRecords,
       oldestTimestamp: oldest,
       newestTimestamp: newest,
       availableDays,

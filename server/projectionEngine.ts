@@ -403,7 +403,22 @@ export class ProjectionEngine {
      * projection against today's session curve. No heuristic changes - only
      * where the clock is read from.
      */
-    nowMs?: number
+    nowMs?: number,
+    /*
+     * The series the HOURLY TIMELINE is drawn from. Defaults to `history`, so
+     * every existing caller behaves exactly as before.
+     *
+     * It exists because the two consumers of `history` need different windows
+     * and one of them was starving. Everything statistical - SMA, slope,
+     * volatility, bands, probabilities, dataWindow - reads the 100-record
+     * window and MUST keep reading it: that window is the methodology.
+     * buildHourlyTimeline does something else entirely: it buckets records by
+     * hour-of-day across a fixed 13-hour session. 100 records at one per
+     * minute span 99 minutes and can therefore fill at most two of those
+     * thirteen buckets, which is why the chart reported eleven hours with no
+     * tick while the ticks were on disk all along.
+     */
+    timelineHistory?: HistoryRecord[]
   ): MarketProjections {
     // Same single definition as analyzeMarket, for the same reason.
     const seriesBasis = this.selectSeriesBasis(snapshot, history);
@@ -473,7 +488,7 @@ export class ProjectionEngine {
         probabilities: { up: null, neutral: null, down: null },
         hourlyTimeline: this.buildHourlyTimeline(
           snapshot,
-          history,
+          timelineHistory ?? history,
           null,
           null,
           analysis,
@@ -598,7 +613,7 @@ export class ProjectionEngine {
 
     const hourlyTimeline = this.buildHourlyTimeline(
       snapshot,
-      history,
+      timelineHistory ?? history,
       expectedFloor,
       expectedCeiling,
       analysis,

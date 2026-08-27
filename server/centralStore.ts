@@ -26,6 +26,15 @@ import { countVerifications } from './bankMatching.js';
 import { AMOUNT_TIERS, evaluateBankTiers } from './executability.js';
 import { runOpportunityEngine } from './opportunityEngine.js';
 import { BacktestEngine } from './backtestEngine.js';
+
+/**
+ * How far back the hourly session chart reads.
+ *
+ * 24 hours: the chart renders a 13-hour Venezuelan session (08:00-20:00 VET)
+ * bucketed by hour-of-day, so it needs the whole day behind it. Not a tuning
+ * knob - it is the span the chart already claimed to show.
+ */
+const TIMELINE_WINDOW_MS = 24 * 60 * 60 * 1000;
 import {
   MATRIX_STALE_AFTER_MS,
   buildExecutableMatrix,
@@ -197,10 +206,11 @@ export class CentralMarketStore {
   /**
    * Writes the newest observation that the sampling interval skipped.
    *
-   * Called from stop(), which is the only shutdown hook this codebase has.
-   * NOTE: nothing currently wires stop() to SIGTERM, so a container recycled
-   * by the platform still loses up to one sampling window. Adding a signal
-   * handler is a separate decision, not something to slip in here.
+   * Called from stop(), which server.ts now wires to SIGTERM and SIGINT, so a
+   * container recycled by the platform flushes the skipped observation before
+   * exiting. The remaining loss window is an UNCLEAN kill - SIGKILL, OOM, a
+   * hardware fault - which costs at most one sampling interval and cannot be
+   * closed from inside the process.
    */
   public flushPendingRecord(): void {
     if (this.pendingRecord === null) return;
@@ -669,9 +679,32 @@ export class CentralMarketStore {
     const { snapshot } = this.getCurrentSnapshot();
     if (!snapshot) return null;
 
+    /*
+     * TWO WINDOWS, because two consumers need different things.
+     *
+     * `history` is the statistical window: 100 records, unchanged, and the
+     * basis of every projection figure. `timelineHistory` is the session day
+     * the hourly chart draws, which needs every tick of the last 24 hours -
+     * asking it to render thirteen hour-buckets out of 99 minutes of data is
+     * what produced "11 of the 13 past hours have no tick" while those ticks
+     * sat on disk.
+     *
+     * Bounded by TIME, not by count, and read from the same in-memory array,
+     * so it costs a filter rather than a disk read.
+     */
     const history = StorageEngine.getHistory(100);
+    const timelineHistory = StorageEngine.getHistory(
+      undefined,
+      Date.now() - TIMELINE_WINDOW_MS
+    );
     const analysis = ProjectionEngine.analyzeMarket(snapshot, history);
-    return ProjectionEngine.generateProjections(snapshot, history, analysis);
+    return ProjectionEngine.generateProjections(
+      snapshot,
+      history,
+      analysis,
+      undefined,
+      timelineHistory
+    );
   }
 
   /**
