@@ -71,6 +71,26 @@ export class CentralMarketStore {
   /** Autonomous bank-matrix refresh, so opportunities do not depend on a viewer. */
   private matrixTimer: NodeJS.Timeout | null = null;
   private matrixBootTimer: NodeJS.Timeout | null = null;
+
+  /**
+   * How often a capture arrived too incomplete to record, and in what way.
+   *
+   * A gap in the history is either "Binance had nothing to say" or "we lost
+   * it". These counters separate the two from outside the process, which is
+   * the only way to tell whether the skip policy is costing anything real.
+   */
+  private completeSnapshots = 0;
+  private incompleteSnapshots = {
+    total: 0,
+    /** No ad on the ASK side: nothing to buy. */
+    askSideEmpty: 0,
+    /** No ad on the BID side: nothing to sell into. */
+    bidSideEmpty: 0,
+    bothSidesEmpty: 0,
+    /** Both prices present, spread absent. */
+    spreadMissing: 0,
+    lastAt: null as number | null,
+  };
   private isPolling = false;
   private bankMatrixCache: {
     timestamp: number;
@@ -248,6 +268,7 @@ export class CentralMarketStore {
        */
       const { bestBuyPrice, bestSellPrice, spreadPercentage } = snapshot;
       if (bestBuyPrice !== null && bestSellPrice !== null && spreadPercentage !== null) {
+        this.completeSnapshots += 1;
         const record: HistoryRecord = {
           id: `tick-${snapshot.timestamp}`,
           timestamp: snapshot.timestamp,
@@ -311,8 +332,36 @@ export class CentralMarketStore {
           this.pendingRecord = record;
         }
       } else {
+        /*
+         * MEASURED, NOT CHANGED.
+         *
+         * The policy stands: an observation with an empty side has no price to
+         * record, so nothing is written and the gap in the series is the
+         * honest account of what happened. Nothing is invented to fill it.
+         *
+         * What was missing is how OFTEN this happens. A warning line per
+         * occurrence is invisible in a log nobody reads, so the counters are
+         * kept and published on /api/health: a capture that silently drops one
+         * observation in three is a different system from one that drops one a
+         * week, and until now they looked identical from outside.
+         */
+        this.incompleteSnapshots.total += 1;
+        this.incompleteSnapshots.lastAt = snapshot.timestamp;
+        if (snapshot.bestBuyPrice === null && snapshot.bestSellPrice === null) {
+          this.incompleteSnapshots.bothSidesEmpty += 1;
+        } else if (snapshot.bestBuyPrice === null) {
+          this.incompleteSnapshots.askSideEmpty += 1;
+        } else if (snapshot.bestSellPrice === null) {
+          this.incompleteSnapshots.bidSideEmpty += 1;
+        } else {
+          // Both prices exist but the spread did not: a shape worth naming.
+          this.incompleteSnapshots.spreadMissing += 1;
+        }
+
         console.warn(
-          '[CentralStore] Snapshot incompleto (BUY o SELL sin anuncios): no se registra en el histórico.'
+          '[CentralStore] Snapshot incompleto (BUY o SELL sin anuncios): no se registra en el ' +
+            `histórico. Acumulado: ${this.incompleteSnapshots.total} de ` +
+            `${this.completeSnapshots + this.incompleteSnapshots.total} observaciones.`
         );
       }
 
@@ -830,6 +879,42 @@ export class CentralMarketStore {
    * The payType mapping assessment. NOT_VERIFIABLE until a poll has observed
    * real ads - never optimistic about a question nobody has answered.
    */
+  /**
+   * Capture completeness, for /api/health.
+   *
+   * Counts since this process started - deliberately not persisted. A number
+   * that survived restarts would mix a fixed problem with a current one.
+   */
+  public getCaptureStats(): {
+    completeSnapshots: number;
+    incompleteSnapshots: number;
+    incompleteRatePct: number | null;
+    askSideEmpty: number;
+    bidSideEmpty: number;
+    bothSidesEmpty: number;
+    spreadMissing: number;
+    lastIncompleteAt: string | null;
+  } {
+    const total = this.completeSnapshots + this.incompleteSnapshots.total;
+    return {
+      completeSnapshots: this.completeSnapshots,
+      incompleteSnapshots: this.incompleteSnapshots.total,
+      // null, not 0: with nothing observed there is no rate to report.
+      incompleteRatePct:
+        total === 0
+          ? null
+          : Number(((this.incompleteSnapshots.total / total) * 100).toFixed(2)),
+      askSideEmpty: this.incompleteSnapshots.askSideEmpty,
+      bidSideEmpty: this.incompleteSnapshots.bidSideEmpty,
+      bothSidesEmpty: this.incompleteSnapshots.bothSidesEmpty,
+      spreadMissing: this.incompleteSnapshots.spreadMissing,
+      lastIncompleteAt:
+        this.incompleteSnapshots.lastAt === null
+          ? null
+          : new Date(this.incompleteSnapshots.lastAt).toISOString(),
+    };
+  }
+
   public getPayTypeMapping(): PayTypeMappingReport {
     if (this.payTypeMapping !== null) return this.payTypeMapping;
 
