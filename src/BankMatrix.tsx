@@ -140,16 +140,22 @@ const CellView: React.FC<{ cell: ExecutableCell; onSelect?: () => void }> = ({
             ADVERTISER is selling, so anyone reading in ad direction infers the
             opposite side and the whole spread flips sign.
           */}
-          <span className="text-[#848e9c]" title="Pata de COMPRA del arbitraje. Procede del lado Binance tradeType=BUY (asks): pagas VES y recibes USDT.">
-            Compra <span className="text-[8px] text-[#5e6673]">B-BUY</span>
+          <span
+            className="text-[#848e9c]"
+            title="COMPRA ARBITRAJE: el precio al que YO compro USDT. Fuente: Binance ASK (anuncio que vende USDT). tradeType/API: BUY."
+          >
+            Compra <span className="text-[8px] text-[#5e6673]">ASK</span>
           </span>
           <span className={buyPrice ? 'text-[#e0e0e0]' : 'text-[#5e6673] italic'}>
             {buyPrice ?? '—'}
           </span>
         </div>
         <div className="flex justify-between gap-1">
-          <span className="text-[#848e9c]" title="Pata de VENTA del arbitraje. Procede del lado Binance tradeType=SELL (bids): entregas USDT y recibes VES.">
-            Venta <span className="text-[8px] text-[#5e6673]">B-SELL</span>
+          <span
+            className="text-[#848e9c]"
+            title="VENTA ARBITRAJE: el precio al que YO vendo USDT. Fuente: Binance BID (anuncio que compra USDT). tradeType/API: SELL."
+          >
+            Venta <span className="text-[8px] text-[#5e6673]">BID</span>
           </span>
           <span className={sellPrice ? 'text-[#e0e0e0]' : 'text-[#5e6673] italic'}>
             {sellPrice ?? '—'}
@@ -341,10 +347,11 @@ export const BankMatrix: React.FC<BankMatrixProps> = ({
       </div>
 
       <p className="text-[10px] text-[#848e9c]">
-        <strong>COMPRA</strong> = pata de compra del arbitraje, del lado Binance{' '}
-        <code>tradeType=BUY</code> (asks: pagas VES, recibes USDT).{' '}
-        <strong>VENTA</strong> = pata de venta, del lado Binance{' '}
-        <code>tradeType=SELL</code> (bids: entregas USDT, recibes VES).
+        <strong>COMPRA ARBITRAJE</strong> = el precio al que <em>tú</em> compras USDT ·
+        fuente <strong>Binance ASK</strong> (anuncio que vende USDT) · <code>tradeType=BUY</code>.
+        <br />
+        <strong>VENTA ARBITRAJE</strong> = el precio al que <em>tú</em> vendes USDT ·
+        fuente <strong>Binance BID</strong> (anuncio que compra USDT) · <code>tradeType=SELL</code>.
         <br />
         SPREAD firmado: <strong>((venta − recompra) / recompra) × 100</strong>. Un valor negativo
         se muestra negativo y se clasifica SIN ARBITRAJE — nunca se convierte en oportunidad.

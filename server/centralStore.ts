@@ -59,6 +59,9 @@ export class CentralMarketStore {
   /** Newest observation not yet written. Flushed on stop(). */
   private pendingRecord: HistoryRecord | null = null;
   private pollTimer: NodeJS.Timeout | null = null;
+  /** Autonomous bank-matrix refresh, so opportunities do not depend on a viewer. */
+  private matrixTimer: NodeJS.Timeout | null = null;
+  private matrixBootTimer: NodeJS.Timeout | null = null;
   private isPolling = false;
   private bankMatrixCache: {
     timestamp: number;
@@ -148,16 +151,45 @@ export class CentralMarketStore {
       this.pollMarket();
     }, this.pollingIntervalMs);
 
-    // Also trigger initial bank matrix population
-    setTimeout(() => {
-      this.refreshBankMatrix();
+    // First bank matrix population, shortly after the first snapshot.
+    this.matrixBootTimer = setTimeout(() => {
+      this.matrixBootTimer = null;
+      void this.refreshBankMatrix();
     }, 2000);
+
+    /*
+     * AUTONOMOUS MATRIX REFRESH.
+     *
+     * Until this existed, refreshBankMatrix ran once at boot and then only
+     * when an HTTP request found the cache cold. With nobody on the dashboard
+     * lastOpportunities stayed frozen at its boot value forever, so the
+     * lifecycle notifier re-evaluated the same stale answer every 6s and a
+     * real opportunity appearing later was never seen. Alerts on price kept
+     * arriving because those read the 6s snapshot instead.
+     *
+     * The interval is MATRIX_STALE_AFTER_MS, not a new number: it is the TTL
+     * the cache already used to decide a matrix was too old to serve, so the
+     * loop refreshes exactly when a reader would have forced it to. Request
+     * cost is unchanged per refresh - 14, one per bank per side - and now
+     * predictable at ~18.7/min rather than dependent on who is watching.
+     */
+    this.matrixTimer = setInterval(() => {
+      void this.refreshBankMatrix();
+    }, MATRIX_STALE_AFTER_MS);
   }
 
   public stop(): void {
     if (this.pollTimer) {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
+    }
+    if (this.matrixTimer) {
+      clearInterval(this.matrixTimer);
+      this.matrixTimer = null;
+    }
+    if (this.matrixBootTimer) {
+      clearTimeout(this.matrixBootTimer);
+      this.matrixBootTimer = null;
     }
     this.flushPendingRecord();
   }
@@ -804,6 +836,15 @@ export class CentralMarketStore {
   }
 
   private async refreshBankMatrix(): Promise<void> {
+    /*
+     * One refresh at a time.
+     *
+     * Now load-bearing for the autonomous interval as well as for concurrent
+     * HTTP readers: if a refresh takes longer than MATRIX_STALE_AFTER_MS the
+     * next tick returns immediately instead of starting a second pass, so 14
+     * requests can never become 28 and two engine runs can never race to
+     * overwrite lastOpportunities out of order.
+     */
     if (this.matrixPollingInProgress) return;
     this.matrixPollingInProgress = true;
 

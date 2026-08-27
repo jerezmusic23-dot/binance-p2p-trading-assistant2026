@@ -147,26 +147,39 @@ describe('executability: the legs keep the same sides', () => {
   });
 });
 
-describe('the arbitrage arithmetic, on the numbers from the task', () => {
-  it('buy 940 / sell 950 is a +1.0638% opportunity', () => {
-    const cell = cellFor([ad(940)], [ad(950)]);
+describe('the arbitrage arithmetic, stated as MY operation', () => {
+  /*
+   * These numbers are MY prices, not Binance's parameter names:
+   *
+   *   940 is what I PAY for USDT   -> the ASK -> tradeType 'BUY'
+   *   950 is what I RECEIVE for it -> the BID -> tradeType 'SELL'
+   *
+   * The fixture feeds them in through those sides, so the test exercises the
+   * mapping rather than assuming it.
+   */
+  it('I buy at 940 and sell at 950: +10 VES, +1.0638%, an opportunity', () => {
+    const myPurchaseAtAsk = 940;
+    const mySaleAtBid = 950;
+    const cell = cellFor([ad(myPurchaseAtAsk)], [ad(mySaleAtBid)]);
 
-    expect(cell.buy?.price).toBe(940);
-    expect(cell.sell?.price).toBe(950);
-    expect((cell.sell as { price: number }).price - (cell.buy as { price: number }).price).toBe(10);
+    expect(cell.buy?.price).toBe(myPurchaseAtAsk);
+    expect(cell.sell?.price).toBe(mySaleAtBid);
+    expect(mySaleAtBid - myPurchaseAtAsk).toBe(10);
     expect(cell.spreadPct).toBeCloseTo(1.06, 2);
     expect(cell.status).toBe('EXECUTABLE');
   });
 
-  it('buy 950 / sell 940 is NOT an opportunity', () => {
-    const cell = cellFor([ad(950)], [ad(940)]);
+  it('I buy at 950 and sell at 940: a loss, and never an opportunity', () => {
+    const myPurchaseAtAsk = 950;
+    const mySaleAtBid = 940;
+    const cell = cellFor([ad(myPurchaseAtAsk)], [ad(mySaleAtBid)]);
 
     expect(cell.spreadPct).toBeLessThan(0);
     expect(cell.status).toBe('NO_OPPORTUNITY');
     expect(cell.status).not.toBe('EXECUTABLE');
   });
 
-  it('the opportunity engine agrees, and reports the same signed margin', () => {
+  it('the engine reports the same signed margin, to four decimals', () => {
     const byBank = {
       BANESCO: evaluateBankTiers({
         bank: 'BANESCO',
@@ -185,7 +198,7 @@ describe('the arbitrage arithmetic, on the numbers from the task', () => {
     expect(best?.marginPct).toBeCloseTo(1.0638, 3);
   });
 
-  it('the engine produces nothing when the legs are the wrong way round', () => {
+  it('the engine produces nothing when my sale is below my purchase', () => {
     const byBank = {
       BANESCO: evaluateBankTiers({
         bank: 'BANESCO',
@@ -237,33 +250,77 @@ describe('REGRESSION: the sides must not be swapped', () => {
   });
 });
 
-describe('the labels name the Binance side they came from', () => {
-  it('the Telegram opportunity message says which side each leg is', async () => {
+describe('the labels state the economics before the API parameter', () => {
+  const opportunity = {
+    bank: 'Banesco',
+    amountVes: 20_000,
+    buyPrice: 940,
+    sellPrice: 950,
+    buyAdvNo: 'a',
+    sellAdvNo: 'b',
+    spreadAbsolute: 10,
+    spreadPct: 1.0638,
+    marginAbsolute: 10,
+    marginPct: 1.0638,
+    buyAvailableUsdt: 500,
+    sellAvailableUsdt: 400,
+    availableUsdt: 400,
+    verification: 'VERIFIED' as const,
+    provenance: 'EXECUTABLE' as const,
+    reason: null,
+  };
+
+  it('the Telegram message names what I do, the Binance side, and the parameter', async () => {
+    const { formatOpportunityLifecycleMessage } = await import('../server/telegramNotifier.js');
+    const body = formatOpportunityLifecycleMessage('DETECTED', opportunity, NOW);
+
+    expect(body).toContain('OPORTUNIDAD DE ARBITRAJE');
+    expect(body).toContain('<b>COMPRA USDT</b> (entrada)');
+    expect(body).toContain('Fuente: Binance ASK');
+    expect(body).toContain('<b>VENTA USDT</b> (salida)');
+    expect(body).toContain('Fuente: Binance BID');
+    // The API parameter is present but subordinate to the economics.
+    expect(body.indexOf('COMPRA USDT')).toBeLessThan(body.indexOf('tradeType/API: BUY'));
+    expect(body.indexOf('VENTA USDT')).toBeLessThan(body.indexOf('tradeType/API: SELL'));
+  });
+
+  it('reports the spread and the yield with their signs', async () => {
+    const { formatOpportunityLifecycleMessage } = await import('../server/telegramNotifier.js');
+    const body = formatOpportunityLifecycleMessage('DETECTED', opportunity, NOW);
+
+    expect(body).toContain('SPREAD: <b>+10.00 VES</b>');
+    expect(body).toContain('RENDIMIENTO: <b>+1.0638%</b>');
+    expect(body).toContain('Liquidez compra: <b>500.00 USDT</b>');
+    expect(body).toContain('Liquidez venta: <b>400.00 USDT</b>');
+    expect(body).toContain('Estado: VERIFIED / EXECUTABLE');
+  });
+
+  it('states both legs are the same bank, which is a structural constraint', async () => {
+    const { formatOpportunityLifecycleMessage } = await import('../server/telegramNotifier.js');
+    const body = formatOpportunityLifecycleMessage('DETECTED', opportunity, NOW);
+
+    expect(body).toContain('Banco compra: <b>Banesco</b>');
+    expect(body).toContain('Banco venta: <b>Banesco</b>');
+  });
+
+  it('calls the result MARGEN BRUTO and never net profit', async () => {
+    const { formatOpportunityLifecycleMessage } = await import('../server/telegramNotifier.js');
+    const body = formatOpportunityLifecycleMessage('DETECTED', opportunity, NOW);
+
+    expect(body).toContain('MARGEN BRUTO');
+    expect(body).toContain('NO es beneficio neto');
+    expect(body).not.toMatch(/ganancia|profit/i);
+  });
+
+  it('prints absent liquidity as not verifiable, never as zero', async () => {
     const { formatOpportunityLifecycleMessage } = await import('../server/telegramNotifier.js');
     const body = formatOpportunityLifecycleMessage(
       'DETECTED',
-      {
-        bank: 'Banesco',
-        amountVes: 20_000,
-        buyPrice: 940,
-        sellPrice: 950,
-        buyAdvNo: 'a',
-        sellAdvNo: 'b',
-        spreadAbsolute: 10,
-        spreadPct: 1.0638,
-        marginAbsolute: 10,
-        marginPct: 1.0638,
-        buyAvailableUsdt: 500,
-        sellAvailableUsdt: 500,
-        availableUsdt: 500,
-        verification: 'VERIFIED',
-        provenance: 'EXECUTABLE',
-        reason: null,
-      },
+      { ...opportunity, buyAvailableUsdt: null, availableUsdt: null },
       NOW
     );
 
-    expect(body).toContain('COMPRA arbitraje (lado Binance BUY)');
-    expect(body).toContain('VENTA arbitraje (lado Binance SELL)');
+    expect(body).toContain('Liquidez compra: no verificable');
+    expect(body).not.toContain('Liquidez compra: <b>0.00 USDT</b>');
   });
 });

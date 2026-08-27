@@ -310,7 +310,7 @@ describe('Telegram: opportunity deduplication', () => {
     expect(outcomes[0]).toBe('SENT');
     expect(outcomes.slice(1).every((o) => o === 'COOLDOWN')).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(sentBodies()[0]).toContain('OPORTUNIDAD DETECTADA');
+    expect(sentBodies()[0]).toContain('OPORTUNIDAD DE ARBITRAJE');
   });
 
   it('sends UPDATED, not a second DETECTED, once the cooldown elapses', async () => {
@@ -324,7 +324,7 @@ describe('Telegram: opportunity deduplication', () => {
 
     const bodies = sentBodies();
     expect(bodies).toHaveLength(2);
-    expect(bodies[0]).toContain('OPORTUNIDAD DETECTADA');
+    expect(bodies[0]).toContain('OPORTUNIDAD DE ARBITRAJE');
     expect(bodies[1]).toContain('OPORTUNIDAD ACTUALIZADA');
   });
 
@@ -358,9 +358,9 @@ describe('Telegram: opportunity deduplication', () => {
 
     const bodies = sentBodies();
     expect(bodies).toHaveLength(3);
-    expect(bodies[0]).toContain('OPORTUNIDAD DETECTADA');
+    expect(bodies[0]).toContain('OPORTUNIDAD DE ARBITRAJE');
     expect(bodies[1]).toContain('OPORTUNIDAD CERRADA');
-    expect(bodies[2]).toContain('OPORTUNIDAD DETECTADA');
+    expect(bodies[2]).toContain('OPORTUNIDAD DE ARBITRAJE');
     expect(notifier.openOpportunityKeys()).toHaveLength(1);
   });
 
@@ -396,8 +396,15 @@ describe('Telegram: EXECUTABLE is never confused with STRATEGIC', () => {
 
     expect(body).toContain('EXECUTABLE');
     expect(body).toContain('Banco de Venezuela');
-    expect(body).toContain('COMPRA arbitraje (lado Binance BUY)');
-    expect(body).toContain('VENTA arbitraje (lado Binance SELL)');
+    /*
+     * The economics lead, the Binance side follows, the API parameter last.
+     * A reader must never have to infer which side of the book a leg came
+     * from, nor what it does to their money.
+     */
+    expect(body).toContain('COMPRA USDT');
+    expect(body).toContain('Fuente: Binance ASK');
+    expect(body).toContain('VENTA USDT');
+    expect(body).toContain('Fuente: Binance BID');
     expect(body).not.toContain('STRATEGIC');
     expect(body).not.toContain('mediana');
   });
@@ -423,12 +430,19 @@ describe('Telegram: EXECUTABLE is never confused with STRATEGIC', () => {
   it('prints absent liquidity as not verifiable rather than as zero', () => {
     const body = formatOpportunityLifecycleMessage(
       'DETECTED',
-      makeOpportunity({ availableUsdt: null }),
+      /*
+       * The buy leg published nothing. Reported per leg now, so an unknown on
+       * one side cannot be masked by a known figure on the other - which is
+       * what a single combined "Liquidez" line used to allow.
+       */
+      makeOpportunity({ buyAvailableUsdt: null, availableUsdt: null }),
       T0
     );
 
-    expect(body).toContain('Liquidez: no verificable');
-    expect(body).not.toContain('Liquidez: <b>0.00 USDT</b>');
+    expect(body).toContain('Liquidez compra: no verificable');
+    expect(body).not.toContain('Liquidez compra: <b>0.00 USDT</b>');
+    // The side that DID publish is still reported as the number it is.
+    expect(body).toContain('Liquidez venta: <b>400.00 USDT</b>');
   });
 
   it('prints an unknown capture age as not verifiable rather than as 0s', () => {
