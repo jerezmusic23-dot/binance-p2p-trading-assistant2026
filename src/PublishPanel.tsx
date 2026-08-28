@@ -53,7 +53,9 @@ const PriceLeg: React.FC<{
 
       <div className="mt-2 space-y-0.5 text-[10px] text-[#848e9c]">
         <div>
-          Posición estimada <span className="font-mono text-[#e0e0e0]">{position}</span>
+          {/* Contada sobre la escalera capturada, no estimada. */}
+          Posición <span className="font-mono text-[#e0e0e0]">{position}</span>{' '}
+          <span className="text-[#5e6673]">si el libro no se mueve</span>
         </div>
         <div>
           Líder actual{' '}

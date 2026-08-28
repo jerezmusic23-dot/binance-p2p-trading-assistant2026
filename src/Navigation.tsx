@@ -53,7 +53,13 @@ export const Navigation: React.FC<NavigationProps> = ({
     },
     {
       id: 'projections',
-      label: 'Proyección Diaria (8AM-8PM)',
+      /*
+       * "Proyección Diaria (8AM-8PM)" named the old session chart: trece
+       * cubos horarios rellenados hacia adelante con una curva escrita a
+       * mano. Esa vista no existe. Lo que hay ahora es el libro completo
+       * leído con el mismo motor que cada celda, sin franja horaria fija.
+       */
+      label: 'Proyección del Mercado',
       icon: <TrendingUp className="w-4 h-4" />,
     },
     {

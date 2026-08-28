@@ -184,12 +184,20 @@ const SideDetail: React.FC<{ analysis: MakerSideAnalysis; publishedAt: number | 
 
       {publishedAt !== null && (
         <div className="text-[10px] font-mono text-[#e0e0e0]">
-          Publicando a {publishedAt.toFixed(2)}: posición estimada{' '}
+          {/*
+            CONTADA, no estimada - y con la condición dicha.
+
+            Es cuántos anuncios de la escalera baten este precio, más uno. Lo
+            que la hace condicional no es el cálculo sino el libro: son los 20
+            anuncios que Binance devolvió, y nadie más se mueve mientras tanto.
+          */}
+          Publicando a {publishedAt.toFixed(2)}: posición{' '}
           {analysis.ladder.filter((e) =>
             analysis.definition.leaderIs === 'HIGHEST'
               ? e.price > publishedAt
               : e.price < publishedAt
           ).length + 1}
+          <span className="text-[#5e6673]"> si el libro no se mueve</span>
         </div>
       )}
 
