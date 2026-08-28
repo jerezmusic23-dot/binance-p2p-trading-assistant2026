@@ -25,7 +25,9 @@ import {
   ExecutabilityRejection,
   ExecutableQuote,
   LiquidityStatus,
+  ExecutablePair,
   NormalizedAd,
+  PairSearchReport,
 } from './types.js';
 import { verifyBank } from './bankMatching.js';
 import { round2, signedSpreadPct } from './marketStatistics.js';
@@ -191,19 +193,189 @@ function tally(quotes: readonly ExecutableQuote[]): Record<string, number> {
 }
 
 /**
- * Deterministic pick among equal prices: the lowest advNo wins, so the same
- * book always yields the same quote.
+ * The best ad on ONE side, on its own terms.
+ *
+ * DIAGNOSTIC, never an operation. Two of these do not make a pair: the
+ * quantity the sell leg must move depends on the buy leg's price, so they can
+ * only be chosen together. selectExecutablePair does that; this exists so the
+ * matrix can show what each side holds when no pair exists.
+ *
+ * Equal prices resolve to the lowest advNo, so the same book always yields the
+ * same quote.
  */
-function pickBest(
+function bestOnSide(
   quotes: readonly ExecutableQuote[],
-  better: (candidate: number, incumbent: number) => boolean
+  bestIs: 'LOWEST' | 'HIGHEST'
 ): ExecutableQuote | null {
   let best: ExecutableQuote | null = null;
   for (const q of quotes) {
-    if (best === null || better(q.price, best.price)) best = q;
+    if (best === null) best = q;
+    else if (bestIs === 'LOWEST' ? q.price < best.price : q.price > best.price) best = q;
     else if (q.price === best.price && q.advNo < best.advNo) best = q;
   }
   return best;
+}
+
+/*
+ * pickBest USED TO LIVE HERE, and it is gone.
+ *
+ * It chose the best quote on ONE side in isolation, which is the shape of the
+ * defect: the two legs of an operation cannot be chosen independently, because
+ * the quantity the second must move is set by the price of the first. Choosing
+ * a pair is selectExecutablePair's job, and the ordering it uses is total, so
+ * nothing needs a second, per-side notion of "best".
+ */
+
+/** Ascending by price, then by advNo, so the order is total and stable. */
+function byPriceThenAdv(a: ExecutableQuote, b: ExecutableQuote): number {
+  return a.price - b.price || (a.advNo < b.advNo ? -1 : a.advNo > b.advNo ? 1 : 0);
+}
+
+/**
+ * THE BEST PAIR OF LEGS THAT CAN ACTUALLY BE EXECUTED TOGETHER.
+ *
+ * THE DEFECT THIS REPLACES
+ *
+ * The old search resolved the legs in sequence: pick the best BUY, derive the
+ * USDT it obtains, then look for a SELL that can absorb them. When the best
+ * buy produced more USDT than any seller could take, the cell was declared
+ * NO OPPORTUNITY - and the second-best buy, which would have produced fewer
+ * USDT and paired perfectly, was never tried. Demonstrated:
+ *
+ *     BUY 940 -> needs 53.191489 USDT
+ *     BUY 941 -> needs 53.134963 USDT
+ *     SELL 950, liquidity 53.15 USDT
+ *
+ * 940 does not fit, so the cell reported nothing. 941 -> 950 fits and is worth
+ * +0.9564%. That opportunity existed and was never reported.
+ *
+ * WHY THIS IS NOT A RETURN TO THE OLDER, LOOSER ALGORITHM
+ *
+ * The version before that checked each leg against its OWN price, so the sell
+ * leg was verified for amountVes / sellPrice USDT when amountVes / buyPrice
+ * were going to be sold - always fewer, by exactly the margin. It found pairs
+ * that could not be executed. Here every reported pair has been checked
+ * against the real quantity, jointly. Nothing is relaxed; the search is
+ * widened.
+ *
+ * THE DOMINANCE THAT KEEPS IT CHEAP
+ *
+ * A pair (b, s) is compatible when
+ *
+ *     available(s)  >=  amountVes / price(b)
+ *
+ * which rearranges to a MINIMUM BUY PRICE for that seller:
+ *
+ *     price(b)  >=  amountVes / available(s)  =:  pMin(s)
+ *
+ * and the margin (price(s) - price(b)) / price(b) is strictly decreasing in
+ * price(b). So for a FIXED seller:
+ *
+ *   - every buy below pMin(s) is infeasible;
+ *   - among the feasible ones, the CHEAPEST maximises the margin, and every
+ *     other feasible buy is strictly dominated by it.
+ *
+ * One buy per seller is therefore enough, and it is found by binary search on
+ * the sorted buy prices. The search is O(m log n) instead of O(n x m), and no
+ * pair it skips could have won. `pairsExamined` in the report is that count,
+ * so the saving is measured rather than asserted.
+ *
+ * The sellers cannot be reduced the same way: a higher sale price often comes
+ * with less published volume, which forces a more expensive buy, so every
+ * seller has to be tried.
+ *
+ * PURE. Sorting is by (price, advNo), so equal prices resolve to the lowest
+ * advNo and the same book always yields the same pair.
+ */
+export function selectExecutablePair(params: {
+  buyCandidates: readonly ExecutableQuote[];
+  sellCandidates: readonly ExecutableQuote[];
+  amountVes: number;
+}): { pair: ExecutablePair | null; pairsExamined: number; compatiblePairs: number } {
+  const { amountVes } = params;
+  const buys = [...params.buyCandidates].sort(byPriceThenAdv);
+  const sells = [...params.sellCandidates].sort(byPriceThenAdv);
+
+  /** Index of the cheapest buy priced at or above `floor`, or -1. */
+  const cheapestAtLeast = (floor: number): number => {
+    let lo = 0;
+    let hi = buys.length - 1;
+    let found = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (buys[mid].price >= floor) {
+        found = mid;
+        hi = mid - 1;
+      } else {
+        lo = mid + 1;
+      }
+    }
+    return found;
+  };
+
+  let best: ExecutablePair | null = null;
+  let pairsExamined = 0;
+  let compatiblePairs = 0;
+
+  for (const sell of sells) {
+    /*
+     * A seller with no published volume never reaches here - evaluateAd
+     * rejects LIQUIDITY_NOT_VERIFIABLE and LIQUIDITY_ZERO before this. The
+     * guard keeps the arithmetic total rather than trusting that.
+     */
+    const available = sell.availableUsdt;
+    if (available === null || !Number.isFinite(available) || available <= 0) continue;
+
+    const index = cheapestAtLeast(amountVes / available);
+    if (index === -1) continue;
+
+    const buy = buys[index];
+    pairsExamined += 1;
+
+    const usdtTraded = amountVes / buy.price;
+    // The same inequality again, evaluated directly rather than inferred from
+    // the threshold: the reported pair is verified, not deduced.
+    if (available < usdtTraded) continue;
+    compatiblePairs += 1;
+
+    /*
+     * signedSpreadPct is the domain's single definition of the sign and it
+     * returns null for a non-positive or non-finite denominator. Both prices
+     * passed INVALID_PRICE, so null cannot occur here - and if it ever did,
+     * skipping the pair is the only safe answer: no spread, no operation.
+     */
+    const spreadPct = signedSpreadPct(sell.price, buy.price);
+    if (spreadPct === null) continue;
+
+    const candidate: ExecutablePair = { buy, sell, usdtTraded, spreadPct };
+    if (best === null || betterPair(candidate, best)) best = candidate;
+  }
+
+  return { pair: best, pairsExamined, compatiblePairs };
+}
+
+/**
+ * Ranking WITHIN one cell.
+ *
+ * Margin first. Inside a cell the operation size is fixed - it is the tier -
+ * so a higher rate is a higher absolute gain, and the two cannot disagree
+ * here. Surplus liquidity beyond what the operation consumes buys nothing for
+ * THIS operation, so it ranks below the price and only breaks ties.
+ *
+ * The remaining keys exist to make the answer total: two books that differ in
+ * no observable way must not produce different pairs.
+ */
+function betterPair(a: ExecutablePair, b: ExecutablePair): boolean {
+  if (a.spreadPct !== b.spreadPct) return a.spreadPct > b.spreadPct;
+
+  const aLiq = Math.min(a.buy.availableUsdt ?? 0, a.sell.availableUsdt ?? 0);
+  const bLiq = Math.min(b.buy.availableUsdt ?? 0, b.sell.availableUsdt ?? 0);
+  if (aLiq !== bLiq) return aLiq > bLiq;
+
+  if (a.buy.price !== b.buy.price) return a.buy.price < b.buy.price;
+  if (a.sell.price !== b.sell.price) return a.sell.price > b.sell.price;
+  if (a.buy.advNo !== b.buy.advNo) return a.buy.advNo < b.buy.advNo;
+  return a.sell.advNo < b.sell.advNo;
 }
 
 /**
@@ -214,8 +386,9 @@ function pickBest(
  * Banesco do not form an operation anyone can execute, however wide the
  * apparent spread.
  *
- * No fallbacks. When a side has no executable quote the answer is null - not
- * the median, not the best raw ad, not a suggested price.
+ * No fallbacks. When no pair of legs can be executed together the answer is
+ * null on both sides - not the median, not the best raw ad, not a suggested
+ * price, and never two legs that were only checked separately.
  */
 export function evaluateBankAmount(params: {
   bank: string;
@@ -227,66 +400,81 @@ export function evaluateBankAmount(params: {
   const { bank, allowedCodes, amountVes, buyAds, sellAds } = params;
 
   /*
-   * Which extreme is best comes from the leg definition, not from a comment.
-   * mapBinanceAdToArbitrageLeg is the only place that knows a tradeType 'BUY'
-   * ad is my purchase; asking it here means this file cannot drift from it.
-   */
-  const askLeg = mapBinanceAdToArbitrageLeg('BUY');
-  const bidLeg = mapBinanceAdToArbitrageLeg('SELL');
-
-  /*
-   * THE TWO LEGS ARE EVALUATED IN ORDER, AND THAT ORDER IS THE FIX.
+   * CANDIDATES ARE THE ADS THAT PASS EVERY CHECK THAT DOES NOT DEPEND ON THE
+   * OTHER LEG: bank, price, amount limits, and a published, non-zero volume.
    *
-   * The operation is VES -> USDT -> VES. The first leg spends amountVes and
-   * receives amountVes / buyPrice USDT; the second leg has to move exactly
-   * those USDT. Because an opportunity requires sellPrice > buyPrice, that
-   * quantity is ALWAYS larger than amountVes / sellPrice.
+   * The buy leg spends amountVes at its own price, so its requirement is
+   * self-contained and evaluateAd's default is exactly right.
    *
-   * Both legs used to be checked against their own price, so the second was
-   * asked to cover the smaller number. On a 50.000 VES operation at 940 -> 950
-   * it was verified for 52,6316 USDT when 53,1915 were going to be sold: a
-   * 1,05% shortfall, unnoticed. The gap is exactly the margin, so the more
-   * profitable the operation looked, the more liquidity went unchecked.
-   *
-   * The buy leg therefore resolves first, and its price sizes the sell leg.
-   * Picking the CHEAPEST buy is also the strictest choice: it buys the most
-   * USDT, so it imposes the largest requirement on the seller.
+   * The sell leg's requirement is NOT self-contained - it depends on which buy
+   * it is paired with - so requiredUsdt is 0 here and the real quantity is
+   * checked in selectExecutablePair, jointly, for every pair it reports. This
+   * is deliberately the only place the sell side is evaluated leniently, and
+   * nothing downstream reads these quotes as executable operations.
    */
   const allBuy = buyAds.map((ad) =>
     evaluateAd(ad, { bank, allowedCodes, amountVes, side: 'BUY' })
   );
   const buyQuotes = allBuy.filter((q) => q.provenance === 'EXECUTABLE');
-  const bestExecutableBuy = pickBest(buyQuotes, (c, i) =>
-    askLeg.bestIs === 'LOWEST' ? c < i : c > i
-  );
-
-  /*
-   * The USDT the first leg actually obtains. null when there is no executable
-   * first leg: there is then no operation, no quantity to size against, and
-   * the sell side falls back to evaluating each ad on its own terms - which is
-   * what the per-side status on the cell reports.
-   */
-  const usdtToSell =
-    bestExecutableBuy !== null ? amountVes / bestExecutableBuy.price : null;
 
   const allSell = sellAds.map((ad) =>
-    evaluateAd(ad, {
-      bank,
-      allowedCodes,
-      amountVes,
-      side: 'SELL',
-      requiredUsdt: usdtToSell ?? undefined,
-    })
+    evaluateAd(ad, { bank, allowedCodes, amountVes, side: 'SELL', requiredUsdt: 0 })
   );
   const sellQuotes = allSell.filter((q) => q.provenance === 'EXECUTABLE');
-  const bestExecutableSell = pickBest(sellQuotes, (c, i) =>
-    bidLeg.bestIs === 'LOWEST' ? c < i : c > i
-  );
+
+  const search = selectExecutablePair({
+    buyCandidates: buyQuotes,
+    sellCandidates: sellQuotes,
+    amountVes,
+  });
+
+  /*
+   * TWO DIFFERENT QUESTIONS, AND THEY MUST NOT SHARE A FIELD.
+   *
+   *   bestExecutableBuy / bestExecutableSell answer "what is the best ad on
+   *   this side, on its own terms". The matrix screen needs that even when no
+   *   operation exists: "there is a buy at 921.10 and no seller who can absorb
+   *   it" is a useful answer, and "nothing here" is not.
+   *
+   *   `pair` answers "which two legs can actually be executed together". Only
+   *   this is an operation, and it is the ONLY thing buildOpportunity reads.
+   *
+   * Collapsing them is how the older code produced pairs that had never been
+   * checked jointly. They are kept apart on purpose.
+   */
+  const bestExecutableBuy = bestOnSide(buyQuotes, 'LOWEST');
+  const bestExecutableSell = bestOnSide(sellQuotes, 'HIGHEST');
 
   const noneReason = (side: 'compra' | 'venta', evaluated: number) =>
     evaluated === 0
       ? `El banco no devolvio anuncios de ${side}.`
       : `Ninguno de los ${evaluated} anuncios de ${side} es ejecutable para ${amountVes} VES en este banco.`;
+
+  /*
+   * WHY THERE IS NO OPERATION, when there is none.
+   *
+   * The case the old code could not express: both sides hold executable ads
+   * and there is still nothing to do, because no buy and no sell can move the
+   * same USDT. Reporting that as "not executable" would be false, and
+   * reporting nothing at all is what sent the operator looking for a bug.
+   */
+  const pairReason =
+    search.pair !== null
+      ? null
+      : buyQuotes.length === 0 || sellQuotes.length === 0
+        ? `No hay anuncios ejecutables en ${buyQuotes.length === 0 ? 'compra' : 'venta'} para ${amountVes} VES en este banco.`
+        : `Hay ${buyQuotes.length} anuncios de compra y ${sellQuotes.length} de venta ejecutables, pero ninguna pareja puede mover los mismos USDT para ${amountVes} VES.`;
+
+  const pairing: PairSearchReport = {
+    buyAdsSeen: buyAds.length,
+    sellAdsSeen: sellAds.length,
+    buyCandidates: buyQuotes.length,
+    sellCandidates: sellQuotes.length,
+    pairsPossible: buyQuotes.length * sellQuotes.length,
+    pairsExamined: search.pairsExamined,
+    compatiblePairs: search.compatiblePairs,
+    usdtTraded: search.pair?.usdtTraded ?? null,
+  };
 
   return {
     bank,
@@ -295,6 +483,9 @@ export function evaluateBankAmount(params: {
     sellQuotes,
     bestExecutableBuy,
     bestExecutableSell,
+    pair: search.pair,
+    pairing,
+    noPairReason: pairReason,
     /*
      * FULL PRECISION, not rounded.
      *
@@ -307,10 +498,7 @@ export function evaluateBankAmount(params: {
      * Real spreads in this market live in the third and fourth decimal.
      * Rounding is a presentation concern and belongs in the view.
      */
-    spreadPct:
-      bestExecutableBuy !== null && bestExecutableSell !== null
-        ? signedSpreadPct(bestExecutableSell.price, bestExecutableBuy.price)
-        : null,
+    spreadPct: search.pair?.spreadPct ?? null,
     buyReason: bestExecutableBuy === null ? noneReason('compra', allBuy.length) : null,
     sellReason: bestExecutableSell === null ? noneReason('venta', allSell.length) : null,
     buyRejections: tally(allBuy),

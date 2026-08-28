@@ -168,9 +168,16 @@ describe('projection provenance', () => {
   });
 
   it('never labels the point-scoring probabilities as anything but HEURISTIC', () => {
-    // They are not a calibrated distribution; the audit found a fixed
-    // point-scoring rule clamped to [8, 88].
+    /*
+     * The label survives the removal of the numbers, deliberately. The block
+     * now carries { up: null, neutral: null, down: null } - the point-scoring
+     * rule clamped to [8, 88] is gone - and HEURISTIC remains the honest
+     * classification of a block that has never been calibrated against
+     * anything. If a measured distribution is ever built, the label is what
+     * has to change with it.
+     */
     expect(project().provenance.probabilities).toBe('HEURISTIC');
+    expect(project().probabilities).toEqual({ up: null, neutral: null, down: null });
   });
 
   it('never labels the sample-count confidence as measured evidence', () => {

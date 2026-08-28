@@ -133,17 +133,29 @@ const SidePanel: React.FC<{ projection: SideProjection }> = ({ projection }) => 
         )}
       </div>
 
-      {/* The horizons, and their disagreement when there is one. */}
+      {/*
+        The horizons, their reading, and THE PERIOD EACH ONE COVERS.
+
+        The span used to live in a title attribute - invisible on a phone, and
+        on any device until you hover. "MUY CORTO: alcista fuerte" without a
+        period is not a statement anybody can act on, so the measured minutes
+        are printed. They are measured, not assumed: the windows are counted in
+        observations and spanMs is the real elapsed time that turned out to be.
+      */}
       <div className="flex flex-wrap gap-1 text-[9px]">
         {projection.trend.horizons.map((horizon) => (
           <span
             key={horizon.name}
             className="px-1.5 py-0.5 rounded border border-[#2b2f36] text-[#848e9c] font-mono"
-            title={`${horizon.observations} obs. · ${
-              horizon.spanMs === null ? 'n/v' : `${Math.round(horizon.spanMs / 60000)} min`
-            }`}
           >
             {HORIZON_LABEL[horizon.name]}: {GRADE_LABEL[horizon.grade]}
+            <span className="text-[#5e6673]">
+              {' '}
+              ·{' '}
+              {horizon.spanMs === null
+                ? `${horizon.observations} obs.`
+                : `${horizon.observations} obs. / ${Math.round(horizon.spanMs / 60000)} min`}
+            </span>
           </span>
         ))}
       </div>
@@ -164,6 +176,21 @@ const SidePanel: React.FC<{ projection: SideProjection }> = ({ projection }) => 
       <div className="rounded border border-dashed border-[#2b2f36] px-2 py-1.5">
         <div className="text-[9px] uppercase tracking-wide text-[#f0b90b]">
           Proyectado · rango observado
+          {/*
+            THE PERIOD THE BAND DESCRIBES, in the operator's units.
+
+            The engine counts in observations because the capture cadence is a
+            consequence of the tier rotation, not a promise. horizonMs is that
+            count converted using the median gap MEASURED on this cell's own
+            timestamps, so the minutes are observed rather than assumed - and
+            absent, rather than invented, when there is no cadence to measure.
+          */}
+          {range.horizonMs !== null && (
+            <span className="text-[#5e6673] normal-case tracking-normal">
+              {' '}
+              · a {Math.round(range.horizonMs / 60000)} min ({range.stepsAhead} obs.)
+            </span>
+          )}
         </div>
         {range.low !== null && range.high !== null ? (
           <>

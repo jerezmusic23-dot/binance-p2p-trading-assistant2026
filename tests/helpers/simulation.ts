@@ -29,16 +29,60 @@ export interface ScriptedBook {
   sellListing: number;
 }
 
+export type MessageStream = 'SUMMARY' | 'PRICE_DIGEST' | 'SIGNAL' | 'SYSTEM' | 'OTHER';
+
+export interface SentMessage {
+  /** Milliseconds of simulated time since the store was started. */
+  atMs: number;
+  stream: MessageStream;
+  heading: string;
+  text: string;
+}
+
+/** Which emitter a body came from, decided by what only that emitter writes. */
+export function classify(text: string): MessageStream {
+  if (text.includes('MIS PRECIOS PARA PUBLICAR')) return 'SUMMARY';
+  if (text.includes('CAMBIOS DE PRECIOS')) return 'PRICE_DIGEST';
+  if (text.includes('<b>Evidencia</b>')) return 'SIGNAL';
+  if (/BINANCE|DATOS DESACTUALIZADOS|STORAGE/.test(text)) return 'SYSTEM';
+  return 'OTHER';
+}
+
+/** Gaps in minutes between consecutive messages of one stream. */
+export function gapsMinutes(timeline: SentMessage[], stream: MessageStream): number[] {
+  const times = timeline.filter((m) => m.stream === stream).map((m) => m.atMs);
+  const gaps: number[] = [];
+  for (let i = 1; i < times.length; i++) gaps.push((times[i] - times[i - 1]) / 60_000);
+  return gaps;
+}
+
 export interface SimulationResult {
   sweeps: number;
   /** Requests that carried transAmount: the bank-matrix sweep. */
   matrixRequests: number;
   /** Observations stored for the reference cell. */
   observations: number;
+  /**
+   * What the engine did internally, before any delivery gate.
+   *
+   * Telegram counts alone cannot distinguish a quiet market from a loud one
+   * being suppressed correctly. These are the denominators.
+   */
+  internal: { sweeps: number; priceChangesDetected: number; signalsDerived: number };
   /** Signals the engine produced on the final evaluation. */
   finalSignals: string[];
   /** Every Telegram body, in order. */
   messages: string[];
+  /**
+   * Every message with the simulated instant it left, and which stream it
+   * belongs to.
+   *
+   * COUNTS ALONE CANNOT ANSWER "does 30 minutes mean 30 minutes". Three
+   * emitters each honouring their own half-hour still put a message on the
+   * phone every few minutes if their clocks are not aligned, and that is
+   * indistinguishable from a broken interval unless the instants are recorded.
+   */
+  timeline: SentMessage[];
   /** Messages grouped by their first line. */
   byHeading: Record<string, number>;
   counts: {
@@ -67,8 +111,21 @@ export async function simulateMarket(params: {
   /** Which cell's series is reported back. */
   referenceBank?: string;
   referenceAmount?: string;
+  /**
+   * Run inside an EXISTING directory instead of a fresh one, and leave it in
+   * place afterwards.
+   *
+   * This is how a restart is simulated honestly: the process is new - modules
+   * reset, singletons rebuilt, every in-memory clock back to zero - while the
+   * history on disk is the one the previous run wrote. Two runs in two
+   * different temporary directories are not a restart, they are two first
+   * boots, and they cannot show whether coming back produces a burst.
+   */
+  dataDir?: string;
 }): Promise<SimulationResult> {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'p2p-sim-'));
+  const reusing = params.dataDir !== undefined;
+  const tmpDir = params.dataDir ?? fs.mkdtempSync(path.join(os.tmpdir(), 'p2p-sim-'));
+  fs.mkdirSync(tmpDir, { recursive: true });
   const originalCwd = process.cwd();
   process.chdir(tmpDir);
 
@@ -81,13 +138,22 @@ export async function simulateMarket(params: {
   }
 
   const messages: string[] = [];
+  const timeline: SentMessage[] = [];
+  let startedAt = 0;
   let binanceCalls = 0;
   let matrixRequests = 0;
 
   vi.stubGlobal('fetch', async (url: unknown, init: RequestInit) => {
     const href = String(url);
     if (href.includes('api.telegram.org')) {
-      messages.push(JSON.parse(String(init.body)).text as string);
+      const text = JSON.parse(String(init.body)).text as string;
+      messages.push(text);
+      timeline.push({
+        atMs: Date.now() - startedAt,
+        stream: classify(text),
+        heading: text.split('\n')[0].replace(/<[^>]+>/g, '').trim(),
+        text,
+      });
       return new Response('{"ok":true}', { status: 200 });
     }
 
@@ -131,6 +197,7 @@ export async function simulateMarket(params: {
   const { HistoricalMarketStore } = await import('../../server/historicalMarketStore.js');
 
   const store = CentralMarketStore.getInstance();
+  startedAt = Date.now();
   store.start();
   // Boot snapshot plus the 2s full sweep.
   await vi.advanceTimersByTimeAsync(3_000);
@@ -139,6 +206,7 @@ export async function simulateMarket(params: {
   const bank = params.referenceBank ?? 'VENEZUELA';
   const amount = params.referenceAmount ?? '10K';
   const observations = HistoricalMarketStore.load(bank, amount).length;
+  const internal = store.getEventCounters();
   const finalSignals = store.getProjections().signals.map((s) => `${s.kind}:${s.status}`);
 
   store.stop();
@@ -162,7 +230,7 @@ export async function simulateMarket(params: {
   vi.unstubAllGlobals();
   vi.useRealTimers();
   process.chdir(originalCwd);
-  fs.rmSync(tmpDir, { recursive: true, force: true });
+  if (!reusing) fs.rmSync(tmpDir, { recursive: true, force: true });
   delete process.env.TELEGRAM_BOT_TOKEN;
   delete process.env.TELEGRAM_CHAT_ID;
   delete process.env.MAKER_PRICE_CHANGE_ALERT_INTERVAL_MS;
@@ -171,8 +239,10 @@ export async function simulateMarket(params: {
     sweeps: params.sweeps,
     matrixRequests,
     observations,
+    internal,
     finalSignals,
     messages,
+    timeline,
     byHeading,
     counts,
   };

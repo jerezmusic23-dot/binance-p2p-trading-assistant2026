@@ -132,14 +132,33 @@ export function evaluateMakerAlerts(params: {
   }
 
   /*
-   * The summary is due on its own clock, not on anything that changed. The
-   * first one goes out as soon as a matrix has something to say, so the
-   * operator is not left waiting half an hour after a restart.
+   * THE SUMMARY CLOCK STARTS AT THE FIRST EVALUATION, NOT AT THE FIRST PROFIT.
+   *
+   * This gate used to read
+   *   const hasAnythingToSay = Object.keys(recommended).length > 0;
+   *   summaryDue = lastSummaryAt === null ? hasAnythingToSay : ...
+   * and `recommended` only receives cells that are PUBLISH_AT_TOP or
+   * PUBLISH_DEEPER with a real pairing. So until some cell was profitable,
+   * lastSummaryAt stayed null and the half-hour clock never started at all.
+   *
+   * Measured over 150 simulated minutes at 45-second sweeps, before the fix:
+   *   normal book (bid 940 / ask 945) ....... 5 summaries  (t+0, +30, +60 ...)
+   *   CROSSED book (bid 946 / ask 945) ...... 0 summaries, ever
+   *   no decimals -> tick not observable .... 0 summaries, ever
+   * The two regimes that produced nothing are exactly the two where the
+   * operator most needs to be told: the answer "do not publish, and here is
+   * why" is a summary, not silence. Regla 5 - if information is missing, show
+   * that it is missing.
+   *
+   * So the clock is anchored the first time this function sees a matrix, and
+   * from then on it is pure arithmetic on the interval. What the summary SAYS
+   * when nothing is publishable is the formatter's business, and it already
+   * says it per cell ("sin margen", "PRECIO NO VERIFICABLE", "Binance no
+   * respondió").
    */
-  const hasAnythingToSay = Object.keys(recommended).length > 0;
   const summaryDue =
     params.state.lastSummaryAt === null
-      ? hasAnythingToSay
+      ? true
       : params.nowMs - params.state.lastSummaryAt >= interval;
 
   let lastSummaryAt = params.state.lastSummaryAt;

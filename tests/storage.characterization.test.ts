@@ -44,26 +44,49 @@ afterEach(() => {
 });
 
 describe('initialize', () => {
-  it('creates data/ and seeds the two default alert rules', async () => {
+  it('creates data/ and seeds NO alert rules', async () => {
+    /*
+     * THIS TEST USED TO ASSERT THE OPPOSITE, and the opposite was the defect.
+     *
+     * initialize() created 'rule-spread-high' (SPREAD_ABOVE 2.0) and
+     * 'rule-volatility-spike' (VOLATILITY_SPIKE 1.5), both enabled, on any
+     * install that had no alerts.json. Together with the six-second evaluation
+     * loop that is why a brand-new deployment started announcing market levels
+     * on Telegram before the operator had configured anything at all.
+     *
+     * A rule now exists only because it was created through /api/alerts.
+     */
     const StorageEngine = await freshStorage();
     StorageEngine.initialize();
 
     expect(fs.existsSync(path.join(tmpDir, 'data'))).toBe(true);
     expect(fs.existsSync(path.join(tmpDir, 'data', 'market_history.json'))).toBe(true);
 
-    const alerts = readJson<AlertRule[]>('alerts.json');
-    expect(alerts.map((a) => a.id)).toEqual(['rule-spread-high', 'rule-volatility-spike']);
-    expect(alerts[0]).toMatchObject({
-      condition: 'SPREAD_ABOVE',
-      targetValue: 2.0,
-      targetSide: 'SELL',
-      enabled: true,
-    });
-    expect(alerts[1]).toMatchObject({
-      condition: 'VOLATILITY_SPIKE',
-      targetValue: 1.5,
-      targetSide: 'BUY',
-    });
+    expect(readJson<AlertRule[]>('alerts.json')).toEqual([]);
+    expect(StorageEngine.getAlerts()).toEqual([]);
+  });
+
+  it('keeps rules an existing deployment already saved', async () => {
+    // Removing the seeding must not touch anybody's stored rules.
+    fs.mkdirSync(path.join(tmpDir, 'data'), { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpDir, 'data', 'alerts.json'),
+      JSON.stringify([
+        {
+          id: 'mine',
+          name: 'Mi regla',
+          condition: 'ABOVE',
+          targetValue: 930,
+          targetSide: 'BUY',
+          enabled: true,
+          createdAt: 1,
+        },
+      ])
+    );
+
+    const StorageEngine = await freshStorage();
+    StorageEngine.initialize();
+    expect(StorageEngine.getAlerts().map((a) => a.id)).toEqual(['mine']);
   });
 
   it('writes an empty history file when none exists', async () => {
@@ -92,12 +115,30 @@ describe('initialize', () => {
     expect(StorageEngine.getHistory()).toHaveLength(3);
   });
 
-  it('is idempotent - a second call does not reseed', async () => {
+  it('is idempotent - a second call does not resurrect a deleted rule', async () => {
     const StorageEngine = await freshStorage();
     StorageEngine.initialize();
-    StorageEngine.deleteAlert('rule-spread-high');
+    StorageEngine.saveAlert({
+      id: 'a',
+      name: 'A',
+      condition: 'ABOVE',
+      targetValue: 930,
+      targetSide: 'BUY',
+      enabled: true,
+      createdAt: 1,
+    });
+    StorageEngine.saveAlert({
+      id: 'b',
+      name: 'B',
+      condition: 'BELOW',
+      targetValue: 900,
+      targetSide: 'SELL',
+      enabled: true,
+      createdAt: 1,
+    });
+    StorageEngine.deleteAlert('a');
     StorageEngine.initialize();
-    expect(StorageEngine.getAlerts().map((a) => a.id)).toEqual(['rule-volatility-spike']);
+    expect(StorageEngine.getAlerts().map((r) => r.id)).toEqual(['b']);
   });
 });
 
@@ -395,26 +436,46 @@ describe('alerts', () => {
       createdAt: 1,
     };
 
+    // A fresh install seeds no rules, so the count starts at zero.
     StorageEngine.saveAlert(rule);
-    expect(StorageEngine.getAlerts()).toHaveLength(3);
+    expect(StorageEngine.getAlerts()).toHaveLength(1);
 
     StorageEngine.saveAlert({ ...rule, targetValue: 999 });
-    expect(StorageEngine.getAlerts()).toHaveLength(3);
+    expect(StorageEngine.getAlerts()).toHaveLength(1);
     expect(readJson<AlertRule[]>('alerts.json').find((a) => a.id === 'custom-1')?.targetValue)
       .toBe(999);
   });
 
   it('deleteAlert returns false for an unknown id and does not rewrite', async () => {
     const StorageEngine = await freshStorage();
+    StorageEngine.saveAlert({
+      id: 'mine',
+      name: 'Mi regla',
+      condition: 'ABOVE',
+      targetValue: 930,
+      targetSide: 'BUY',
+      enabled: true,
+      createdAt: 1,
+    });
+
     expect(StorageEngine.deleteAlert('does-not-exist')).toBe(false);
-    expect(StorageEngine.deleteAlert('rule-spread-high')).toBe(true);
-    expect(readJson<AlertRule[]>('alerts.json')).toHaveLength(1);
+    expect(StorageEngine.deleteAlert('mine')).toBe(true);
+    expect(readJson<AlertRule[]>('alerts.json')).toHaveLength(0);
   });
 
   it('BUG: getAlerts hands out the internal array by reference', async () => {
-    // Audit B18: callers (CentralMarketStore.evaluateAlerts) mutate stored
-    // rules directly, bypassing saveAlert.
+    // Audit B18: callers mutate stored rules directly, bypassing saveAlert.
     const StorageEngine = await freshStorage();
+    StorageEngine.saveAlert({
+      id: 'mine',
+      name: 'Mi regla',
+      condition: 'ABOVE',
+      targetValue: 930,
+      targetSide: 'BUY',
+      enabled: true,
+      createdAt: 1,
+    });
+
     StorageEngine.getAlerts()[0].enabled = false;
     expect(StorageEngine.getAlerts()[0].enabled).toBe(false);
   });

@@ -52,8 +52,19 @@ function isExecutable(quote: ExecutableQuote | null): quote is ExecutableQuote {
  * price, not the raw extreme, not a suggested price, not a historical value.
  */
 export function buildOpportunity(cell: BankAmountExecutability): Opportunity | null {
-  const buy = cell.bestExecutableBuy;
-  const sell = cell.bestExecutableSell;
+  /*
+   * READS cell.pair, NEVER the two per-side bests.
+   *
+   * bestExecutableBuy and bestExecutableSell are each chosen on their own
+   * side's terms, and two independently-chosen legs are not an operation: the
+   * USDT the sell leg must move is set by the BUY leg's price, so the pair has
+   * to be verified jointly. cell.pair is the only field where that has been
+   * done, and building an Opportunity from anything else is how a pair nobody
+   * could execute reached Telegram.
+   */
+  if (cell.pair === null) return null;
+  const buy: ExecutableQuote | null = cell.pair.buy;
+  const sell: ExecutableQuote | null = cell.pair.sell;
 
   if (!isExecutable(buy) || !isExecutable(sell)) return null;
 
@@ -114,6 +125,14 @@ export function buildOpportunity(cell: BankAmountExecutability): Opportunity | n
     // and none is invented.
     marginAbsolute: spreadAbsolute,
     marginPct: spreadPct,
+    /*
+     * The same operation expressed as money rather than as a rate.
+     *
+     * usdtTraded is what the buy leg obtains for this tier, so multiplying by
+     * the VES gained per USDT gives the gross margin of the whole operation.
+     * Nothing new is measured: it is amountVes x spreadPct / 100 rearranged.
+     */
+    marginVes: cell.pair.usdtTraded * spreadAbsolute,
     buyAvailableUsdt,
     sellAvailableUsdt,
     availableUsdt,
@@ -210,8 +229,13 @@ function toContext(cell: BankAmountExecutability): OpportunityContext {
   return {
     bank: cell.bank,
     amountVes: cell.amountVes,
-    buyReason: cell.buyReason,
-    sellReason: cell.sellReason,
+    /*
+     * When both sides hold executable ads and no pair can move the same USDT,
+     * the per-side reasons are both null and the cell would explain nothing.
+     * noPairReason is the answer in exactly that case.
+     */
+    buyReason: cell.buyReason ?? (cell.pair === null ? cell.noPairReason : null),
+    sellReason: cell.sellReason ?? (cell.pair === null ? cell.noPairReason : null),
     buyRejections: cell.buyRejections,
     sellRejections: cell.sellRejections,
   };

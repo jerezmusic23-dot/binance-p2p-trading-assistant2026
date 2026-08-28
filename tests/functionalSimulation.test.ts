@@ -12,6 +12,9 @@
  * NOTHING HERE IS EVIDENCE ABOUT THE REAL MARKET. The books are scripted.
  */
 
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   breakoutMarket,
@@ -46,11 +49,14 @@ afterEach(() => {
 });
 
 function report(name: string, result: Awaited<ReturnType<typeof simulateMarket>>) {
+  const i = result.internal;
   console.log(
-    `${name.padEnd(24)} obs=${String(result.observations).padStart(3)} ` +
-      `resumen=${result.counts.summary} digest=${result.counts.priceDigest} ` +
-      `señal=${result.counts.signal} taker=${result.counts.takerVocabulary} ` +
-      `TOTAL=${result.messages.length}`
+    `TABLA | ${name.padEnd(26)} | capturas=${String(result.matrixRequests).padStart(4)} ` +
+      `| barridos=${String(i.sweeps).padStart(3)} ` +
+      `| eventos=${String(i.priceChangesDetected + i.signalsDerived).padStart(5)} ` +
+      `(precio=${i.priceChangesDetected} señales=${i.signalsDerived}) ` +
+      `| Telegram=${String(result.messages.length).padStart(2)} ` +
+      `(resumen=${result.counts.summary} digest=${result.counts.priceDigest} señal=${result.counts.signal})`
   );
 }
 
@@ -232,17 +238,133 @@ describe('celda sin histórico y fallback', () => {
   }, 120_000);
 });
 
-describe('reinicio del proceso', () => {
-  it('resumes the series rather than starting a new one', async () => {
-    const first = await simulateMarket({ book: risingMarket, sweeps: 20 });
-    report('antes del reinicio', first);
+describe('fallback al mercado general', () => {
+  it('labels the borrowed reading and still says nothing about it', async () => {
+    /*
+     * A cell with too little of its own history borrows the general market for
+     * the SCREEN. Two things must both hold, and they pull in opposite
+     * directions:
+     *   - the reading is LABELLED, so nobody reads a market-wide trend as this
+     *     bank at this amount;
+     *   - it never alerts, or one market-wide finding becomes 42 identical
+     *     notifications.
+     */
+    const result = await simulateMarket({ book: risingMarket, sweeps: 30 });
+    report('fallback mercado general', result);
 
-    expect(first.observations).toBeGreaterThan(0);
-    // simulateMarket resets modules and the singleton on every run, which is
-    // the same discontinuity a redeploy produces.
-    const second = await simulateMarket({ book: risingMarket, sweeps: 20 });
-    expect(second.observations).toBeGreaterThan(0);
+    expect(result.counts.signal).toBe(0);
+    // And the summary never presents a borrowed reading as the cell's own.
+    for (const message of result.messages) {
+      if (message.includes('MERCADO GENERAL')) {
+        expect(message).toMatch(/histórico|Confianza reducida|general/i);
+      }
+    }
   }, 180_000);
+});
+
+describe('múltiples cambios de precio dentro de 30 minutos', () => {
+  it('is ONE digest per window at the production interval, whatever moved', async () => {
+    /*
+     * The operator's own statement of the rule:
+     *     13:00 -> digest, 13:01-13:29 -> accumulate, 13:30 -> next digest
+     * measured at the production default rather than a shortened interval.
+     */
+    const result = await simulateMarket({ book: steppingMarket, sweeps: SWEEPS });
+    report('cambios dentro de 30 min', result);
+
+    const digests = result.timeline.filter((m) => m.stream === 'PRICE_DIGEST');
+    // 180 simulated minutes at 30 minutes each: six windows at the very most.
+    expect(digests.length).toBeLessThanOrEqual(6);
+
+    // No two digests closer together than the interval.
+    for (let i = 1; i < digests.length; i++) {
+      expect(digests[i].atMs - digests[i - 1].atMs).toBeGreaterThanOrEqual(1_800_000);
+    }
+
+    // And nothing in the first half hour, which is where the stray digest used
+    // to land - 45 seconds after boot, behind a summary that had just listed
+    // every one of those prices.
+    expect(digests.filter((d) => d.atMs < 1_800_000)).toEqual([]);
+
+    console.log(
+      `  huecos entre digests (min): [${digests
+        .slice(1)
+        .map((d, i) => ((d.atMs - digests[i].atMs) / 60000).toFixed(1))
+        .join(', ')}]`
+    );
+  }, 180_000);
+});
+
+describe('reinicio del proceso', () => {
+  it('resumes the series and does not burst on the way back', async () => {
+    /*
+     * A REAL RESTART: the same data directory, a new process.
+     *
+     * The previous version of this test ran two simulations in two different
+     * temporary directories, which is two first boots rather than a restart -
+     * it could not have detected the defect it was named after.
+     *
+     * The thing to prove is that coming back does not spam. Every in-memory
+     * clock resets, so what protects the operator is:
+     *   - makerAlertState.recommended comes back empty, and a FIRST
+     *     observation of a cell is silent by construction, so no price the
+     *     operator already had is republished;
+     *   - the price-change window is re-anchored at boot, so the first digest
+     *     is due a whole interval later instead of 45 seconds in.
+     * The one message a restart adds is the boot summary.
+     */
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'p2p-restart-'));
+    try {
+      const first = await simulateMarket({ book: risingMarket, sweeps: 60, dataDir });
+      report('antes del reinicio', first);
+      expect(first.observations).toBeGreaterThan(0);
+
+      const second = await simulateMarket({ book: risingMarket, sweeps: 60, dataDir });
+      report('tras el reinicio', second);
+
+      // The history on disk is continued, not restarted.
+      expect(second.observations).toBeGreaterThan(first.observations);
+
+      /*
+       * 45 simulated minutes after the restart. One boot summary, one more on
+       * the half hour, and at most one digest - never a replay of every price.
+       */
+      expect(second.counts.summary).toBeLessThanOrEqual(2);
+      expect(second.counts.priceDigest).toBeLessThanOrEqual(1);
+      expect(second.messages.length).toBeLessThanOrEqual(4);
+
+      // And nothing arrives in the first minute except the boot summary.
+      const earlyBurst = second.timeline.filter((m) => m.atMs < 60_000);
+      expect(earlyBurst.map((m) => m.stream)).toEqual(['SUMMARY']);
+    } finally {
+      fs.rmSync(dataDir, { recursive: true, force: true });
+    }
+  }, 300_000);
+
+  it('ten restarts in a row do not multiply the traffic', async () => {
+    /*
+     * The failure mode worth bounding: a crash-loop. Each boot may announce
+     * itself once; none may replay the matrix as changes.
+     */
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'p2p-restart-loop-'));
+    try {
+      let digests = 0;
+      let summaries = 0;
+      for (let i = 0; i < 10; i++) {
+        const run = await simulateMarket({ book: lateralMarket, sweeps: 4, dataDir });
+        digests += run.counts.priceDigest;
+        summaries += run.counts.summary;
+      }
+      console.log(`10 reinicios: resúmenes=${summaries} digests=${digests}`);
+
+      // One boot summary each, and no digest at all: three simulated minutes
+      // per boot never reaches the 30-minute window.
+      expect(summaries).toBeLessThanOrEqual(10);
+      expect(digests).toBe(0);
+    } finally {
+      fs.rmSync(dataDir, { recursive: true, force: true });
+    }
+  }, 300_000);
 });
 
 describe('ningún escenario habla el modelo taker', () => {

@@ -241,27 +241,22 @@ export class StorageEngine {
           this.alerts = [];
         }
       } else {
-        // Initial default alerts
-        this.alerts = [
-          {
-            id: 'rule-spread-high',
-            name: 'Spread Mayor a 2.0%',
-            condition: 'SPREAD_ABOVE',
-            targetValue: 2.0,
-            targetSide: 'SELL',
-            enabled: true,
-            createdAt: Date.now(),
-          },
-          {
-            id: 'rule-volatility-spike',
-            name: 'Movimiento Brusco / Volatilidad',
-            condition: 'VOLATILITY_SPIKE',
-            targetValue: 1.5,
-            targetSide: 'BUY',
-            enabled: true,
-            createdAt: Date.now(),
-          },
-        ];
+        /*
+         * NO SEEDED RULES. A fresh install starts with an empty rule set.
+         *
+         * Two rules used to be created here and enabled without anyone asking:
+         * 'rule-spread-high' (SPREAD_ABOVE 2.0) and 'rule-volatility-spike'
+         * (VOLATILITY_SPIKE 1.5). Together with the 6-second evaluation loop
+         * they were the reason a brand-new deployment started announcing
+         * market levels on Telegram before the operator had configured
+         * anything. That Telegram path is gone, and so is the reason to
+         * invent rules on the operator's behalf: a rule now exists only
+         * because it was created through /api/alerts.
+         *
+         * Rules already saved by an existing deployment are untouched - the
+         * file is read above and never rewritten from here.
+         */
+        this.alerts = [];
         this.saveAlerts();
       }
 

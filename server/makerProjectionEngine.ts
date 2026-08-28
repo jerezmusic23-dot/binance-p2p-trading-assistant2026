@@ -58,8 +58,48 @@ export interface ProjectedRange {
   confidence: Confidence;
   /** How many observations ahead this describes. */
   stepsAhead: number;
+  /**
+   * WHAT THOSE STEPS ARE WORTH IN REAL TIME, measured on this cell's own
+   * timestamps: the MEDIAN gap between consecutive observations, times
+   * stepsAhead.
+   *
+   * The engine counts in observations rather than minutes on purpose - the
+   * capture cadence falls out of the tier rotation and would silently change
+   * the meaning of a window defined in minutes. But "a projection six
+   * observations ahead" tells the operator nothing they can act on, and a
+   * fixed conversion would be a number nobody measured. So the cadence is
+   * taken from the series and reported alongside it.
+   *
+   * null when fewer than two observations exist: there is then no cadence to
+   * measure, and no interval is invented.
+   */
+  horizonMs: number | null;
+  /** Median gap between consecutive observations of this cell. */
+  observedStepMs: number | null;
   reason: EmpiricalRange['reason'];
   basis: string;
+}
+
+/**
+ * The typical gap between consecutive observations of this series.
+ *
+ * MEDIAN, not mean: a restart or a Binance outage leaves one enormous gap, and
+ * an average would let that single hole redefine the cadence of everything
+ * around it.
+ */
+export function observedStepMs(
+  observed: readonly { t: number; price: number }[]
+): number | null {
+  if (observed.length < 2) return null;
+  const gaps: number[] = [];
+  for (let i = 1; i < observed.length; i += 1) {
+    const gap = observed[i].t - observed[i - 1].t;
+    if (Number.isFinite(gap) && gap > 0) gaps.push(gap);
+  }
+  if (gaps.length === 0) return null;
+  gaps.sort((a, b) => a - b);
+  const mid = gaps.length >> 1;
+  return gaps.length % 2 === 1 ? gaps[mid] : Math.round((gaps[mid - 1] + gaps[mid]) / 2);
 }
 
 export interface SideProjection {
@@ -202,6 +242,8 @@ function projectRange(
   stepsAhead: number
 ): ProjectedRange {
   const range = empiricalRange(observed, stepsAhead);
+  const stepMs = observedStepMs(observed);
+  const horizonMs = stepMs === null ? null : stepMs * stepsAhead;
 
   if (currentPrice === null || range.lowDelta === null || range.highDelta === null) {
     return {
@@ -210,6 +252,8 @@ function projectRange(
       sampleSize: range.sampleSize,
       confidence: range.confidence,
       stepsAhead,
+      horizonMs,
+      observedStepMs: stepMs,
       reason: range.reason ?? (currentPrice === null ? 'NO_DATA' : null),
       basis:
         currentPrice === null
@@ -224,10 +268,13 @@ function projectRange(
     sampleSize: range.sampleSize,
     confidence: range.confidence,
     stepsAhead,
+    horizonMs,
+    observedStepMs: stepMs,
     reason: null,
     basis:
       `Percentiles 10-90 de ${range.sampleSize} movimientos reales de esta celda ` +
-      `a ${stepsAhead} observaciones vista.`,
+      `a ${stepsAhead} observaciones vista` +
+      (horizonMs === null ? '.' : ` (~${Math.round(horizonMs / 60_000)} min medidos).`),
   };
 }
 

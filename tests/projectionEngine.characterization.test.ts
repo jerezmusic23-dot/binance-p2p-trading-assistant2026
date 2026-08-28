@@ -216,13 +216,24 @@ describe('generateProjections', () => {
     ]);
   });
 
-  it('keeps probabilities summing to 100 and clamped to [8, 88]', () => {
-    const p = project(makeHistory(40, { drift: 2 }));
-    const { up, neutral, down } = p.probabilities;
-    expect(up).not.toBeNull();
-    expect(up! + neutral! + down!).toBe(100);
-    expect(up!).toBeLessThanOrEqual(88);
-    expect(down!).toBeGreaterThanOrEqual(8);
+  it('reports NO directional probability, however much history there is', () => {
+    /*
+     * THIS TEST USED TO PIN THE POINT SYSTEM: three numbers summing to 100 and
+     * clamped to [8, 88]. That was an accurate characterization of a function
+     * whose coefficients nobody measured - 33.3 each, +26 for the classified
+     * trend, -20 against it, ±8 for book pressure, ±6 for RSI - rendered on the
+     * first screen of the app as a probability distribution.
+     *
+     * Nothing counted how often a market in that state actually rose, so the
+     * output described the scoring rules rather than the market. It is now
+     * null, the same decision already taken for confidencePct, and it is not
+     * replaced by another arbitrary number. Measured frequencies exist per cell
+     * in patternEngine.outcomesInWindow, with their sample size.
+     */
+    for (const rows of [40, 120, 400]) {
+      const p = project(makeHistory(rows, { drift: 2 }));
+      expect(p.probabilities).toEqual({ up: null, neutral: null, down: null });
+    }
   });
 
   it('reports insufficient data, with a reason, when history is empty', () => {

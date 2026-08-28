@@ -14,14 +14,7 @@
  *  - Starts disabled and silent when credentials are absent.
  */
 
-import {
-  AlertRule,
-  AlertTriggerLog,
-  MarketSnapshot,
-  Opportunity,
-  OpportunityPhase,
-  TelegramSystemAlert,
-} from './types.js';
+import { TelegramSystemAlert } from './types.js';
 import type { MakerAlert } from './makerAlerts.js';
 import type { MarketSignal } from './signalEngine.js';
 import {
@@ -147,156 +140,31 @@ export function formatVenezuelaClock(timestamp: number): string {
   }
 }
 
-/**
- * Deduplication key: alert type plus the condition that defines it.
- *
- * Two rules with the same condition, side and threshold say the same thing, so
- * they share a key and only one message goes out per cooldown window.
- */
-export function cooldownKey(rule: AlertRule): string {
-  return `${rule.condition}|${rule.targetSide}|${rule.targetValue}`;
-}
-
-function marketLabel(snapshot: MarketSnapshot | null): string {
-  if (!snapshot) return 'USDT/VES';
-  return `${snapshot.asset}/${snapshot.fiat}`;
-}
-
-/**
- * The strategic level both sides of the operation sit at, when it is known.
- *
- * RECOMPRA is Binance BUY (what I pay), VENTA is Binance SELL (what I
- * receive). Printed so the recipient can see WHERE the market is, not only
- * that a threshold was crossed. Omitted entirely when a side is missing -
- * an absent price is never shown as 0 or as a plausible number.
- */
-function strategicLines(snapshot: MarketSnapshot | null): string[] {
-  const recompra = snapshot?.strategicBuyPrice;
-  const venta = snapshot?.strategicSellPrice;
-  if (recompra === null || recompra === undefined || venta === null || venta === undefined) {
-    return [];
-  }
-  /*
-   * NAMED BY THE LISTING AND THE ADVERTISER'S ACTION, never as "my" purchase
-   * or sale.
-   *
-   * These lines used to read "Referencia compra (lado Binance BUY)". For a
-   * maker that is backwards: the tradeType=BUY listing holds the ads I compete
-   * with when I SELL, so calling it my compra points the reader at the wrong
-   * book. What is true of it without any reference to me is that it contains
-   * ads whose advertisers are selling USDT, and that is what it now says.
-   *
-   * This is a market level, not a price to publish. The price to publish is
-   * the maker summary's business and never appears in a rule alert.
-   */
-  return [
-    '',
-    `Mediana del listado BUY (anuncios que VENDEN USDT): <b>${escapeHtml(
-      recompra.toFixed(2)
-    )} VES</b>`,
-    `Mediana del listado SELL (anuncios que COMPRAN USDT): <b>${escapeHtml(
-      venta.toFixed(2)
-    )} VES</b>`,
-    'Nivel de mercado, no un precio para publicar.',
-  ];
-}
-
 /*
- * formatOpportunityMessage and formatOpportunityLifecycleMessage USED TO LIVE
- * HERE, and both are gone.
+ * cooldownKey, marketLabel, strategicLines and formatAlertMessage USED TO LIVE
+ * HERE, and all four are gone.
  *
- * They wrote the taker's model onto the operator's phone: "OPORTUNIDAD DE
- * ARBITRAJE", legs labelled COMPRA/VENTA USDT sourced from "Binance ASK" and
- * "Binance BID", and the API parameter printed underneath - tradeType BUY under
- * COMPRA, tradeType SELL under VENTA. For a MAKER that mapping is inverted:
- * my BUY ad competes in the tradeType=SELL listing, not the BUY one. Anyone
- * acting on those messages was reading the wrong book.
+ * formatAlertMessage was the only producer of the rule-alert family:
+ *   🟢/🔻 ALERTA DE PRECIO   (conditions ABOVE / BELOW)
+ *   🔴 ALERTA P2P            (condition SPREAD_ABOVE)
+ *   ⚠️ ALTA VOLATILIDAD      (condition VOLATILITY_SPIKE)
  *
- * The taker engine still exists and still feeds the executable matrix screen,
- * which asks a different and legitimate question. What it no longer has is a
- * route to Telegram. Telegram now has exactly one source of truth: the maker
- * layer, below.
+ * They announced that a MARKET LEVEL had crossed a number. For a maker that is
+ * not a decision: the level of the book says nothing about what to publish, at
+ * which bank, for which amount, or whether the pairing clears break-even. The
+ * operator asked for the whole class to stop - not to be renamed, downgraded to
+ * a WARNING, or re-emitted through another route - so the producer is deleted
+ * rather than muted, and with it the three helpers that had no other caller.
+ *
+ * WHAT SURVIVES, deliberately: the alert RULES themselves. /api/alerts and
+ * src/AlertsManager.tsx let the operator create, list and delete rules and read
+ * the trigger history, and CentralMarketStore.evaluateAlerts still evaluates
+ * them and still persists AlertTriggerLog. That is an in-app history panel the
+ * operator opens on purpose. What no longer exists anywhere in this file is a
+ * function that can turn one of those triggers into a Telegram message.
+ *
+ * tests/telegramNoPriceAlert.test.ts holds this shut structurally.
  */
-export function formatAlertMessage(
-  trigger: AlertTriggerLog,
-  rule: AlertRule,
-  snapshot: MarketSnapshot | null
-): string {
-  const time = formatVenezuelaClock(trigger.timestamp);
-
-  /*
-   * OPPORTUNITY_ABOVE used to be handled here, reporting the taker engine's
-   * BEST_OPPORTUNITY. It is gone: that rule is refused before it reaches this
-   * function (see CentralMarketStore.evaluateAlerts), so no arbitrage figure
-   * can reach Telegram through a user rule. The condition survives in the
-   * AlertRule type because it is present in stored rule files, and silently
-   * rewriting somebody's saved rules is not this phase's business.
-   *
-   * What remains here are MARKET rules over the strategic medians. They report
-   * the level of the book, never an operation, and never a price to publish.
-   */
-  const market = escapeHtml(marketLabel(snapshot));
-  /*
-   * FASE 2: the STRATEGIC spread, the same number the rule was evaluated on.
-   * spreadPercentage is the raw |max(SELL) - min(BUY)| figure and is what
-   * reported 6.64% while the market sat at 0.14%. Reporting one number and
-   * deciding on another is how the 980 VES ad became an alert.
-   */
-  const spread = snapshot?.strategicSpreadPct;
-
-  if (rule.condition === 'SPREAD_ABOVE') {
-    return [
-      '🔴 <b>ALERTA P2P</b>',
-      '',
-      `Spread estratégico: <b>${spread !== null && spread !== undefined ? escapeHtml(spread.toFixed(2)) : '--'}%</b>`,
-      `Umbral: ${escapeHtml(rule.targetValue.toFixed(2))}%`,
-      '',
-      `Mercado: ${market}`,
-      ...strategicLines(snapshot),
-      '',
-      'Tipo: Spread estratégico (mediana VENTA vs mediana RECOMPRA)',
-      'Estado: ACTIVADO',
-      '',
-      `Hora: ${time}`,
-    ].join('\n');
-  }
-
-  if (rule.condition === 'VOLATILITY_SPIKE') {
-    const lines = [
-      '⚠️ <b>ALTA VOLATILIDAD</b>',
-      '',
-      'Se detectó alta volatilidad',
-      'en el libro de órdenes Binance P2P.',
-      '',
-    ];
-    // The rule compares the spread against targetValue * 1.5. Report exactly
-    // that, so the number in the message matches what was measured.
-    if (spread !== null && spread !== undefined) {
-      lines.push(`Spread estratégico medido: <b>${escapeHtml(spread.toFixed(2))}%</b>`);
-      lines.push(`Umbral efectivo: ${escapeHtml((rule.targetValue * 1.5).toFixed(2))}%`);
-      lines.push('');
-    }
-    lines.push(`Mercado: ${market}`, ...strategicLines(snapshot), '', `Hora: ${time}`);
-    return lines.join('\n');
-  }
-
-  // ABOVE / BELOW price alerts.
-  const above = rule.condition === 'ABOVE';
-  return [
-    `${above ? '🟢' : '🔻'} <b>ALERTA DE PRECIO</b>`,
-    '',
-    `Precio estratégico ${escapeHtml(rule.targetSide)}: <b>${escapeHtml(trigger.price.toFixed(2))} VES</b>`,
-    `Umbral: ${escapeHtml(rule.targetValue.toFixed(2))} VES`,
-    '',
-    `Mercado: ${market}`,
-    ...strategicLines(snapshot),
-    '',
-    `Tipo: ${above ? 'Precio por encima del umbral' : 'Precio por debajo del umbral'}`,
-    'Estado: ACTIVADO',
-    '',
-    `Hora: ${time}`,
-  ].join('\n');
-}
 
 
 /**
@@ -691,45 +559,16 @@ export class TelegramNotifier {
     }
   }
 
-  /**
-   * Forwards a triggered alert. Never rejects and never throws.
+  /*
+   * notifyAlert USED TO LIVE HERE, and it is gone.
    *
-   * The caller treats this as fire-and-forget; the returned promise exists so
-   * tests can await the outcome.
+   * It was the only caller of formatAlertMessage and the only path from an
+   * AlertTriggerLog to the wire. Removing the formatter without removing this
+   * method would have left a public entry point one line away from being
+   * re-wired to some other text, which is exactly the "no vuelva a aparecer por
+   * otra ruta" the operator asked to prevent. CentralMarketStore.evaluateAlerts
+   * no longer calls anything on this class.
    */
-  public async notifyAlert(
-    trigger: AlertTriggerLog,
-    rule: AlertRule,
-    snapshot: MarketSnapshot | null
-  ): Promise<TelegramResult> {
-    try {
-      if (!this.config) return { outcome: 'DISABLED' };
-
-      const key = cooldownKey(rule);
-      const now = trigger.timestamp || Date.now();
-      const previous = this.lastSentAt.get(key);
-
-      if (previous !== undefined && now - previous < this.config.cooldownMs) {
-        return { outcome: 'COOLDOWN' };
-      }
-
-      /*
-       * The attempt is recorded BEFORE sending, on purpose: if Telegram is
-       * down or rate-limiting, we must not retry on every poll. A failed
-       * message is skipped until the next cooldown window rather than
-       * hammering the API.
-       */
-      this.lastSentAt.set(key, now);
-      this.prune(now);
-
-      return await this.send(formatAlertMessage(trigger, rule, snapshot));
-    } catch (err) {
-      // Belt and braces: nothing above should throw, and if it somehow does,
-      // the alert loop still must not notice.
-      console.warn(`[Telegram] Unexpected notifier error: ${this.describe(err)}`);
-      return { outcome: 'NETWORK_ERROR', detail: this.describe(err) };
-    }
-  }
 
   /**
    * Puts market signals on the wire.
@@ -760,6 +599,30 @@ export class TelegramNotifier {
     const ordered = [...signals].sort(
       (a, b) => PRIORITY_ORDER[priorityOf(a)] - PRIORITY_ORDER[priorityOf(b)]
     );
+
+    /*
+     * A CONDITION THAT IS STILL TRUE IS NOT NEWS AGAIN AN HOUR LATER.
+     *
+     * Dedup keys live in the same map as the cooldowns, and prune() drops
+     * anything older than max(cooldownMs * 10, 1h). That is right for a
+     * cooldown and wrong for an identity: a breakout that stays broken for two
+     * hours had its key aged out and was announced a second time, as
+     * BREAKOUT-XYZ all over again. The operator asked for one identity per
+     * condition, not one per hour.
+     *
+     * The caller hands over every signal that is CURRENTLY live on each sweep,
+     * so the notifier can tell "still true" from "gone": touching the key of
+     * every live signal keeps it fresh for exactly as long as the condition
+     * holds. Once the signal stops being derived, its key ages out normally and
+     * a genuine recurrence later is announced again, which is correct.
+     *
+     * Only keys that already exist are touched. This creates nothing and can
+     * never suppress a first announcement.
+     */
+    for (const signal of ordered) {
+      const liveKey = `signal:${signal.identity}:${signal.status}`;
+      if (this.lastSentAt.has(liveKey)) this.lastSentAt.set(liveKey, now);
+    }
 
     for (const signal of ordered) {
       try {

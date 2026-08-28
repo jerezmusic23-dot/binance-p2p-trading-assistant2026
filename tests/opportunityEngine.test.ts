@@ -128,12 +128,13 @@ describe('TEST 3 / 4 - a rejected quote never enters', () => {
     // Defensive guard: FASE 4 cannot emit this, but a future relaxation must
     // not be able to promote a rejection into an operation.
     const good = cell({ buy: [{ price: 919 }], sell: [{ price: 922 }] });
+    // The tampering has to be inside cell.pair: that is the only field
+    // buildOpportunity reads, so it is the only one worth defending.
     const tampered: BankAmountExecutability = {
       ...good,
-      bestExecutableSell: {
-        ...good.bestExecutableSell!,
-        provenance: 'REAL',
-        rejection: 'AMOUNT_BELOW_MIN',
+      pair: {
+        ...good.pair!,
+        sell: { ...good.pair!.sell, provenance: 'REAL', rejection: 'AMOUNT_BELOW_MIN' },
       },
     };
 
@@ -281,10 +282,18 @@ describe('TEST 9 / 10 / 11 / 12 / 37 / 38 - liquidity', () => {
    */
   function withLiquidity(buyLiq: number | null, sellLiq: number | null): BankAmountExecutability {
     const base = cell({ buy: [{ advNo: 'b', price: 919 }], sell: [{ advNo: 's', price: 922 }] });
+    /*
+     * The OPERATION is cell.pair, so that is what has to carry the doctored
+     * liquidity. The per-side bests are diagnostics and buildOpportunity does
+     * not read them - patching those instead would have tested nothing.
+     */
+    const buy = { ...base.pair!.buy, availableUsdt: buyLiq };
+    const sell = { ...base.pair!.sell, availableUsdt: sellLiq };
     return {
       ...base,
-      bestExecutableBuy: { ...base.bestExecutableBuy!, availableUsdt: buyLiq },
-      bestExecutableSell: { ...base.bestExecutableSell!, availableUsdt: sellLiq },
+      bestExecutableBuy: buy,
+      bestExecutableSell: sell,
+      pair: { ...base.pair!, buy, sell },
     };
   }
 
@@ -577,6 +586,8 @@ describe('TEST 25 / 26 / 27 / 28 / 29 - BEST_OPPORTUNITY', () => {
       spreadPct: ((sellPrice - buyPrice) / buyPrice) * 100,
       marginAbsolute: sellPrice - buyPrice,
       marginPct: ((sellPrice - buyPrice) / buyPrice) * 100,
+      marginVes:
+        ((overrides.amountVes ?? 20_000) * (((sellPrice - buyPrice) / buyPrice) * 100)) / 100,
       buyAvailableUsdt: 1_000,
       sellAvailableUsdt: 1_000,
       availableUsdt: 1_000,

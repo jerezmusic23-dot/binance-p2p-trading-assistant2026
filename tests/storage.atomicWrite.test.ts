@@ -258,13 +258,26 @@ describe('G - all three managed files use the safe mechanism', () => {
 
   it('preserves alerts.json when its write fails', async () => {
     const StorageEngine = await freshStorage();
-    StorageEngine.initialize(); // seeds the two default rules
+    StorageEngine.initialize();
+    // A fresh install seeds nothing, so the rules to protect are created here,
+    // exactly as /api/alerts would create them.
+    for (const id of ['uno', 'dos']) {
+      StorageEngine.saveAlert({
+        id,
+        name: id,
+        condition: 'ABOVE',
+        targetValue: 930,
+        targetSide: 'BUY',
+        enabled: true,
+        createdAt: 1,
+      });
+    }
     const before = readText(alertsFile());
 
     vi.spyOn(fs, 'renameSync').mockImplementation(() => {
       throw new Error('EIO');
     });
-    StorageEngine.deleteAlert('rule-spread-high');
+    StorageEngine.deleteAlert('uno');
 
     expect(readText(alertsFile())).toBe(before);
     expect(JSON.parse(readText(alertsFile())) as AlertRule[]).toHaveLength(2);

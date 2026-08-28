@@ -521,53 +521,35 @@ export class ProjectionEngine {
         ? Number((currentBuy * (1 + (baseVolPct / 100) * 1.6 + Math.max(0, dailyDrift))).toFixed(2))
         : null;
 
-    // Directional probabilities. Still a hand-written point system (labelled
-    // HEURISTIC), but it needs a classified trend to run at all.
-    let pUp: number | null = null;
-    let pDown: number | null = null;
-    let pNeutral: number | null = null;
-
-    if (analysis.trend !== null) {
-      let upScore = 33.3;
-      let neutralScore = 33.4;
-      let downScore = 33.3;
-
-      if (analysis.trend === 'ALCISTA') {
-        upScore += 26 + ((analysis.trendStrength ?? 0) / 100) * 15;
-        downScore -= 20;
-        neutralScore -= 10;
-      } else if (analysis.trend === 'BAJISTA') {
-        downScore += 26 + ((analysis.trendStrength ?? 0) / 100) * 15;
-        upScore -= 20;
-        neutralScore -= 10;
-      } else {
-        neutralScore += 22;
-        upScore -= 11;
-        downScore -= 11;
-      }
-
-      if (orderBookPressure.dominantSide === 'COMPRA') {
-        upScore += 8;
-        downScore -= 8;
-      } else if (orderBookPressure.dominantSide === 'VENTA') {
-        downScore += 8;
-        upScore -= 8;
-      }
-
-      // A null RSI contributes nothing instead of tilting the result.
-      if (analysis.rsi !== null && analysis.rsi < 35) {
-        upScore += 6;
-        downScore -= 6;
-      } else if (analysis.rsi !== null && analysis.rsi > 65) {
-        downScore += 6;
-        upScore -= 6;
-      }
-
-      const totalScore = Math.max(1, upScore + neutralScore + downScore);
-      pUp = Math.min(88, Math.max(8, Math.round((upScore / totalScore) * 100)));
-      pDown = Math.min(88, Math.max(8, Math.round((downScore / totalScore) * 100)));
-      pNeutral = Math.max(0, 100 - pUp - pDown);
-    }
+    /*
+     * DIRECTIONAL PROBABILITIES ARE NULL, AND THAT IS THE ANSWER.
+     *
+     * A hand-written point system used to live here: 33.3 to each outcome,
+     * then +26 for the classified trend, -20 against it, +/-8 for order-book
+     * pressure, +/-6 for RSI, normalised and clamped to [8, 88]. Its three
+     * outputs were rendered on the first screen of the app under
+     * "DISTRIBUCION DE PROBABILIDAD (REGRESION & PROFUNDIDAD)" and described
+     * as an estimate computed in real time.
+     *
+     * None of those coefficients was measured. Nothing here counted how often
+     * a market in this state actually rose, so the numbers were a rendering of
+     * the scoring rules and not of the market. A reader cannot tell those
+     * apart, which makes a fabricated 61% worse than an honest gap.
+     *
+     * This is the same decision, and for the same reason, that was already
+     * taken for confidencePct below - which used to be 62 + min(25, n * 0.35)
+     * and is now null. Neither is replaced by another arbitrary number.
+     *
+     * WHERE A REAL ANSWER LIVES. patternEngine.outcomesInWindow counts, on a
+     * cell's own series, how many observations in the same situation ended
+     * higher, flat or lower a stated horizon later, and reports the sample
+     * size and INSUFFICIENT_HISTORY instead of a rate when the counting cannot
+     * support one. That is a frequency the operator can check. It is per cell,
+     * which is what a maker acts on, and it is already on the analysis screen.
+     */
+    const pUp: number | null = null;
+    const pDown: number | null = null;
+    const pNeutral: number | null = null;
 
     /*
      * C2: confidence is null. It used to be 62 + min(25, n * 0.35), a function

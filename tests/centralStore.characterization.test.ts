@@ -275,14 +275,58 @@ describe('snapshot ageing', () => {
 });
 
 describe('evaluateAlerts', () => {
-  async function pollWithSpread(spreadBuy: string, spreadSell: string) {
+  /*
+   * RULES ARE CREATED BY THE TEST, NOT BY THE STORE.
+   *
+   * storage.ts used to seed 'rule-spread-high' and 'rule-volatility-spike'
+   * enabled on any install with no alerts.json, which is why a fresh
+   * deployment started announcing market levels before anyone configured
+   * anything. These tests used to lean on that and delete whichever rule they
+   * did not want; now they create exactly the rule under test, the way
+   * /api/alerts does.
+   *
+   * The rules still fire and are still logged for the in-app history panel.
+   * What no longer exists is a path from a trigger to Telegram - asserted in
+   * tests/telegramNoPriceAlert.test.ts.
+   */
+  /*
+   * FACTORIES, NOT CONSTANTS. evaluateAlerts writes lastTriggeredAt onto the
+   * rule object it was handed - StorageEngine.getAlerts returns the internal
+   * array by reference, which the storage suite documents as a bug - so a
+   * shared literal would carry one test's trigger time into the next.
+   */
+  const spreadRule = (): AlertRule => ({
+    id: 'rule-spread-high',
+    name: 'Spread Mayor a 2.0%',
+    condition: 'SPREAD_ABOVE',
+    targetValue: 2.0,
+    targetSide: 'SELL',
+    enabled: true,
+    createdAt: 1,
+  });
+  const volatilityRule = (): AlertRule => ({
+    id: 'rule-volatility-spike',
+    name: 'Movimiento Brusco / Volatilidad',
+    condition: 'VOLATILITY_SPIKE',
+    targetValue: 1.5,
+    targetSide: 'BUY',
+    enabled: true,
+    createdAt: 1,
+  });
+
+  async function pollWithSpread(
+    spreadBuy: string,
+    spreadSell: string,
+    rules: AlertRule[] = [spreadRule()]
+  ) {
     stubBinance([makeAdItem({ price: spreadBuy })], [makeAdItem({ price: spreadSell })]);
-    return freshStore();
+    const fresh = await freshStore();
+    for (const rule of rules) fresh.StorageEngine.saveAlert(rule);
+    return fresh;
   }
 
   it('fires SPREAD_ABOVE and records a trigger log', async () => {
-    const { store, StorageEngine } = await pollWithSpread('918.00', '941.00'); // 2.51%
-    StorageEngine.deleteAlert('rule-volatility-spike');
+    const { store } = await pollWithSpread('918.00', '941.00'); // 2.51%
     await store.pollMarket();
 
     const triggers = readData<AlertTriggerLog[]>('alert_triggers.json');
@@ -294,8 +338,7 @@ describe('evaluateAlerts', () => {
   it('applies the hardcoded 5-minute cooldown per rule', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(Date.parse('2026-08-23T16:00:00Z'));
-    const { store, StorageEngine } = await pollWithSpread('918.00', '941.00');
-    StorageEngine.deleteAlert('rule-volatility-spike');
+    const { store } = await pollWithSpread('918.00', '941.00');
 
     await store.pollMarket();
     await store.pollMarket();
@@ -307,6 +350,8 @@ describe('evaluateAlerts', () => {
   });
 
   it('does not fire when the spread stays under the threshold', async () => {
+    // The rule EXISTS here - otherwise the absence of a trigger would prove
+    // nothing at all.
     const { store } = await pollWithSpread('918.00', '921.00'); // 0.33%
     await store.pollMarket();
     expect(fs.existsSync(path.join(tmpDir, 'data', 'alert_triggers.json'))).toBe(false);
@@ -317,8 +362,7 @@ describe('evaluateAlerts', () => {
     // against targetValue*1.5. It never measured volatility, and the message
     // no longer claims it did - a wide but perfectly stable spread is
     // reported as exactly that.
-    const { store, StorageEngine } = await pollWithSpread('918.00', '941.00'); // 2.51% > 1.5*1.5
-    StorageEngine.deleteAlert('rule-spread-high');
+    const { store } = await pollWithSpread('918.00', '941.00', [volatilityRule()]); // 2.51% > 1.5*1.5
     await store.pollMarket();
 
     const triggers = readData<AlertTriggerLog[]>('alert_triggers.json');

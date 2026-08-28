@@ -207,11 +207,45 @@ describe('the 30-minute summary', () => {
     expect(alerts[0].kind).toBe('SUMMARY');
   });
 
-  it('waits until there is something to say', () => {
+  it('starts its clock on the first matrix, even one with nothing to publish', () => {
+    /*
+     * THIS TEST USED TO ASSERT THE OPPOSITE, and the opposite was the bug.
+     *
+     * It pinned "waits until there is something to say": no summary and a null
+     * lastSummaryAt while no cell was profitable. Because lastSummaryAt stayed
+     * null, the half-hour clock never started - so in a crossed book, or when
+     * no ad quoted a decimal and the tick was unobservable, the operator got
+     * zero summaries for as long as that lasted. Measured over 150 simulated
+     * minutes: 5 summaries in a normal book, 0 in either of those two.
+     *
+     * Those are the regimes where "do not publish, and here is why" is the
+     * most useful thing the bot can say. So the clock now starts at the first
+     * evaluation and the first summary goes out with it.
+     */
     const empty = matrix({});
     const { alerts, state } = evaluate(empty, EMPTY_MAKER_ALERT_STATE);
-    expect(alerts).toEqual([]);
-    expect(state.lastSummaryAt).toBeNull();
+    expect(alerts.map((a) => a.kind)).toEqual(['SUMMARY']);
+    expect(state.lastSummaryAt).toBe(AT + 1000);
+    // And it still invents nothing: no cell price is recorded.
+    expect(state.recommended).toEqual({});
+  });
+
+  it('does not send a second summary before the interval has elapsed', () => {
+    const empty = matrix({});
+    const first = evaluate(empty, EMPTY_MAKER_ALERT_STATE);
+    const tooSoon = evaluateMakerAlerts({
+      matrix: empty,
+      state: first.state,
+      nowMs: AT + 1000 + MAKER_SUMMARY_INTERVAL_MS - 1,
+    });
+    expect(tooSoon.alerts).toEqual([]);
+
+    const due = evaluateMakerAlerts({
+      matrix: empty,
+      state: first.state,
+      nowMs: AT + 1000 + MAKER_SUMMARY_INTERVAL_MS,
+    });
+    expect(due.alerts.map((a) => a.kind)).toEqual(['SUMMARY']);
   });
 });
 
@@ -275,7 +309,12 @@ describe('a cell with no verifiable price', () => {
     expect(cell.recommendation!.priceToBeFirstBuy).toBeNull();
 
     const { alerts, state } = evaluate(m, EMPTY_MAKER_ALERT_STATE);
-    expect(alerts).toEqual([]);
+    /*
+     * The summary goes out - it is the boot summary, and what it says about
+     * this cell is "PRECIO NO VERIFICABLE". What must never appear is a
+     * PRICE_CHANGE, because there is no price to have changed.
+     */
+    expect(alerts.filter((a) => a.kind === 'PRICE_CHANGE')).toEqual([]);
     expect(state.recommended).toEqual({});
   });
 });

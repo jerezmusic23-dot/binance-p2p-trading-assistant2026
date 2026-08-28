@@ -148,6 +148,29 @@ export const EMPTY_DIGEST_STATE: PriceChangeDigestState = {
   lastReleasedAt: null,
 };
 
+/**
+ * The digest state a running process should start from.
+ *
+ * WHY THIS EXISTS. With lastReleasedAt null, releasePriceChangeDigest fires as
+ * soon as it has anything at all - which on a fresh process means the sweep
+ * after boot, roughly 45 seconds in. Measured on a scripted market, that put a
+ * digest on the wire at t+0m45s, right behind the boot summary that had just
+ * listed every one of those prices, and it did so again on every restart.
+ *
+ * The operator asked for the opposite shape:
+ *   13:00 -> digest, 13:01-13:29 -> accumulate, 13:30 -> next digest
+ * so the window is anchored at start-up and the first digest is due one whole
+ * interval later. Nothing is lost by waiting: the boot summary already carried
+ * every current price, and a "what changed since then" message covering the
+ * previous 45 seconds had nothing to add.
+ *
+ * EMPTY_DIGEST_STATE is kept for the pure tests, which construct their own
+ * timeline and need the unanchored form.
+ */
+export function startDigestState(nowMs: number): PriceChangeDigestState {
+  return { pending: {}, lastReleasedAt: nowMs };
+}
+
 export interface PriceChangeDigest {
   changes: PendingPriceChange[];
   /** Cells that moved and came back: counted, not reported as changes. */

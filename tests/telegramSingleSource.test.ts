@@ -98,13 +98,17 @@ describe('BEST_OPPORTUNITY cannot produce a Telegram message', () => {
     expect(store).not.toMatch(/case 'OPPORTUNITY_ABOVE':/);
   });
 
-  it('the alert formatter cannot receive an opportunity at all', () => {
+  it('there is no alert formatter left to receive anything', () => {
+    /*
+     * This used to check that formatAlertMessage's signature had no Opportunity
+     * in it. The function itself is now gone - and with it the whole rule-alert
+     * family - so the stronger statement is available: the notifier holds no
+     * formatter and no emitter for a user rule at all.
+     */
     const notifier = code('telegramNotifier.ts');
-    const signature = notifier.slice(
-      notifier.indexOf('export function formatAlertMessage('),
-      notifier.indexOf('): string {', notifier.indexOf('export function formatAlertMessage('))
-    );
-    expect(signature).not.toMatch(/Opportunity/);
+    expect(notifier).not.toMatch(/function formatAlertMessage\(/);
+    expect(notifier).not.toMatch(/notifyAlert\s*\(/);
+    expect(notifier).not.toMatch(/AlertTriggerLog[,;)\s]/);
   });
 });
 
@@ -137,7 +141,7 @@ describe('two emitters can never speak at once', () => {
     expect(store).toMatch(/notifyPriceChangeDigest/);
   });
 
-  it('the remaining emitters are the maker layer, user rules and system health', () => {
+  it('the remaining emitters are the maker layer and system health', () => {
     const notifier = code('telegramNotifier.ts');
     const publicEmitters = (notifier.match(/public async notify[A-Za-z]+/g) ?? []).sort();
     /*
@@ -148,7 +152,6 @@ describe('two emitters can never speak at once', () => {
      * emitters speak the maker one.
      */
     expect(publicEmitters).toEqual([
-      'public async notifyAlert',
       'public async notifyMakerAlerts',
       'public async notifyMarketSignals',
       'public async notifyPriceChangeDigest',

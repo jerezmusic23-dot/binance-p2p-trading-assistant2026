@@ -169,12 +169,18 @@ export function buildCell(params: {
       : diagnoseSide(cell.sellRejections, cell.sellLiquidity, params.sellAdsEvaluated);
 
   /*
-   * The operation's liquidity is the narrower leg. A 200 USDT sale and a
-   * 20 USDT repurchase make a 20 USDT operation, not a 200 USDT one.
+   * The operation's liquidity is the narrower leg OF THE OPERATION.
+   *
+   * Taken from cell.pair, not from the two per-side bests. Those are chosen
+   * independently and need not be the legs that can actually trade together,
+   * so min() over them would report the capacity of an operation that does not
+   * exist. With no pair there is no operation and no capacity to state.
    */
+  const pairBuyLiquidity = cell.pair?.buy.availableUsdt ?? null;
+  const pairSellLiquidity = cell.pair?.sell.availableUsdt ?? null;
   const availableUsdt =
-    buy?.availableUsdt != null && sell?.availableUsdt != null
-      ? Math.min(buy.availableUsdt, sell.availableUsdt)
+    pairBuyLiquidity !== null && pairSellLiquidity !== null
+      ? Math.min(pairBuyLiquidity, pairSellLiquidity)
       : null;
 
   /*
@@ -233,7 +239,18 @@ export function buildCell(params: {
     amountKey,
     amountVes: cell.amountVes,
     status,
-    reason: status === 'EXECUTABLE' ? null : STATUS_REASONS[status](bankDisplayName, cell.amountVes),
+    /*
+     * A cell whose two sides are both executable and which still has no
+     * operation is the case the generic reason cannot describe: it would say
+     * "not executable" about ads that are. noPairReason names what is actually
+     * missing - a buy and a sell that can move the same USDT.
+     */
+    reason:
+      status === 'EXECUTABLE'
+        ? null
+        : status === 'NO_OPPORTUNITY' && cell.noPairReason !== null
+          ? cell.noPairReason
+          : STATUS_REASONS[status](bankDisplayName, cell.amountVes),
     buy,
     sell,
     spreadPct: cell.spreadPct,

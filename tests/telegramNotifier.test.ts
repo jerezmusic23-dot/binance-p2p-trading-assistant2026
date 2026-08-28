@@ -1,8 +1,23 @@
 /**
- * Telegram notification layer.
+ * Telegram notification layer - TRANSPORT.
  *
  * No test performs real network I/O: fetch is always stubbed, so nothing is
  * ever sent to a real chat.
+ *
+ * THIS FILE USED TO DRIVE EVERY TRANSPORT TEST THROUGH notifyAlert, the
+ * emitter that turned an AlertTriggerLog into "🟢 ALERTA DE PRECIO",
+ * "🔴 ALERTA P2P" and "⚠️ ALTA VOLATILIDAD". That emitter is gone, together
+ * with formatAlertMessage, cooldownKey, marketLabel and strategicLines.
+ *
+ * The transport concerns those tests covered are real and independent of which
+ * message rides on top - the POST shape, DISABLED, HTTP errors, aborts, the
+ * cooldown, and the guarantee that neither credential ever reaches a log - so
+ * every one of them is kept and re-pointed at notifySystemAlert, which uses
+ * the same send() path. Nothing was dropped except the assertions about the
+ * deleted formatter itself.
+ *
+ * That the price alert can no longer be produced at all is asserted
+ * structurally and end-to-end in tests/telegramNoPriceAlert.test.ts.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -11,16 +26,15 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   DEFAULT_ALERT_COOLDOWN_MS,
+  DEFAULT_SYSTEM_ALERT_COOLDOWN_MS,
   TelegramNotifier,
-  cooldownKey,
   escapeHtml,
-  formatAlertMessage,
   readTelegramConfig,
   redactSecrets,
 } from '../server/telegramNotifier.js';
 import type { TelegramConfig } from '../server/telegramNotifier.js';
-import { makeAdItem, makeBinanceResponse, makeSnapshot } from './helpers/fixtures.js';
-import type { AlertRule, AlertTriggerLog } from '../server/types.js';
+import { makeAdItem, makeBinanceResponse } from './helpers/fixtures.js';
+import type { TelegramSystemAlert } from '../server/types.js';
 
 const TOKEN = '7654321:AAF-TestTokenValueThatMustNeverLeak';
 const CHAT_ID = '-1002233445566';
@@ -33,34 +47,21 @@ const config = (overrides: Partial<TelegramConfig> = {}): TelegramConfig => ({
   ...overrides,
 });
 
-const spreadRule: AlertRule = {
-  id: 'rule-spread-high',
-  name: 'Spread Mayor a 2.0%',
-  condition: 'SPREAD_ABOVE',
-  targetValue: 2.0,
-  targetSide: 'SELL',
-  enabled: true,
-  createdAt: 1,
-};
+const BASE_TS = Date.parse('2026-08-23T03:51:31Z'); // 23:51:31 VET the day before
 
-const volatilityRule: AlertRule = {
-  id: 'rule-volatility-spike',
-  name: 'Movimiento Brusco / Volatilidad',
-  condition: 'VOLATILITY_SPIKE',
-  targetValue: 1.5,
-  targetSide: 'BUY',
-  enabled: true,
-  createdAt: 1,
-};
-
-function makeTrigger(overrides: Partial<AlertTriggerLog> = {}): AlertTriggerLog {
+/**
+ * A system alert is the vehicle for the transport tests.
+ *
+ * `state` is the identity of the CONDITION: notifySystemAlert reports
+ * UNCHANGED when the same state is handed to it twice, so every test that
+ * needs a second attempt to reach the wire varies the state.
+ */
+function makeSystemAlert(overrides: Partial<TelegramSystemAlert> = {}): TelegramSystemAlert {
   return {
-    id: 'trigger-1',
-    ruleId: spreadRule.id,
-    ruleName: spreadRule.name,
-    message: 'Spread P2P (6.52%) superó el umbral de 2%.',
-    price: 921.0,
-    timestamp: Date.parse('2026-08-23T03:51:31Z'), // 23:51:31 VET the day before
+    kind: 'BINANCE_OFFLINE',
+    timestamp: BASE_TS,
+    state: 'offline-1',
+    detail: 'La captura no responde.',
     ...overrides,
   };
 }
@@ -122,14 +123,14 @@ describe('readTelegramConfig', () => {
   });
 });
 
-describe('TEST 1 - configured: the alert is sent', () => {
+describe('TEST 1 - configured: the message is sent', () => {
   it('POSTs to the Telegram API with the expected payload', async () => {
     const fetchMock = stubFetchOk();
     const notifier = new TelegramNotifier(config());
 
-    const result = await notifier.notifyAlert(makeTrigger(), spreadRule, makeSnapshot({
-      strategicSpreadPct: 6.52,
-    }));
+    const result = await notifier.notifySystemAlert(
+      makeSystemAlert({ detail: 'Binance devolvio 403 en las ultimas 3 capturas.' })
+    );
 
     expect(result.outcome).toBe('SENT');
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -141,14 +142,13 @@ describe('TEST 1 - configured: the alert is sent', () => {
     const body = JSON.parse(String(init.body));
     expect(body.chat_id).toBe(CHAT_ID);
     expect(body.parse_mode).toBe('HTML');
-    expect(body.text).toContain('6.52%');
-    expect(body.text).toContain('USDT/VES');
+    expect(body.text).toContain('403');
   });
 
   it('logs a success line', async () => {
     const lines = captureConsole();
     stubFetchOk();
-    await new TelegramNotifier(config()).notifyAlert(makeTrigger(), spreadRule, makeSnapshot());
+    await new TelegramNotifier(config()).notifySystemAlert(makeSystemAlert());
     expect(lines.join('\n')).toContain('[Telegram] Alert sent successfully');
   });
 });
@@ -158,14 +158,14 @@ describe('TEST 2 - not configured: the system keeps working', () => {
     const fetchMock = stubFetchOk();
     const notifier = new TelegramNotifier(null);
 
-    const result = await notifier.notifyAlert(makeTrigger(), spreadRule, makeSnapshot());
+    const result = await notifier.notifySystemAlert(makeSystemAlert());
 
     expect(result.outcome).toBe('DISABLED');
     expect(fetchMock).not.toHaveBeenCalled();
     expect(notifier.isEnabled()).toBe(false);
   });
 
-  it('warns exactly once at startup, never on every alert', async () => {
+  it('warns exactly once at startup, never on every message', async () => {
     const lines = captureConsole();
     stubFetchOk();
     const notifier = new TelegramNotifier(null);
@@ -173,7 +173,7 @@ describe('TEST 2 - not configured: the system keeps working', () => {
     notifier.logStartupStatus();
     notifier.logStartupStatus();
     for (let i = 0; i < 5; i++) {
-      await notifier.notifyAlert(makeTrigger({ id: `t${i}` }), spreadRule, makeSnapshot());
+      await notifier.notifySystemAlert(makeSystemAlert({ state: `offline-${i}` }));
     }
 
     const warnings = lines.filter((l) => l.includes('Notifications disabled'));
@@ -189,7 +189,7 @@ describe('TEST 3 - HTTP error: the bot keeps working', () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status }) as unknown as Response));
     const notifier = new TelegramNotifier(config());
 
-    const result = await notifier.notifyAlert(makeTrigger(), spreadRule, makeSnapshot());
+    const result = await notifier.notifySystemAlert(makeSystemAlert());
 
     expect(result.outcome).toBe('HTTP_ERROR');
     expect(result.detail).toBe(`HTTP ${status}`);
@@ -199,7 +199,7 @@ describe('TEST 3 - HTTP error: the bot keeps working', () => {
     const lines = captureConsole();
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 429 }) as unknown as Response));
 
-    await new TelegramNotifier(config()).notifyAlert(makeTrigger(), spreadRule, makeSnapshot());
+    await new TelegramNotifier(config()).notifySystemAlert(makeSystemAlert());
 
     expect(lines.join('\n')).toContain('[Telegram] Failed to send alert: HTTP 429');
   });
@@ -212,17 +212,13 @@ describe('TEST 3 - HTTP error: the bot keeps working', () => {
       })
     );
 
-    const result = await new TelegramNotifier(config()).notifyAlert(
-      makeTrigger(),
-      spreadRule,
-      makeSnapshot()
-    );
+    const result = await new TelegramNotifier(config()).notifySystemAlert(makeSystemAlert());
     expect(result.outcome).toBe('NETWORK_ERROR');
   });
 });
 
 describe('TEST 4 - timeout: the bot keeps working', () => {
-  it('aborts the request and reports TIMEOUT', async () => {
+  const hangingFetch = () =>
     vi.stubGlobal(
       'fetch',
       vi.fn(
@@ -237,92 +233,72 @@ describe('TEST 4 - timeout: the bot keeps working', () => {
       )
     );
 
+  it('aborts the request and reports TIMEOUT', async () => {
+    hangingFetch();
+
     const notifier = new TelegramNotifier(config({ timeoutMs: 20 }));
-    const result = await notifier.notifyAlert(makeTrigger(), spreadRule, makeSnapshot());
+    const result = await notifier.notifySystemAlert(makeSystemAlert());
 
     expect(result.outcome).toBe('TIMEOUT');
     expect(result.detail).toContain('timeout after 20ms');
   });
 
-  it('does not leave the alert loop waiting forever', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(
-        (_url: string, init: RequestInit) =>
-          new Promise((_resolve, reject) => {
-            init.signal?.addEventListener('abort', () => {
-              const err = new Error('aborted');
-              err.name = 'AbortError';
-              reject(err);
-            });
-          })
-      )
-    );
+  it('does not leave the caller waiting forever', async () => {
+    hangingFetch();
 
     const started = Date.now();
-    await new TelegramNotifier(config({ timeoutMs: 20 })).notifyAlert(
-      makeTrigger(),
-      spreadRule,
-      makeSnapshot()
-    );
+    await new TelegramNotifier(config({ timeoutMs: 20 })).notifySystemAlert(makeSystemAlert());
     expect(Date.now() - started).toBeLessThan(2000);
   });
 });
 
-describe('TEST 5 - the same alert does not spam', () => {
-  it('sends once and then reports COOLDOWN', async () => {
-    const fetchMock = stubFetchOk();
-    const notifier = new TelegramNotifier(config({ cooldownMs: 300_000 }));
-    const base = makeTrigger().timestamp;
+describe('TEST 5 - the same condition does not spam', () => {
+  /*
+   * notifySystemAlert applies max(config.cooldownMs, DEFAULT_SYSTEM_ALERT_
+   * COOLDOWN_MS), so the effective window here is the 15-minute floor, and a
+   * repeated state is refused as UNCHANGED before the cooldown is even
+   * consulted. Both gates are exercised.
+   */
+  const FLOOR = DEFAULT_SYSTEM_ALERT_COOLDOWN_MS;
 
-    const first = await notifier.notifyAlert(makeTrigger({ timestamp: base }), spreadRule, makeSnapshot());
+  it('sends once and then reports UNCHANGED for an identical condition', async () => {
+    const fetchMock = stubFetchOk();
+    const notifier = new TelegramNotifier(config());
+
+    const first = await notifier.notifySystemAlert(makeSystemAlert({ timestamp: BASE_TS }));
     expect(first.outcome).toBe('SENT');
 
     // 100 further polls across the next 10 minutes of the same condition.
     for (let i = 1; i <= 100; i++) {
-      const result = await notifier.notifyAlert(
-        makeTrigger({ id: `t${i}`, timestamp: base + i * 6000 }),
-        spreadRule,
-        makeSnapshot()
+      const result = await notifier.notifySystemAlert(
+        makeSystemAlert({ timestamp: BASE_TS + i * 6000 })
       );
-      if (base + i * 6000 - base < 300_000) expect(result.outcome).toBe('COOLDOWN');
+      expect(result.outcome).toBe('UNCHANGED');
     }
 
-    // 101 polls span 600s. With a 300s cooldown the window opens at t=0,
-    // t=300s and t=600s: 3 messages instead of 101.
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it('keys the cooldown by alert type and condition, not by rule id', async () => {
+  it('reports COOLDOWN when the condition flaps inside the window', async () => {
     const fetchMock = stubFetchOk();
     const notifier = new TelegramNotifier(config());
-    const base = makeTrigger().timestamp;
 
-    // Two different rule ids saying exactly the same thing.
-    const twin: AlertRule = { ...spreadRule, id: 'rule-spread-duplicate' };
-
-    await notifier.notifyAlert(makeTrigger({ timestamp: base }), spreadRule, makeSnapshot());
-    const second = await notifier.notifyAlert(
-      makeTrigger({ id: 't2', ruleId: twin.id, timestamp: base + 6000 }),
-      twin,
-      makeSnapshot()
+    await notifier.notifySystemAlert(makeSystemAlert({ timestamp: BASE_TS, state: 'a' }));
+    const flap = await notifier.notifySystemAlert(
+      makeSystemAlert({ timestamp: BASE_TS + 6000, state: 'b' })
     );
 
-    expect(second.outcome).toBe('COOLDOWN');
+    expect(flap.outcome).toBe('COOLDOWN');
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(cooldownKey(spreadRule)).toBe(cooldownKey(twin));
   });
 
-  it('does not let one alert type silence a different one', async () => {
+  it('does not let one condition silence a different one', async () => {
     const fetchMock = stubFetchOk();
     const notifier = new TelegramNotifier(config());
-    const base = makeTrigger().timestamp;
 
-    await notifier.notifyAlert(makeTrigger({ timestamp: base }), spreadRule, makeSnapshot());
-    const other = await notifier.notifyAlert(
-      makeTrigger({ id: 't2', timestamp: base + 6000 }),
-      volatilityRule,
-      makeSnapshot()
+    await notifier.notifySystemAlert(makeSystemAlert({ timestamp: BASE_TS }));
+    const other = await notifier.notifySystemAlert(
+      makeSystemAlert({ kind: 'STORAGE_ERROR', state: 'disk-full', timestamp: BASE_TS + 6000 })
     );
 
     expect(other.outcome).toBe('SENT');
@@ -332,33 +308,38 @@ describe('TEST 5 - the same alert does not spam', () => {
   it('does not retry on every poll while Telegram is failing', async () => {
     const fetchMock = vi.fn(async () => ({ ok: false, status: 429 }) as unknown as Response);
     vi.stubGlobal('fetch', fetchMock);
-    const notifier = new TelegramNotifier(config({ cooldownMs: 300_000 }));
-    const base = makeTrigger().timestamp;
+    const notifier = new TelegramNotifier(config());
 
     for (let i = 0; i < 20; i++) {
-      await notifier.notifyAlert(
-        makeTrigger({ id: `t${i}`, timestamp: base + i * 6000 }),
-        spreadRule,
-        makeSnapshot()
+      await notifier.notifySystemAlert(
+        makeSystemAlert({ state: `flap-${i}`, timestamp: BASE_TS + i * 6000 })
       );
     }
     // A 429 must not turn into 20 more requests.
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
-});
 
-describe('TEST 6 - a new alert after the cooldown is sent again', () => {
-  it('sends again once the window has elapsed', async () => {
+  it('TEST 6 - sends again once the window has elapsed', async () => {
     const fetchMock = stubFetchOk();
-    const notifier = new TelegramNotifier(config({ cooldownMs: 300_000 }));
-    const base = makeTrigger().timestamp;
+    const notifier = new TelegramNotifier(config());
 
-    expect((await notifier.notifyAlert(makeTrigger({ timestamp: base }), spreadRule, makeSnapshot())).outcome).toBe('SENT');
     expect(
-      (await notifier.notifyAlert(makeTrigger({ id: 't2', timestamp: base + 299_999 }), spreadRule, makeSnapshot())).outcome
+      (await notifier.notifySystemAlert(makeSystemAlert({ timestamp: BASE_TS, state: 'a' })))
+        .outcome
+    ).toBe('SENT');
+    expect(
+      (
+        await notifier.notifySystemAlert(
+          makeSystemAlert({ timestamp: BASE_TS + FLOOR - 1, state: 'b' })
+        )
+      ).outcome
     ).toBe('COOLDOWN');
     expect(
-      (await notifier.notifyAlert(makeTrigger({ id: 't3', timestamp: base + 300_000 }), spreadRule, makeSnapshot())).outcome
+      (
+        await notifier.notifySystemAlert(
+          makeSystemAlert({ timestamp: BASE_TS + FLOOR, state: 'c' })
+        )
+      ).outcome
     ).toBe('SENT');
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -369,7 +350,7 @@ describe('TEST 7 & 8 - credentials never reach the logs', () => {
   it('keeps the token and chat id out of a successful send', async () => {
     const lines = captureConsole();
     stubFetchOk();
-    await new TelegramNotifier(config()).notifyAlert(makeTrigger(), spreadRule, makeSnapshot());
+    await new TelegramNotifier(config()).notifySystemAlert(makeSystemAlert());
 
     const output = lines.join('\n');
     expect(output).not.toContain(TOKEN);
@@ -379,7 +360,7 @@ describe('TEST 7 & 8 - credentials never reach the logs', () => {
   it('keeps them out of an HTTP error', async () => {
     const lines = captureConsole();
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 401 }) as unknown as Response));
-    await new TelegramNotifier(config()).notifyAlert(makeTrigger(), spreadRule, makeSnapshot());
+    await new TelegramNotifier(config()).notifySystemAlert(makeSystemAlert());
 
     const output = lines.join('\n');
     expect(output).not.toContain(TOKEN);
@@ -398,11 +379,7 @@ describe('TEST 7 & 8 - credentials never reach the logs', () => {
       })
     );
 
-    const result = await new TelegramNotifier(config()).notifyAlert(
-      makeTrigger(),
-      spreadRule,
-      makeSnapshot()
-    );
+    const result = await new TelegramNotifier(config()).notifySystemAlert(makeSystemAlert());
 
     const output = lines.join('\n');
     expect(output).not.toContain(TOKEN);
@@ -416,7 +393,7 @@ describe('TEST 7 & 8 - credentials never reach the logs', () => {
     stubFetchOk();
     const notifier = new TelegramNotifier(config());
     notifier.logStartupStatus();
-    await notifier.notifyAlert(makeTrigger(), spreadRule, makeSnapshot());
+    await notifier.notifySystemAlert(makeSystemAlert());
 
     expect(lines.join('\n')).not.toMatch(/TELEGRAM_BOT_TOKEN\s*[=:]/);
     expect(lines.join('\n')).not.toMatch(/TELEGRAM_CHAT_ID\s*[=:]/);
@@ -428,111 +405,10 @@ describe('TEST 7 & 8 - credentials never reach the logs', () => {
     expect(clean).not.toContain(TOKEN);
     expect(clean).not.toContain(CHAT_ID);
   });
-});
 
-describe('message formatting', () => {
-  it('renders the spread alert with the real measured values', () => {
-    const text = formatAlertMessage(
-      makeTrigger(),
-      spreadRule,
-      makeSnapshot({ strategicSpreadPct: 6.52 })
-    );
-
-    expect(text).toContain('ALERTA P2P');
-    expect(text).toContain('Spread estratégico: <b>6.52%</b>');
-    expect(text).toContain('Umbral: 2.00%');
-    expect(text).toContain('Mercado: USDT/VES');
-    expect(text).toContain('Estado: ACTIVADO');
-    expect(text).toMatch(/Hora: \d{2}:\d{2}:\d{2}/);
-  });
-
-  it('renders the volatility alert naming the metric that was actually measured', () => {
-    // The rule compares the spread against targetValue * 1.5, so the message
-    // must say "spread", not invent a volatility index.
-    const text = formatAlertMessage(
-      makeTrigger({ message: 'Alta volatilidad detectada...' }),
-      volatilityRule,
-      makeSnapshot({ strategicSpreadPct: 6.52 })
-    );
-
-    expect(text).toContain('ALTA VOLATILIDAD');
-    expect(text).toContain('Spread estratégico medido: <b>6.52%</b>');
-    expect(text).toContain('Umbral efectivo: 2.25%'); // 1.5 * 1.5
-  });
-
-  it('omits the spread line rather than inventing one when it is null', () => {
-    const text = formatAlertMessage(
-      makeTrigger(),
-      volatilityRule,
-      makeSnapshot({ strategicSpreadPct: null })
-    );
-    expect(text).not.toContain('Spread estratégico medido');
-    expect(text).toContain('ALTA VOLATILIDAD');
-  });
-
-  it('renders price alerts with the triggering price', () => {
-    const rule: AlertRule = { ...spreadRule, condition: 'ABOVE', targetValue: 900, targetSide: 'BUY' };
-    const text = formatAlertMessage(makeTrigger({ price: 918.35 }), rule, makeSnapshot());
-
-    expect(text).toContain('ALERTA DE PRECIO');
-    expect(text).toContain('Precio estratégico BUY: <b>918.35 VES</b>');
-    expect(text).toContain('Umbral: 900.00 VES');
-  });
-
-  it('FASE 2: reports the strategic spread, never the raw extreme spread', () => {
-    // The production incident: 19 ads at ~921 plus one at 980 VES. The raw
-    // spread |max(SELL) - min(BUY)| reads 6.64%; the market is at 0.14%.
-    // Reporting the raw figure is what made a single ad look like an
-    // opportunity worth notifying.
-    const text = formatAlertMessage(
-      makeTrigger(),
-      spreadRule,
-      makeSnapshot({ spreadPercentage: 6.64, strategicSpreadPct: 0.14 })
-    );
-
-    expect(text).toContain('Spread estratégico: <b>0.14%</b>');
-    expect(text).not.toContain('6.64');
-  });
-
-  it('FASE 2: prints where both sides of the operation actually are', () => {
-    const text = formatAlertMessage(
-      makeTrigger(),
-      spreadRule,
-      makeSnapshot({ strategicBuyPrice: 921.39, strategicSellPrice: 921.79 })
-    );
-
-    /*
-     * A SPREAD_ABOVE alert is about the MARKET level, not about an operation.
-     *
-     * These lines used to read "Referencia compra (lado Binance BUY)", which
-     * labelled the tradeType=BUY listing as MY purchase. For a maker that is
-     * inverted - my buy ad competes in the SELL listing - so the lines now name
-     * the listing and what its advertisers are doing, and claim nothing about
-     * my side of anything.
-     */
-    expect(text).toContain(
-      'Mediana del listado BUY (anuncios que VENDEN USDT): <b>921.39 VES</b>'
-    );
-    expect(text).toContain(
-      'Mediana del listado SELL (anuncios que COMPRAN USDT): <b>921.79 VES</b>'
-    );
-    expect(text).toContain('Nivel de mercado, no un precio para publicar.');
-    expect(text).not.toMatch(/Referencia compra|Referencia venta/);
-  });
-
-  it('FASE 2: omits both levels rather than inventing one when a side is empty', () => {
-    const text = formatAlertMessage(
-      makeTrigger(),
-      spreadRule,
-      makeSnapshot({ strategicBuyPrice: null, strategicSellPrice: 921.79 })
-    );
-
-    expect(text).not.toContain('Referencia compra');
-    expect(text).not.toContain('Referencia venta');
-  });
-
-  it('escapes HTML so a crafted rule name cannot break the message', () => {
-    expect(escapeHtml('<b>x</b> & "y"')).toBe('&lt;b&gt;x&lt;/b&gt; &amp; &quot;y&quot;');
+  it('escapes HTML so crafted text cannot break the message', () => {
+    expect(escapeHtml('<b>x</b> & "y"')).not.toContain('<b>');
+    expect(escapeHtml('a & b')).toContain('&amp;');
   });
 });
 
@@ -552,14 +428,37 @@ describe('integration - the alert engine keeps running when Telegram fails', () 
     delete process.env.TELEGRAM_CHAT_ID;
   });
 
+  /**
+   * Seeds the rule by hand.
+   *
+   * storage.ts no longer invents rules on a fresh install - that is what made a
+   * new deployment start announcing market levels before anybody configured
+   * anything - so a test that wants a rule to fire has to create one, exactly
+   * as /api/alerts would.
+   */
+  async function seedSpreadRule() {
+    const { StorageEngine } = await import('../server/storage.js');
+    StorageEngine.saveAlert({
+      id: 'rule-spread-high',
+      name: 'Spread Mayor a 2.0%',
+      condition: 'SPREAD_ABOVE',
+      targetValue: 2.0,
+      targetSide: 'SELL',
+      enabled: true,
+      createdAt: 1,
+    });
+  }
+
   async function pollWithBinance(buyPrice: string, sellPrice: string) {
     vi.resetModules();
     const { CentralMarketStore } = await import('../server/centralStore.js');
     const store = CentralMarketStore.getInstance();
+    const telegramCalls: string[] = [];
     vi.stubGlobal(
       'fetch',
       vi.fn(async (url: string, init: RequestInit) => {
         if (String(url).includes('api.telegram.org')) {
+          telegramCalls.push(String(url));
           throw new Error('Telegram API unavailable');
         }
         const body = JSON.parse(String(init.body));
@@ -574,14 +473,15 @@ describe('integration - the alert engine keeps running when Telegram fails', () 
         } as unknown as Response;
       })
     );
-    return store;
+    await seedSpreadRule();
+    return { store, telegramCalls };
   }
 
   it('still captures, persists and alerts when Telegram throws', async () => {
     process.env.TELEGRAM_BOT_TOKEN = TOKEN;
     process.env.TELEGRAM_CHAT_ID = CHAT_ID;
 
-    const store = await pollWithBinance('918.00', '941.00'); // spread 2.51% > 2%
+    const { store } = await pollWithBinance('918.00', '941.00'); // spread 2.51% > 2%
     const snapshot = await store.pollMarket();
 
     // Capture is unaffected.
@@ -604,7 +504,7 @@ describe('integration - the alert engine keeps running when Telegram fails', () 
   });
 
   it('runs identically with Telegram unconfigured', async () => {
-    const store = await pollWithBinance('918.00', '941.00');
+    const { store } = await pollWithBinance('918.00', '941.00');
     const snapshot = await store.pollMarket();
 
     expect(snapshot?.status).toBe('LIVE');
@@ -612,53 +512,5 @@ describe('integration - the alert engine keeps running when Telegram fails', () 
       fs.readFileSync(path.join(tmpDir, 'data', 'alert_triggers.json'), 'utf-8')
     );
     expect(triggers.length).toBeGreaterThan(0);
-  });
-});
-
-/*
- * TWO BLOCKS USED TO LIVE HERE: "BEST_OPPORTUNITY message" and "data age in
- * the opportunity message".
- *
- * They pinned an alert body reading "COMPRA arbitraje (lado Binance BUY)" and
- * "VENTA arbitraje (lado Binance SELL)" - the taker's mapping, which is
- * inverted for the operator. A user rule can no longer produce any of it:
- * OPPORTUNITY_ABOVE is refused in CentralMarketStore.evaluateAlerts, and
- * formatAlertMessage cannot even accept an Opportunity any more.
- *
- * What replaces them is the assertion that the door is shut. The data-age
- * discipline they also covered - a real age, "no verificable" instead of an
- * invented 0, never a negative - now lives on the maker messages and is
- * asserted in tests/makerTelegram.test.ts.
- */
-describe('a user alert rule can no longer speak the arbitrage model', () => {
-  const opportunityRule: AlertRule = {
-    id: 'op',
-    name: 'Oportunidad',
-    condition: 'OPPORTUNITY_ABOVE',
-    targetValue: 0.05,
-    targetSide: 'BUY',
-    enabled: true,
-    createdAt: 1,
-  };
-
-  it('formatAlertMessage takes no opportunity argument at all', () => {
-    expect(formatAlertMessage.length).toBe(3);
-  });
-
-  it('produces no arbitrage vocabulary for an OPPORTUNITY_ABOVE rule', () => {
-    const text = formatAlertMessage(makeTrigger(), opportunityRule, makeSnapshot());
-
-    expect(text).not.toMatch(/BEST OPPORTUNITY/i);
-    expect(text).not.toMatch(/arbitraje/i);
-    expect(text).not.toMatch(/lado Binance (BUY|SELL)/);
-    expect(text).not.toMatch(/EXECUTABLE/);
-  });
-
-  it('the store refuses the rule before it can be logged or sent', () => {
-    const store = fs.readFileSync(
-      path.join(process.cwd(), 'server', 'centralStore.ts'),
-      'utf8'
-    );
-    expect(store).toContain("if (rule.condition === 'OPPORTUNITY_ABOVE') continue;");
   });
 });

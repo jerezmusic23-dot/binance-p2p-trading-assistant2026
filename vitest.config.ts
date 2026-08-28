@@ -12,5 +12,14 @@ export default defineConfig({
       forks: { singleFork: false },
     },
     restoreMocks: true,
+    /*
+     * The default 5 000 ms is too tight for this suite on a modest container.
+     * BacktestEngine.run over a 300-record series walks every anchor and lands
+     * at ~4 990 ms here - under the limit on a good run and over it on a bad
+     * one, so the same commit passed or failed depending on the machine. The
+     * tests were never wrong; the budget was. Raised to a value no healthy test
+     * approaches, so a timeout again means something is actually stuck.
+     */
+    testTimeout: 30_000,
   },
 });

@@ -43,7 +43,7 @@ describe('4 - cambio alcista y 5 - cambio bajista', () => {
 
     expect(change).toBeDefined();
     expect(change!.headline).toContain('BEARISH → BULLISH');
-    expect(change!.evidence.join(' ')).toMatch(/Tendencia anterior registrada: BEARISH/);
+    expect(change!.evidence.join(' ')).toMatch(/Cambio de sentido: la tendencia registrada era BEARISH/);
   });
 
   it('BUG: a TRANSITION must not overwrite the remembered trend', () => {

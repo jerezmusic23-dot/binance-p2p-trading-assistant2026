@@ -372,6 +372,34 @@ export interface ExecutableQuote {
 }
 
 /** Executability of one BANK x AMOUNT cell, both sides. */
+/** Two legs verified to be executable together. */
+export interface ExecutablePair {
+  buy: ExecutableQuote;
+  sell: ExecutableQuote;
+  /** USDT the buy leg obtains and the sell leg must be able to move. */
+  usdtTraded: number;
+  /** ((venta - recompra) / recompra) * 100. Signed, unrounded. */
+  spreadPct: number;
+}
+
+/** What the pair search looked at for one BANK x AMOUNT cell. */
+export interface PairSearchReport {
+  /** Ads Binance returned per side, before any filter. Capped at rows=20. */
+  buyAdsSeen: number;
+  sellAdsSeen: number;
+  /** Ads that pass every check that does not depend on the other leg. */
+  buyCandidates: number;
+  sellCandidates: number;
+  /** |buyCandidates| x |sellCandidates|: the whole cartesian product. */
+  pairsPossible: number;
+  /** Joint compatibility checks actually performed. */
+  pairsExamined: number;
+  /** Of those examined, how many were compatible. */
+  compatiblePairs: number;
+  /** USDT the chosen buy leg obtains, which the sell leg must absorb. */
+  usdtTraded: number | null;
+}
+
 export interface BankAmountExecutability {
   bank: string;
   amountVes: number;
@@ -382,6 +410,26 @@ export interface BankAmountExecutability {
   bestExecutableBuy: ExecutableQuote | null;
   /** Highest executable SELL: the sale price I would actually receive. */
   bestExecutableSell: ExecutableQuote | null;
+  /**
+   * The two legs that can actually be executed TOGETHER, or null.
+   *
+   * The only field that describes an operation. bestExecutableBuy and
+   * bestExecutableSell are per-side diagnostics chosen independently, and two
+   * of those do not make a pair: the USDT the sell leg must move is set by the
+   * buy leg's price, so they can only be chosen jointly. Everything that
+   * builds an Opportunity reads THIS.
+   */
+  pair: ExecutablePair | null;
+  /** Why there is no pair, when there is none. */
+  noPairReason: string | null;
+  /**
+   * How the pair was searched for, and what was in range.
+   *
+   * DESCRIPTIVE: it decides nothing. It exists so "no opportunity" can be told
+   * apart from "no opportunity among the twenty ads Binance returned", and so
+   * the cost of the search is a measured number rather than a claim.
+   */
+  pairing: PairSearchReport;
   /** ((venta - recompra) / recompra) * 100. Signed. null unless both exist. */
   spreadPct: number | null;
   /** Why a side is null, when it is. */
@@ -716,6 +764,14 @@ export interface ProjectedRange {
   sampleSize: number;
   confidence: Confidence;
   stepsAhead: number;
+  /**
+   * What those steps are worth in real time, measured on this cell's own
+   * timestamps: the median gap between observations times stepsAhead. null
+   * when fewer than two observations exist - no interval is invented.
+   */
+  horizonMs: number | null;
+  /** Median gap between consecutive observations of this cell. */
+  observedStepMs: number | null;
   reason: 'INSUFFICIENT_HISTORY' | 'NO_DATA' | null;
   basis: string;
 }
@@ -890,6 +946,21 @@ export interface Opportunity {
   /** GROSS. Before commissions, transfers, slippage. Never net profit. */
   marginAbsolute: number;
   marginPct: number;
+  /**
+   * GROSS MARGIN OF THE WHOLE OPERATION, IN VES.
+   *
+   *     amountVes x marginPct / 100  ==  usdtTraded x (sellPrice - buyPrice)
+   *
+   * Derived, never measured separately: it is the same two prices and the same
+   * tier, arranged so the size of the operation is visible. marginPct is a
+   * RATE and says nothing about how much money the operation makes, which
+   * matters because the tiers differ by a factor of ten: 2,90% on 100.000 VES
+   * is 2.900 VES and 3,00% on 10.000 VES is 300.
+   *
+   * ADDITIVE and descriptive. selectBestOpportunity still ranks on marginPct;
+   * this exists so that policy can be seen rather than assumed.
+   */
+  marginVes: number;
   buyAvailableUsdt: number | null;
   sellAvailableUsdt: number | null;
   availableUsdt: number | null;

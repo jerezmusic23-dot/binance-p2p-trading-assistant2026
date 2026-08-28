@@ -454,12 +454,34 @@ export const MainOverview: React.FC<MainOverviewProps> = ({
         <div id="section-where-is-market-going" className="lg:col-span-2 bg-[#181a20] border border-[#2b2f36] rounded-lg p-5 space-y-4">
           <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 border-b border-[#2b2f36] pb-3">
             <div>
+              {/*
+                THE HEADING PROMISED SOMETHING THAT WAS NEVER COMPUTED.
+
+                Under "DISTRIBUCIÓN DE PROBABILIDAD (REGRESIÓN & PROFUNDIDAD)"
+                and "estimación multivariable calculada en tiempo real" sat
+                three percentages from a hand-written point system: 33.3 each,
+                +26 for the trend, -20 against it, ±8 for book pressure, ±6 for
+                RSI, clamped to [8, 88]. There was no regression and nothing was
+                counted - the numbers rendered the scoring rules, not the
+                market. The server now returns null for all three, so the
+                figures below read "--", and this heading says what is actually
+                on offer instead of naming a method that does not exist.
+              */}
               <h2 className="text-xs uppercase text-[#848e9c] font-bold tracking-wider flex items-center gap-2">
                 <Sparkles className="w-3.5 h-3.5 text-[#FCD535]" />
-                DISTRIBUCIÓN DE PROBABILIDAD (REGRESIÓN & PROFUNDIDAD)
+                DIRECCIÓN DEL MERCADO
               </h2>
               <p className="text-[11px] text-[#848e9c] mt-0.5">
-                Estimación multivariable calculada sobre la sesión venezolana en tiempo real.
+                Sin distribución de probabilidad: nada aquí cuenta con qué frecuencia
+                un mercado en este estado subió o bajó, y no se inventa un número.
+                Las frecuencias medidas por celda están en{' '}
+                <button
+                  onClick={() => onNavigateTab('analysis')}
+                  className="underline text-[#FCD535] hover:text-amber-300 cursor-pointer"
+                >
+                  Análisis
+                </button>
+                , con su tamaño de muestra.
               </p>
             </div>
             <button

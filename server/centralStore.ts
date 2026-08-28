@@ -31,6 +31,7 @@ import {
 } from './makerAlerts.js';
 import {
   EMPTY_DIGEST_STATE,
+  startDigestState,
   accumulatePriceChange,
   readPriceChangeInterval,
   releasePriceChangeDigest,
@@ -149,10 +150,51 @@ export class CentralMarketStore {
   /**
    * Price changes waiting to be sent as one grouped message.
    *
-   * Detection stays immediate; delivery waits for the interval. In memory
-   * only - a restart drops a pending window, which loses at most one digest
-   * and can never invent a change that did not happen.
+   * Detection stays immediate; delivery waits for the interval.
+   *
+   * IN MEMORY ON PURPOSE, and this is the whole persistence strategy for the
+   * notification clocks. A restart drops the pending window and resets the
+   * interval, and neither can produce spam:
+   *
+   *   - makerAlertState.recommended comes back empty, so every cell is a FIRST
+   *     observation, and a first observation is silent by construction
+   *     (evaluateMakerAlerts returns early when `previous === undefined`).
+   *     A restart therefore cannot republish prices the operator already had.
+   *   - lastReleasedAt is re-anchored at boot by start(), so the first digest
+   *     after a restart is due a full interval later, not immediately.
+   *
+   * What a restart does cost is at most one pending digest - changes detected
+   * in the open window are forgotten. That is the correct trade: the next
+   * summary carries every current price 30 minutes later at the latest, and
+   * persisting the window would risk announcing a "change" against a baseline
+   * from before an outage, which is exactly the kind of invented event Regla 5
+   * forbids. The one message a restart does add is the boot summary, which is
+   * the operator asking for it by restarting.
    */
+  /**
+   * INTERNAL EVENT COUNTERS. Diagnostic only - nothing reads them to decide
+   * anything.
+   *
+   * "How many Telegram messages did that market produce" is only half an
+   * answer: without the number of internal events behind them there is no way
+   * to tell a quiet market from a loud market that is being suppressed
+   * correctly. These are the denominators of that ratio, and the functional
+   * simulations print them.
+   */
+  private eventCounters = {
+    /** Matrix sweeps completed. */
+    sweeps: 0,
+    /** PRICE_CHANGE alerts detected, before any grouping or delivery gate. */
+    priceChangesDetected: 0,
+    /** Signals the engine derived, before dedup, cooldown or the INFO drop. */
+    signalsDerived: 0,
+  };
+
+  /** A snapshot of the internal event counters. Diagnostic. */
+  public getEventCounters(): { sweeps: number; priceChangesDetected: number; signalsDerived: number } {
+    return { ...this.eventCounters };
+  }
+
   private priceChangeDigest: PriceChangeDigestState = EMPTY_DIGEST_STATE;
   private readonly priceChangeIntervalMs: number = readPriceChangeInterval().intervalMs;
 
@@ -241,6 +283,40 @@ export class CentralMarketStore {
     // Notification layer: logs its enabled/disabled status once, here, so the
     // warning appears at boot rather than whenever the first alert fires.
     TelegramNotifier.getInstance();
+
+    /*
+     * ONE RHYTHM FOR THE PERIODIC MESSAGES.
+     *
+     * Every periodic emitter honoured its own thirty minutes and the phone
+     * still buzzed every few minutes, because the three clocks were anchored
+     * at different instants. Measured on a scripted rising market before this,
+     * the merged timeline read:
+     *
+     *   0m02 SUMMARY | 0m45 DIGEST | 30m45 SUMMARY+DIGEST | 60m45 SUMMARY+DIGEST
+     *   81m45 SIGNAL | 90m45 SUMMARY+DIGEST | 111m45 SIGNAL | 120m45 SUMMARY+DIGEST
+     *
+     * Per stream the gaps were exactly 30.0 minutes - no timer drifted and no
+     * interval was reset. As EXPERIENCED they were 21 minutes then 9 minutes,
+     * over and over, which is the shape the operator reported.
+     *
+     * Two different causes, and only one of them is a defect:
+     *
+     *   1. The digest released its first window as soon as it had anything,
+     *      which was the sweep 45 seconds after boot - right behind the boot
+     *      summary that had just listed every one of those prices, and again on
+     *      every restart. Anchoring the window here makes the first digest due
+     *      one whole interval later, which is the shape that was asked for:
+     *      13:00 digest, accumulate until 13:29, 13:30 next digest.
+     *
+     *   2. The projection signals are NOT in phase with either, and that is
+     *      left alone deliberately. A signal is not a price change: it answers
+     *      "do I have to look at this now", so holding one back to a grid
+     *      boundary would delay the only messages that are supposed to be
+     *      prompt. They keep their own floors - one shared 30-minute window for
+     *      everything below CRITICAL, half that for a confirmed break.
+     */
+    this.priceChangeDigest = startDigestState(Date.now());
+
     // Initial fetch immediately
     this.pollMarket();
 
@@ -1106,8 +1182,10 @@ export class CentralMarketStore {
        * five. The periodic summary is unaffected and still goes through
        * notifyMakerAlerts on its own 30-minute clock.
        */
+      this.eventCounters.sweeps += 1;
       for (const alert of alerts) {
         if (alert.kind !== 'PRICE_CHANGE') continue;
+        this.eventCounters.priceChangesDetected += 1;
         this.priceChangeDigest = accumulatePriceChange(
           this.priceChangeDigest,
           { cell: alert.cell, pairing: alert.pairing, previous: alert.previous },
@@ -1295,6 +1373,7 @@ export class CentralMarketStore {
      * signal says rather than by when it was derived.
      */
     if (evaluated.signals.length > 0) {
+      this.eventCounters.signalsDerived += evaluated.signals.length;
       void TelegramNotifier.getInstance().notifyMarketSignals(evaluated.signals, Date.now());
     }
   }
@@ -1644,11 +1723,20 @@ export class CentralMarketStore {
         console.log(`[Alerts] TRIGGERED: ${message}`);
 
         /*
-         * Notification only. Fire-and-forget by design: notifyAlert never
-         * throws and never rejects, so a Telegram outage cannot interrupt the
-         * alert loop, the polling cycle or persistence.
+         * NO TELEGRAM CALL HERE, and there must never be one again.
+         *
+         * This line used to read
+         *   void TelegramNotifier.getInstance().notifyAlert(log, rule, snapshot);
+         * and it ran on the 6-second poll. It is what produced
+         * "🟢 ALERTA DE PRECIO", "🔴 ALERTA P2P" and "⚠️ ALTA VOLATILIDAD".
+         * A market level crossing a number is not a maker decision, so the
+         * whole class is gone: notifyAlert and formatAlertMessage no longer
+         * exist on TelegramNotifier.
+         *
+         * The trigger is still logged above. That log is read by /api/alerts
+         * and shown in src/AlertsManager.tsx - an in-app history the operator
+         * opens deliberately, which is a different thing from a push message.
          */
-        void TelegramNotifier.getInstance().notifyAlert(log, rule, snapshot);
       }
     }
   }

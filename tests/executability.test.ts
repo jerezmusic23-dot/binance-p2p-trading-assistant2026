@@ -532,9 +532,22 @@ describe('liquidez de la segunda pierna', () => {
 
     expect(52.9).toBeGreaterThan(AMOUNT_VES / SELL_PRICE); // passed the old check
     expect(52.9).toBeLessThan(USDT_BOUGHT); // fails the real one
-    expect(cell.sellQuotes).toHaveLength(0);
-    expect(cell.sellRejections.LIQUIDITY_INSUFFICIENT).toBe(1);
-    expect(cell.bestExecutableSell).toBeNull();
+
+    /*
+     * WHERE THE CHECK LIVES NOW. The joint search made the sell side's
+     * requirement pairing-dependent - it is set by the BUY leg's price - so it
+     * can no longer be decided while looking at one ad. sellQuotes is
+     * therefore the list of pairing-INDEPENDENT candidates, and the real
+     * requirement is enforced in cell.pair.
+     *
+     * The guarantee this test exists for is unchanged and asserted below: this
+     * seller cannot absorb what the buyer obtains, so there is NO operation.
+     */
+    expect(cell.sellQuotes).toHaveLength(1);
+    expect(cell.pair).toBeNull();
+    expect(cell.pairing.compatiblePairs).toBe(0);
+    expect(cell.noPairReason).toContain('ninguna pareja');
+    expect(cell.spreadPct).toBeNull();
     expect(buildOpportunity(cell)).toBeNull();
   });
 
@@ -578,10 +591,10 @@ describe('liquidez de la segunda pierna', () => {
     expect(measured[0].requiredUsdt).toBeLessThan(measured[1].requiredUsdt);
     expect(measured[1].requiredUsdt).toBeLessThan(measured[2].requiredUsdt);
 
-    // And the engine enforces it: a seller holding 53.19 covers a 940 purchase
+    // And the engine enforces it: a seller holding 53.20 covers a 940 purchase
     // and not a 900 one, on the same 50.000 VES.
-    expect(cellWith(53.2, 940).sellQuotes).toHaveLength(1);
-    expect(cellWith(53.2, 900).sellQuotes).toHaveLength(0);
+    expect(cellWith(53.2, 940).pair).not.toBeNull();
+    expect(cellWith(53.2, 900).pair).toBeNull();
     expect(AMOUNT_VES / 900).toBeCloseTo(55.555556, 6);
   });
 
@@ -591,9 +604,13 @@ describe('liquidez de la segunda pierna', () => {
     const dearer = cellWith(53.19, BUY_PRICE, 1_200);
     const cheaper = cellWith(53.19, BUY_PRICE, 941);
 
-    // 53.19 sits just below 53.191489 and is rejected either way.
-    expect(dearer.sellQuotes).toHaveLength(0);
-    expect(cheaper.sellQuotes).toHaveLength(0);
+    // 53.19 sits just below 53.191489, so neither book yields an operation -
+    // and the 1.200 VES sale price, which would look enormously profitable,
+    // buys no relief at all, because it does not enter the requirement.
+    expect(dearer.pair).toBeNull();
+    expect(cheaper.pair).toBeNull();
+    expect(dearer.pairing.compatiblePairs).toBe(0);
+    expect(cheaper.pairing.compatiblePairs).toBe(0);
   });
 
   it('evaluar un anuncio aislado sigue midiéndose contra su propio precio', () => {

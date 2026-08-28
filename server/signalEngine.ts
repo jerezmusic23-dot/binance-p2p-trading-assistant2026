@@ -91,6 +91,17 @@ export interface SignalMemory {
   /** `${bank}:${amountKey}:${side}` -> the last CONFIRMED direction seen. */
   lastTrend: Record<string, TrendDirection>;
   /**
+   * The last reading of ANY kind, directional or not.
+   *
+   * Separate from lastTrend on purpose. lastTrend advances only on a
+   * directional reading, because a TRANSITION overwriting it would leave the
+   * next real reversal comparing against "TRANSITION" and never firing. But a
+   * trend FADING to sideways is itself an event the operator asked to be told
+   * about, and that cannot be seen without remembering the sideways reading
+   * too. Two questions, two memories.
+   */
+  lastReading: Record<string, TrendDirection>;
+  /**
    * Cells currently in an announced breakout, and which way.
    *
    * Held so the END of one can be detected. Without it a breakout that failed
@@ -101,7 +112,11 @@ export interface SignalMemory {
   openBreakout: Record<string, 'UP' | 'DOWN'>;
 }
 
-export const EMPTY_SIGNAL_MEMORY: SignalMemory = { lastTrend: {}, openBreakout: {} };
+export const EMPTY_SIGNAL_MEMORY: SignalMemory = {
+  lastTrend: {},
+  lastReading: {},
+  openBreakout: {},
+};
 
 function memoryKey(bank: string, amountKey: string, side: string): string {
   return `${bank}:${amountKey}:${side}`;
@@ -167,8 +182,10 @@ function evaluateSide(
   const trend = sideProjection.trend;
   const key = memoryKey(projection.bank, projection.amountKey, sideProjection.side);
   const lastTrend = memory.lastTrend[key];
+  const lastReading = memory.lastReading[key];
   const nextMemory: SignalMemory = {
     lastTrend: { ...memory.lastTrend },
+    lastReading: { ...memory.lastReading },
     openBreakout: { ...memory.openBreakout },
   };
 
@@ -227,19 +244,65 @@ function evaluateSide(
         ];
 
   /* ---- TREND CHANGE ---------------------------------------------------- */
-  if (
-    (trend.trend === 'BULLISH' || trend.trend === 'BEARISH') &&
+  /*
+   * A TREND THAT CONTINUES IS NOT NEWS. A TREND THAT CHANGES IS.
+   *
+   *   ALCISTA -> ALCISTA -> ALCISTA -> ALCISTA   ... one signal, at most
+   *   ALCISTA -> LATERAL                          ... an event
+   *   LATERAL -> BAJISTA                          ... an event
+   *   ALCISTA -> BAJISTA                          ... an event, and the big one
+   *
+   * Only the third of those used to exist: the condition required BOTH the old
+   * and the new reading to be directional, so a trend that faded into sideways
+   * - the moment a maker stops pushing a price - said nothing at all, and so
+   * did a flat market that started moving.
+   *
+   * TWO IMPORTANCES, and the difference is real rather than decorative. A
+   * REVERSAL contradicts what the operator was last told and can be CONFIRMED,
+   * which priorityOf raises to IMPORTANT. A FADE or an EMERGENCE is a change of
+   * regime, not a contradiction, so it stays EARLY_WARNING - WARNING - and
+   * cannot interrupt as loudly.
+   *
+   * Continuation is silent by construction, twice over: nothing is emitted
+   * unless the reading actually differs from the one remembered, and the
+   * identity carries the transition, so re-deriving the same change on the next
+   * sweep deduplicates in the notifier.
+   */
+  const directional = (d: TrendDirection): boolean => d === 'BULLISH' || d === 'BEARISH';
+  const flat = (d: TrendDirection): boolean => d === 'SIDEWAYS' || d === 'TRANSITION';
+
+  const reversal =
+    directional(trend.trend) &&
     lastTrend !== undefined &&
-    lastTrend !== trend.trend &&
-    (lastTrend === 'BULLISH' || lastTrend === 'BEARISH')
-  ) {
+    directional(lastTrend) &&
+    lastTrend !== trend.trend;
+
+  /*
+   * Fade and emergence are read off lastReading, which remembers sideways.
+   * A reversal outranks them: when the price went BULLISH -> SIDEWAYS ->
+   * BEARISH the finding is the reversal, and announcing the emergence as well
+   * would be two messages about one turn.
+   */
+  const faded = !reversal && flat(trend.trend) && lastReading !== undefined && directional(lastReading);
+  const emerged =
+    !reversal && directional(trend.trend) && lastReading !== undefined && flat(lastReading);
+
+  if (reversal || faded || emerged) {
+    const from = reversal ? (lastTrend as TrendDirection) : (lastReading as TrendDirection);
+    const status: SignalStatus =
+      reversal && trend.trendConfidence === 'HIGH' ? 'CONFIRMED' : 'EARLY_WARNING';
+
     signals.push({
       ...common,
       kind: 'TREND_CHANGE',
-      status: trend.trendConfidence === 'HIGH' ? 'CONFIRMED' : 'EARLY_WARNING',
-      headline: `${sideProjection.label}: ${lastTrend} → ${trend.trend}`,
+      status,
+      headline: `${sideProjection.label}: ${from} → ${trend.trend}`,
       evidence: borrowedNote([
-        `Tendencia anterior registrada: ${lastTrend}.`,
+        reversal
+          ? `Cambio de sentido: la tendencia registrada era ${from}.`
+          : faded
+            ? `La tendencia ${from} ha dejado de sostenerse.`
+            : `El mercado estaba ${from} y ha empezado a moverse.`,
         ...trend.basis,
         `Confianza por tamaño de muestra: ${trend.trendConfidence} (${trend.sampleSize} obs.).`,
       ]),
@@ -249,7 +312,7 @@ function evaluateSide(
         projection.bank,
         projection.amountKey,
         sideProjection.side,
-        `${lastTrend}->${trend.trend}`
+        `${from}->${trend.trend}`
       ),
     });
   }
@@ -259,8 +322,17 @@ function evaluateSide(
    * must not overwrite it, or the next real change would compare against
    * "TRANSITION" and never fire.
    */
-  if (trend.trend === 'BULLISH' || trend.trend === 'BEARISH') {
+  if (directional(trend.trend)) {
     nextMemory.lastTrend[key] = trend.trend;
+  }
+  /*
+   * lastReading advances on everything EXCEPT UNKNOWN. UNKNOWN means the
+   * series could not be read at all - a gap in capture, not a change in the
+   * market - and letting it overwrite the reading would turn every outage into
+   * a fabricated regime change on the way back.
+   */
+  if (trend.trend !== 'UNKNOWN') {
+    nextMemory.lastReading[key] = trend.trend;
   }
 
   /* ---- EXHAUSTION ------------------------------------------------------ */

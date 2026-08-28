@@ -18,6 +18,7 @@ import {
   readPriceChangeInterval,
   readSignalInterval,
   releasePriceChangeDigest,
+  startDigestState,
 } from '../server/alertScheduler.js';
 import { TelegramNotifier } from '../server/telegramNotifier.js';
 import type { MarketSignal } from '../server/signalEngine.js';
@@ -62,6 +63,79 @@ function change(bank: string, amountKey: string, from: number, to: number) {
     previous: { buyPrice: from, sellPrice: cell.recommendation!.recommended!.sell.price },
   };
 }
+
+describe('the window is anchored at start-up, not at the first change', () => {
+  /*
+   * MEASURED DEFECT. With lastReleasedAt null, releasePriceChangeDigest fires
+   * as soon as it has anything - on a running process that is the sweep about
+   * 45 seconds after boot. On a scripted rising market the merged timeline read
+   *
+   *     0m02 SUMMARY | 0m45 DIGEST | 30m45 SUMMARY+DIGEST | ...
+   *
+   * so every start, and every restart, put a "what changed" message on the wire
+   * one sweep behind a summary that had just listed all of those prices.
+   *
+   * The shape asked for is: 13:00 digest, accumulate to 13:29, 13:30 next.
+   */
+  const HALF_HOUR = DEFAULT_PRICE_CHANGE_INTERVAL_MS;
+
+  it('startDigestState fixes the origin of the first window', () => {
+    expect(startDigestState(T0)).toEqual({ pending: {}, lastReleasedAt: T0 });
+  });
+
+  it('holds the first digest for a full interval after boot', () => {
+    let state = startDigestState(T0);
+    state = accumulatePriceChange(state, change('banesco', '10K', 940.01, 940.21), T0 + 45_000);
+
+    // 45 seconds in - where the stray digest used to be emitted.
+    expect(releasePriceChangeDigest(state, T0 + 45_000, HALF_HOUR).digest).toBeNull();
+    // One second short of the boundary.
+    expect(releasePriceChangeDigest(state, T0 + HALF_HOUR - 1, HALF_HOUR).digest).toBeNull();
+
+    const due = releasePriceChangeDigest(state, T0 + HALF_HOUR, HALF_HOUR);
+    expect(due.digest).not.toBeNull();
+    expect(due.digest!.changes).toHaveLength(1);
+  });
+
+  it('accumulates the whole first window instead of reporting each move', () => {
+    let state = startDigestState(T0);
+    // Four cells move at four different minutes inside the first window.
+    state = accumulatePriceChange(state, change('banesco', '10K', 940.01, 940.21), T0 + 60_000);
+    state = accumulatePriceChange(state, change('banesco', '20K', 941.01, 941.31), T0 + 420_000);
+    state = accumulatePriceChange(state, change('mercantil', '30K', 942.01, 942.11), T0 + 1_080_000);
+    state = accumulatePriceChange(state, change('venezuela', '50K', 943.01, 943.51), T0 + 1_740_000);
+
+    // Nothing at any of those instants.
+    for (const at of [60_000, 420_000, 1_080_000, 1_740_000]) {
+      expect(releasePriceChangeDigest(state, T0 + at, HALF_HOUR).digest).toBeNull();
+    }
+
+    const released = releasePriceChangeDigest(state, T0 + HALF_HOUR, HALF_HOUR);
+    expect(released.digest!.changes).toHaveLength(4);
+    // ONE digest, four cells - not four messages.
+    expect(released.state.pending).toEqual({});
+  });
+
+  it('a restart cannot bring the digest forward', () => {
+    /*
+     * The process dies mid-window and comes back. The pending window is lost -
+     * that is the accepted cost - but the clock restarts from the new boot, so
+     * the operator does not get a digest 45 seconds after every restart.
+     */
+    const rebootAt = T0 + 12 * 60_000;
+    let fresh = startDigestState(rebootAt);
+    fresh = accumulatePriceChange(fresh, change('banesco', '10K', 940.01, 940.21), rebootAt + 45_000);
+
+    expect(releasePriceChangeDigest(fresh, rebootAt + 45_000, HALF_HOUR).digest).toBeNull();
+    expect(
+      releasePriceChangeDigest(fresh, rebootAt + HALF_HOUR, HALF_HOUR).digest
+    ).not.toBeNull();
+  });
+
+  it('EMPTY_DIGEST_STATE keeps the unanchored form for pure timelines', () => {
+    expect(EMPTY_DIGEST_STATE.lastReleasedAt).toBeNull();
+  });
+});
 
 describe('the configurable interval', () => {
   it('defaults to 30 minutes', () => {
@@ -291,6 +365,94 @@ describe('signal throttling, as measured', () => {
 
     // Four cells breaking at once is one market movement.
     expect(results.filter((r) => r.outcome === 'SENT')).toHaveLength(1);
+    vi.unstubAllGlobals();
+  });
+
+  it('does not re-announce a condition that is still true, however long it holds', async () => {
+    /*
+     * MEASURED RESERVE, now closed. Dedup keys share the map with the
+     * cooldowns, and prune() drops anything older than max(cooldownMs * 10,
+     * one hour). prune() only runs when a message is actually sent - so the
+     * defect needs OTHER traffic to surface, which is exactly what a live
+     * matrix has. A breakout that stayed broken for hours had its identity
+     * aged out by somebody else's message and went out a second time: the
+     * BREAKOUT-XYZ-01, -02, -03 the operator asked never to see.
+     *
+     * Here the long-lived condition is cell A. Cell Z produces a fresh
+     * CRITICAL every 20 minutes, each of which sends and therefore prunes.
+     * A must stay silent throughout.
+     */
+    const fetchMock = vi.fn(async () => new Response('{"ok":true}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const n = notifier();
+
+    const held = signal({
+      bank: 'A',
+      identity: 'BREAKOUT-XYZ',
+      kind: 'BREAKOUT_UP',
+      status: 'CONFIRMED',
+    });
+
+    expect((await n.notifyMarketSignals([held], T0))[0].outcome).toBe('SENT');
+
+    const outcomes: string[] = [];
+    for (let i = 1; i <= 12; i++) {
+      const at = T0 + i * 20 * 60_000; // 20 minutes apart, four hours in total
+      const noise = signal({
+        bank: 'Z',
+        amountKey: `${i}K`,
+        identity: `noise-${i}`,
+        kind: 'BREAKOUT_UP',
+        status: 'CONFIRMED',
+      });
+      const results = await n.notifyMarketSignals([held, noise], at);
+      outcomes.push(String(results[0].outcome));
+    }
+
+    // Four hours, twelve pruning opportunities, and A never speaks twice.
+    expect(new Set(outcomes)).toEqual(new Set(['UNCHANGED']));
+
+    vi.unstubAllGlobals();
+  });
+
+  it('announces a genuine recurrence once the condition has gone away', async () => {
+    /*
+     * The other half: freshness is granted only while the signal is still
+     * being derived. Once it stops appearing, its key ages out normally and a
+     * later recurrence is news again - otherwise the fix would have turned one
+     * announcement into permanent silence.
+     */
+    const fetchMock = vi.fn(async () => new Response('{"ok":true}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const n = notifier();
+
+    const condition = signal({
+      bank: 'A',
+      identity: 'BREAKOUT-XYZ',
+      kind: 'BREAKOUT_UP',
+      status: 'CONFIRMED',
+    });
+    expect((await n.notifyMarketSignals([condition], T0))[0].outcome).toBe('SENT');
+
+    // Two hours in which A is NOT derived; other cells keep the notifier busy.
+    for (let i = 1; i <= 6; i++) {
+      await n.notifyMarketSignals(
+        [
+          signal({
+            bank: 'Z',
+            amountKey: `${i}K`,
+            identity: `noise-${i}`,
+            kind: 'BREAKOUT_UP',
+            status: 'CONFIRMED',
+          }),
+        ],
+        T0 + i * 20 * 60_000
+      );
+    }
+
+    const again = await n.notifyMarketSignals([condition], T0 + 3 * 3_600_000);
+    expect(again[0].outcome).toBe('SENT');
+
     vi.unstubAllGlobals();
   });
 
