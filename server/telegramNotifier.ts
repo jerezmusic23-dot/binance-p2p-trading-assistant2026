@@ -27,6 +27,7 @@ import type { MarketSignal } from './signalEngine.js';
 import {
   PRIORITY_ORDER,
   priorityOf,
+  readSignalInterval,
   type AlertPriority,
   type PriceChangeDigest,
 } from './alertScheduler.js';
@@ -763,6 +764,22 @@ export class TelegramNotifier {
     for (const signal of ordered) {
       try {
         const priority = priorityOf(signal);
+
+        /*
+         * INFO NEVER REACHES TELEGRAM.
+         *
+         * Accumulation and distribution are worth knowing and not worth
+         * interrupting for: they describe a market drifting, which is exactly
+         * what a screen is for. Telegram answers "do I have to look at this
+         * now?", and for an INFO signal the answer is no by definition. The
+         * signal is still computed, still returned by the API and still
+         * rendered - it simply does not ring.
+         */
+        if (priority === 'INFO') {
+          results.push({ outcome: 'UNCHANGED' });
+          continue;
+        }
+
         const dedupKey = `signal:${signal.identity}:${signal.status}`;
         if (this.lastSentAt.has(dedupKey)) {
           results.push({ outcome: 'UNCHANGED' });
@@ -818,8 +835,8 @@ export class TelegramNotifier {
          * redundant. Half the cooldown keeps a genuine break prompt while
          * making a simultaneous sweep of them a single message.
          */
-        const globalFloor =
-          priority === 'CRITICAL' ? this.config.cooldownMs / 2 : this.config.cooldownMs;
+        const signalInterval = readSignalInterval().intervalMs;
+        const globalFloor = priority === 'CRITICAL' ? signalInterval / 2 : signalInterval;
         const globalPrevious = this.lastSentAt.get(globalKey);
         if (globalPrevious !== undefined && now - globalPrevious < globalFloor) {
           results.push({ outcome: 'COOLDOWN' });

@@ -9,11 +9,14 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_PRICE_CHANGE_INTERVAL_MS,
+  DEFAULT_SIGNAL_INTERVAL_MS,
   EMPTY_DIGEST_STATE,
+  MIN_SIGNAL_INTERVAL_MS,
   MIN_PRICE_CHANGE_INTERVAL_MS,
   accumulatePriceChange,
   priorityOf,
   readPriceChangeInterval,
+  readSignalInterval,
   releasePriceChangeDigest,
 } from '../server/alertScheduler.js';
 import { TelegramNotifier } from '../server/telegramNotifier.js';
@@ -300,6 +303,75 @@ describe('signal throttling, as measured', () => {
     const call = fetchMock.mock.calls[0] as unknown as [string, RequestInit] | undefined;
     const body = call === undefined ? '' : (JSON.parse(String(call[1].body)).text as string);
     expect(body).toContain('no verificable');
+    vi.unstubAllGlobals();
+  });
+});
+
+describe('el intervalo de señales es propio, no el cooldown genérico', () => {
+  it('defaults to 30 minutes and floors at 15', () => {
+    expect(DEFAULT_SIGNAL_INTERVAL_MS).toBe(1_800_000);
+    expect(MIN_SIGNAL_INTERVAL_MS).toBe(900_000);
+    expect(readSignalInterval({}).intervalMs).toBe(DEFAULT_SIGNAL_INTERVAL_MS);
+    expect(readSignalInterval({ MAKER_SIGNAL_ALERT_INTERVAL_MS: '900000' }).intervalMs).toBe(
+      MIN_SIGNAL_INTERVAL_MS
+    );
+  });
+
+  it('clamps a shorter value and says that it clamped', () => {
+    const read = readSignalInterval({ MAKER_SIGNAL_ALERT_INTERVAL_MS: '1000' });
+    expect(read.intervalMs).toBe(MIN_SIGNAL_INTERVAL_MS);
+    expect(read.clamped).toBe(true);
+  });
+
+  it('falls back to the default for nonsense', () => {
+    expect(readSignalInterval({ MAKER_SIGNAL_ALERT_INTERVAL_MS: 'luego' }).intervalMs).toBe(
+      DEFAULT_SIGNAL_INTERVAL_MS
+    );
+  });
+});
+
+describe('INFO nunca llega a Telegram', () => {
+  it('drops an INFO signal without sending it', async () => {
+    const fetchMock = vi.fn(async () => new Response('{"ok":true}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const notifier = new TelegramNotifier({
+      botToken: '1234567890:TEST-TOKEN-NOT-REAL',
+      chatId: '-1000000000000',
+      cooldownMs: 300_000,
+      timeoutMs: 1000,
+    });
+
+    const results = await notifier.notifyMarketSignals(
+      [
+        {
+          kind: 'ACCUMULATION',
+          status: 'EARLY_WARNING',
+          bank: 'BANESCO',
+          bankDisplayName: 'Banesco',
+          amountKey: '10K',
+          amountVes: 10_000,
+          side: 'BUY',
+          sideLabel: 'MI COMPRA DE USDT',
+          headline: 'lateral sobre un piso',
+          evidence: ['x'],
+          confidence: 'MEDIUM',
+          sampleSize: 30,
+          currentPrice: 940,
+          projectedLow: 939,
+          projectedHigh: 941,
+          watchStartHour: null,
+          watchEndHour: null,
+          identity: 'ACCUMULATION:BANESCO:10K:BUY:zona',
+        },
+      ],
+      T0
+    );
+
+    // Computed, returned by the API, rendered on screen - and silent.
+    expect(priorityOf({ kind: 'ACCUMULATION', status: 'EARLY_WARNING' })).toBe('INFO');
+    expect(results[0].outcome).toBe('UNCHANGED');
+    expect(fetchMock).not.toHaveBeenCalled();
     vi.unstubAllGlobals();
   });
 });

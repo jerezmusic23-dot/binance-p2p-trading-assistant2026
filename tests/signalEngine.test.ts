@@ -267,3 +267,87 @@ describe('BUG: a breakout that continues is the same breakout', () => {
     expect(later!.identity).toBe(first!.identity);
   });
 });
+
+/**
+ * INVALIDACIÓN: una ruptura que se deshace.
+ *
+ * Worth saying precisely BECAUSE the breakout was announced. Leaving it
+ * standing would let the operator keep acting on a move that ended, and
+ * silence is indistinguishable from "still going" - the worst possible reading
+ * for somebody who acted on the original message.
+ */
+describe('la ruptura que se deshace', () => {
+  const wave = [940, 942, 944, 946, 944, 942, 940, 942, 944, 946, 944, 942, 940];
+
+  it('announces the invalidation once the price returns inside the zones', () => {
+    const broken = projectCell({
+      ...CELL,
+      series: seriesFromBuyPrices([...wave, 952]),
+      currentBuyPrice: 952,
+      currentSellPrice: null,
+    });
+    const first = evaluateSignals({ projections: [broken], memory: EMPTY_SIGNAL_MEMORY });
+
+    expect(first.signals.some((s) => s.kind === 'BREAKOUT_UP')).toBe(true);
+    expect(first.memory.openBreakout['VENEZUELA:10K:BUY']).toBe('UP');
+
+    // Back inside the range: the break did not hold.
+    const returned = projectCell({
+      ...CELL,
+      series: seriesFromBuyPrices([...wave, 952, 948, 944]),
+      currentBuyPrice: 944,
+      currentSellPrice: null,
+    });
+    const second = evaluateSignals({ projections: [returned], memory: first.memory });
+
+    const invalidated = second.signals.find((s) => s.kind === 'BREAKOUT_INVALIDATED');
+    expect(invalidated).toBeDefined();
+    expect(invalidated!.status).toBe('CONFIRMED');
+    expect(invalidated!.evidence.join(' ')).toMatch(/ya no está vigente/);
+    // And the memory forgets it, so it cannot be invalidated twice.
+    expect(second.memory.openBreakout['VENEZUELA:10K:BUY']).toBeUndefined();
+  });
+
+  it('never invalidates a breakout that was never announced', () => {
+    const calm = projectCell({
+      ...CELL,
+      series: seriesFromBuyPrices(wave),
+      currentBuyPrice: 942,
+      currentSellPrice: null,
+    });
+    const { signals } = evaluateSignals({ projections: [calm], memory: EMPTY_SIGNAL_MEMORY });
+    expect(signals.filter((s) => s.kind === 'BREAKOUT_INVALIDATED')).toEqual([]);
+  });
+});
+
+describe('las identidades no se mueven con el mercado', () => {
+  it('keeps one identity for a top while the price wanders inside the zone', () => {
+    const wave = [940, 942, 944, 946, 944, 942, 940, 942, 944, 946, 944, 942, 940, 942, 944, 946, 944, 942, 940];
+
+    const idAt = (extra: number[], price: number) =>
+      evaluateSignals({
+        projections: [
+          projectCell({
+            ...CELL,
+            series: seriesFromBuyPrices([...wave, ...extra]),
+            currentBuyPrice: price,
+            currentSellPrice: null,
+          }),
+        ],
+        memory: EMPTY_SIGNAL_MEMORY,
+      }).signals.find((s) => s.kind === 'POSSIBLE_TOP')?.identity;
+
+    const first = idAt([942, 944, 946], 946);
+    const later = idAt([942, 944, 946, 945.8, 946.1], 946.1);
+
+    /*
+     * Zones are re-clustered from the whole series on every sweep, so one more
+     * observation can shift a boundary by a cent. Keying the identity on the
+     * zone's price minted a new event for the same level - the same defect
+     * that made sustained breakouts a stream.
+     */
+    expect(first).toBeDefined();
+    expect(later).toBeDefined();
+    expect(later).toBe(first);
+  });
+});

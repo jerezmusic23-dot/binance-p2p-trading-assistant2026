@@ -1190,23 +1190,21 @@ export class CentralMarketStore {
           tick: rec?.buyAnalysis.tick ?? null,
           tickProvenance: rec?.buyAnalysis.tickProvenance ?? 'NOT_VERIFIABLE',
 
+          /*
+           * PROVENANCE SURVIVES A CELL WITH NO PROFITABLE PAIR.
+           *
+           * It used to be dropped whenever `recommended` was null, which threw
+           * away the leading ads of every cell that happened to have no
+           * positive margin that minute - precisely the observations somebody
+           * auditing a flat or inverted stretch would want. The leaders are
+           * known whether or not a pair pays, so they are recorded.
+           */
           provenance:
-            pair === null
+            rec === null
               ? null
               : {
-                  buy: {
-                    advNo: pair.buy.beatsAdvNo,
-                    merchant: pair.buy.beatsMerchant,
-                    price: pair.buy.beatsPrice,
-                    // Restated from the maker model: my buy competes in SELL.
-                    tradeType: 'SELL',
-                  },
-                  sell: {
-                    advNo: pair.sell.beatsAdvNo,
-                    merchant: pair.sell.beatsMerchant,
-                    price: pair.sell.beatsPrice,
-                    tradeType: 'BUY',
-                  },
+                  buy: CentralMarketStore.leaderAd(rec.buyAnalysis, 'SELL'),
+                  sell: CentralMarketStore.leaderAd(rec.sellAnalysis, 'BUY'),
                   capturedAt: cell.capturedAt,
                 },
         };
@@ -1214,6 +1212,27 @@ export class CentralMarketStore {
         HistoricalMarketStore.record(observation, cell.capturedAt);
       }
     }
+  }
+
+  /**
+   * The leading ad of one side, as provenance.
+   *
+   * Taken from the ladder's first entry, which IS the leader by construction -
+   * not from the recommendation, which may not exist. The tradeType is
+   * restated from the maker model and never re-derived here.
+   */
+  private static leaderAd(
+    analysis: { ladder: readonly { advNo: string; merchant: string; price: number }[] },
+    tradeType: 'BUY' | 'SELL'
+  ): { advNo: string; merchant: string; price: number; tradeType: 'BUY' | 'SELL' } | null {
+    const leader = analysis.ladder[0];
+    if (leader === undefined) return null;
+    return {
+      advNo: leader.advNo,
+      merchant: leader.merchant,
+      price: leader.price,
+      tradeType,
+    };
   }
 
   /**

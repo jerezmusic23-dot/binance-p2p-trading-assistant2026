@@ -38,6 +38,13 @@ export type SignalKind =
   | 'CONFIRMED_BOTTOM'
   | 'BREAKOUT_UP'
   | 'BREAKOUT_DOWN'
+  /**
+   * A breakout that gave up: the price broke a level and has returned inside
+   * it. Worth saying precisely because the earlier breakout WAS announced -
+   * leaving it standing would let the operator keep acting on a move that
+   * ended. This is the "falso rompimiento" case.
+   */
+  | 'BREAKOUT_INVALIDATED'
   | 'ACCUMULATION'
   | 'DISTRIBUTION';
 
@@ -83,15 +90,38 @@ export interface MarketSignal {
 export interface SignalMemory {
   /** `${bank}:${amountKey}:${side}` -> the last CONFIRMED direction seen. */
   lastTrend: Record<string, TrendDirection>;
+  /**
+   * Cells currently in an announced breakout, and which way.
+   *
+   * Held so the END of one can be detected. Without it a breakout that failed
+   * would simply stop being reported, and silence is indistinguishable from
+   * "still going" - which is the worst possible reading for somebody who acted
+   * on the original message.
+   */
+  openBreakout: Record<string, 'UP' | 'DOWN'>;
 }
 
-export const EMPTY_SIGNAL_MEMORY: SignalMemory = { lastTrend: {} };
+export const EMPTY_SIGNAL_MEMORY: SignalMemory = { lastTrend: {}, openBreakout: {} };
 
 function memoryKey(bank: string, amountKey: string, side: string): string {
   return `${bank}:${amountKey}:${side}`;
 }
 
-/** Signals are identified by what they say, not when they were said. */
+/**
+ * Signals are identified by what they say, not when they were said.
+ *
+ * THE DISCRIMINATOR MUST BE STABLE WHILE THE CONDITION LASTS.
+ *
+ * This is the single most repeated defect in this project. A discriminator
+ * that moves with the market - the broken level, the zone's price, the trend
+ * label that flips between BULLISH and TRANSITION - makes every sweep a brand
+ * new event, so deduplication never matches and one continuing condition
+ * becomes a stream of messages. It was found and fixed for breakouts by a live
+ * run; the same fix belongs on every other kind.
+ *
+ * The rule: a discriminator names WHAT the condition is, never WHERE the price
+ * happens to be while it holds.
+ */
 function identityOf(
   kind: SignalKind,
   bank: string,
@@ -137,7 +167,10 @@ function evaluateSide(
   const trend = sideProjection.trend;
   const key = memoryKey(projection.bank, projection.amountKey, sideProjection.side);
   const lastTrend = memory.lastTrend[key];
-  const nextMemory: SignalMemory = { lastTrend: { ...memory.lastTrend } };
+  const nextMemory: SignalMemory = {
+    lastTrend: { ...memory.lastTrend },
+    openBreakout: { ...memory.openBreakout },
+  };
 
   // Nothing is claimed from a series that cannot support a direction.
   if (trend.reason !== null && trend.trend === 'UNKNOWN') {
@@ -242,12 +275,18 @@ function evaluateSide(
         [sideProjection.exhaustion.reason ?? '', ...trend.basis].filter((line) => line !== '')
       ),
       confidence: downgrade(trend.trendConfidence),
+      /*
+       * Keyed on the direction that is FADING, which comes from the medium
+       * window and does not flip while the fade lasts. `trend.trend` moves
+       * from BULLISH to TRANSITION as the very fade progresses, so keying on
+       * it re-announced the same exhaustion under a second identity.
+       */
       identity: identityOf(
         'EXHAUSTION',
         projection.bank,
         projection.amountKey,
         sideProjection.side,
-        trend.trend
+        sideProjection.exhaustion.direction ?? 'DESCONOCIDA'
       ),
     });
   }
@@ -309,12 +348,17 @@ function evaluateSide(
           'Un techo no significa que el precio vaya a bajar obligatoriamente.',
         ]),
         confidence: downgrade(ceiling.confidence),
+        /*
+         * NOT keyed on the zone's price. Zones are re-clustered from the whole
+         * series on every sweep, so one more observation can shift a boundary
+         * by a cent and mint a new identity for the same level.
+         */
         identity: identityOf(
           confirmed ? 'CONFIRMED_TOP' : 'POSSIBLE_TOP',
           projection.bank,
           projection.amountKey,
           sideProjection.side,
-          ceiling.high.toFixed(2)
+          'zona'
         ),
       });
     }
@@ -356,15 +400,49 @@ function evaluateSide(
           projection.bank,
           projection.amountKey,
           sideProjection.side,
-          floor.low.toFixed(2)
+          'zona'
         ),
       });
     }
   }
 
-  /* ---- BREAKOUT -------------------------------------------------------- */
+  /* ---- BREAKOUT, AND ITS END ------------------------------------------- */
   const breakout = sideProjection.breakout;
+  const openBreakout = memory.openBreakout[key];
+
+  /*
+   * INVALIDATION FIRST. A breakout that has returned inside the level is news
+   * only because the breakout itself was announced; reporting the new state
+   * before anything else keeps the two in the order the operator experienced
+   * them.
+   */
+  if (openBreakout !== undefined && breakout === null) {
+    delete nextMemory.openBreakout[key];
+    signals.push({
+      ...common,
+      kind: 'BREAKOUT_INVALIDATED',
+      status: 'CONFIRMED',
+      headline: `${sideProjection.label}: la ruptura ${
+        openBreakout === 'UP' ? 'al alza' : 'a la baja'
+      } se deshizo`,
+      evidence: borrowedNote([
+        'El precio volvió dentro de las zonas observadas.',
+        'La ruptura anterior ya no está vigente.',
+        ...trend.basis,
+      ]),
+      confidence: downgrade(trend.trendConfidence),
+      identity: identityOf(
+        'BREAKOUT_INVALIDATED',
+        projection.bank,
+        projection.amountKey,
+        sideProjection.side,
+        openBreakout
+      ),
+    });
+  }
+
   if (breakout !== null) {
+    nextMemory.openBreakout[key] = breakout.direction;
     signals.push({
       ...common,
       kind: breakout.direction === 'UP' ? 'BREAKOUT_UP' : 'BREAKOUT_DOWN',
@@ -431,7 +509,7 @@ function evaluateSide(
           projection.bank,
           projection.amountKey,
           sideProjection.side,
-          floorAhead.low.toFixed(2)
+          'zona'
         ),
       });
     }
@@ -454,7 +532,7 @@ function evaluateSide(
           projection.bank,
           projection.amountKey,
           sideProjection.side,
-          ceilingAhead.high.toFixed(2)
+          'zona'
         ),
       });
     }

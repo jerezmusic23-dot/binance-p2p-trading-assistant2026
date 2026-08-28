@@ -56,6 +56,48 @@ export const DEFAULT_PRICE_CHANGE_INTERVAL_MS = 30 * 60 * 1000;
  */
 export const MIN_PRICE_CHANGE_INTERVAL_MS = 15 * 60 * 1000;
 
+/**
+ * How often a projection signal may reach Telegram AT ALL, across the matrix.
+ *
+ * ITS OWN INTERVAL, not the generic alert cooldown, and that distinction was
+ * measured rather than assumed. Bound to the 5-minute cooldown, a three-hour
+ * scripted market produced 18 signal messages - and every one of them was the
+ * same reading about the same bank, arriving once per amount tier, because the
+ * six tiers of a bank track substantially the same book. The floor was working;
+ * five minutes was simply the wrong granularity for "do I need to look now?".
+ *
+ * Thirty minutes matches the summary and the price digest, so the bot has one
+ * rhythm rather than three.
+ */
+export const DEFAULT_SIGNAL_INTERVAL_MS = 30 * 60 * 1000;
+export const MIN_SIGNAL_INTERVAL_MS = 15 * 60 * 1000;
+
+export function readSignalInterval(env: NodeJS.ProcessEnv = process.env): {
+  intervalMs: number;
+  clamped: boolean;
+} {
+  return readInterval(
+    env.MAKER_SIGNAL_ALERT_INTERVAL_MS,
+    DEFAULT_SIGNAL_INTERVAL_MS,
+    MIN_SIGNAL_INTERVAL_MS
+  );
+}
+
+/** Shared parsing: a bad value falls back, a short one clamps and says so. */
+function readInterval(
+  raw: string | undefined,
+  fallback: number,
+  minimum: number
+): { intervalMs: number; clamped: boolean } {
+  const trimmed = raw?.trim();
+  if (trimmed === undefined || trimmed === '') return { intervalMs: fallback, clamped: false };
+
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed) || parsed <= 0) return { intervalMs: fallback, clamped: false };
+  if (parsed < minimum) return { intervalMs: minimum, clamped: true };
+  return { intervalMs: parsed, clamped: false };
+}
+
 export function readPriceChangeInterval(env: NodeJS.ProcessEnv = process.env): {
   intervalMs: number;
   clamped: boolean;
@@ -235,6 +277,13 @@ export function priorityOf(signal: {
     case 'BREAKOUT_UP':
     case 'BREAKOUT_DOWN':
       return confirmed ? 'CRITICAL' : 'IMPORTANT';
+    /*
+     * An invalidation is IMPORTANT, not CRITICAL: it cancels a decision rather
+     * than demanding a new one, and it must not be able to interrupt as often
+     * as a genuine break.
+     */
+    case 'BREAKOUT_INVALIDATED':
+      return 'IMPORTANT';
     case 'TREND_CHANGE':
       return confirmed ? 'IMPORTANT' : 'WARNING';
     case 'CONFIRMED_TOP':
