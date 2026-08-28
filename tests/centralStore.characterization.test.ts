@@ -839,7 +839,17 @@ describe('FASE 6 - BEST_OPPORTUNITY end to end', () => {
     expect(result.opportunities).toEqual([]);
   });
 
-  it('OPPORTUNITY_ABOVE fires on the operation, not on a raw spread', async () => {
+  /*
+   * THIS TEST USED TO ASSERT THE OPPOSITE: that OPPORTUNITY_ABOVE fired and
+   * logged "Oportunidad ejecutable en BANESCO".
+   *
+   * The rule announced the taker engine's BEST_OPPORTUNITY, which is the model
+   * Telegram no longer speaks - and whose BUY/SELL mapping is inverted for a
+   * maker. The rule is now refused in evaluateAlerts, so it can neither log a
+   * trigger nor send a message. The opportunity itself is still computed and
+   * still served by /api/market/opportunities; only its voice is gone.
+   */
+  it('OPPORTUNITY_ABOVE can no longer fire, even on a real operation', async () => {
     stubBinance([liquidAd('919.00')], [liquidAd('921.50')]);
     const { store, StorageEngine } = await freshStore();
     StorageEngine.deleteAlert('rule-spread-high');
@@ -857,10 +867,10 @@ describe('FASE 6 - BEST_OPPORTUNITY end to end', () => {
     await store.getOpportunities(true); // warms the cache; no extra request later
     await store.pollMarket();
 
-    const triggers = readData<AlertTriggerLog[]>('alert_triggers.json');
-    expect(triggers).toHaveLength(1);
-    expect(triggers[0].message).toContain('Oportunidad ejecutable en BANESCO');
-    expect(triggers[0].message).toContain('margen bruto');
+    // The operation exists...
+    expect(store.getCachedBestOpportunity()!.marginPct).toBeGreaterThan(0);
+    // ...and produced no trigger and no message.
+    expect(fs.existsSync(path.join(tmpDir, 'data', 'alert_triggers.json'))).toBe(false);
   });
 
   it('does not fire an opportunity alert when no opportunity exists', async () => {
@@ -1457,7 +1467,12 @@ describe('an inverted market produces no opportunity and no alert', () => {
     expect(fs.existsSync(path.join(tmpDir, 'data', 'alert_triggers.json'))).toBe(false);
   });
 
-  it('a profitable market still alerts', async () => {
+  /*
+   * Was: "a profitable market still alerts". It no longer does, and that is the
+   * point of this phase - a profitable TAKER operation is not the operator's
+   * business. What speaks now is the maker summary, from the same capture.
+   */
+  it('a profitable market is still silent on the arbitrage channel', async () => {
     stubBinance([liquid('919.00')], [liquid('921.50')]);
     const { store, StorageEngine } = await freshStore();
     StorageEngine.deleteAlert('rule-spread-high');
@@ -1476,7 +1491,7 @@ describe('an inverted market produces no opportunity and no alert', () => {
     await store.pollMarket();
 
     expect(store.getCachedBestOpportunity()!.marginPct).toBeGreaterThan(0);
-    expect(readData<AlertTriggerLog[]>('alert_triggers.json')).toHaveLength(1);
+    expect(fs.existsSync(path.join(tmpDir, 'data', 'alert_triggers.json'))).toBe(false);
   });
 });
 

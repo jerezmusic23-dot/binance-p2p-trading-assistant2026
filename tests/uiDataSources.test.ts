@@ -180,49 +180,46 @@ describe('TEST 11 / 12 - one source of truth for the opportunity', () => {
     expect(api).toMatch(/\/api\/market\/opportunities/);
   });
 
-  it('the store hands Telegram the SAME object the endpoint serves', () => {
+  it('the store no longer hands Telegram an opportunity at all', () => {
     /*
-     * getOpportunities() returns this.lastOpportunities, and the notifier is
-     * called with this.lastOpportunities.bestOpportunity. One value, two
-     * readers - there is no second calculation for Telegram to disagree with.
+     * This used to assert the opposite: that the notifier was called with
+     * this.lastOpportunities.bestOpportunity, so screen and phone could not
+     * disagree. They cannot disagree now either - because the phone is no
+     * longer told. lastOpportunities still feeds the endpoint and the
+     * executable-matrix screen, which is the taker question and still a
+     * legitimate one; Telegram simply does not speak it.
      */
     const store = code(SERVER, 'centralStore.ts');
 
-    expect(store).toMatch(/notifyOpportunityLifecycle\(\s*\n?\s*this\.lastOpportunities\.bestOpportunity/);
+    expect(store).not.toMatch(/notifyOpportunityLifecycle/);
     expect(store).toMatch(/result: this\.lastOpportunities/);
   });
 
-  it('the OPPORTUNITY messages are built from the Opportunity alone', () => {
+  it('the maker messages are built from the maker layer alone', () => {
     /*
-     * Scoped to the two opportunity formatters on purpose.
+     * Was: "the OPPORTUNITY messages are built from the Opportunity alone".
+     * Those two formatters are deleted, so the guarantee moves to the messages
+     * that replaced them.
      *
-     * strategicLines() DOES read the global medians, and correctly: it is used
-     * by the price-threshold alerts (ABOVE / BELOW / SPREAD_ABOVE), which are
-     * statements about where the market is - exactly what the global level
-     * measures. Banning it outright would delete a correct use.
-     *
-     * What must never happen is an OPPORTUNITY message carrying a global
-     * price, because that would let Telegram announce an operation nobody can
-     * execute. These two functions may only read the Opportunity.
+     * strategicLines() still reads the global medians, and correctly: the
+     * price-threshold rules (ABOVE / BELOW / SPREAD_ABOVE) are statements about
+     * where the market is, which is exactly what the global level measures.
+     * What must never happen is a PRICE-TO-PUBLISH message carrying a global
+     * median, because a market level is not a price anybody can publish.
      */
     const notifier = code(SERVER, 'telegramNotifier.ts');
-    const opportunityFormatters =
-      notifier.slice(
-        notifier.indexOf('export function formatOpportunityMessage'),
-        notifier.indexOf('export function formatAlertMessage')
-      ) +
-      notifier.slice(
-        notifier.indexOf('export function formatOpportunityLifecycleMessage'),
-        notifier.indexOf('export function formatSystemAlertMessage')
-      );
+    const makerFormatters = notifier.slice(
+      notifier.indexOf('export function formatMakerSummaryMessages'),
+      notifier.indexOf('export function formatSystemAlertMessage')
+    );
 
-    expect(opportunityFormatters.length).toBeGreaterThan(500);
-    expect(opportunityFormatters).not.toMatch(/strategic/);
-    expect(opportunityFormatters).not.toMatch(/bestBuyPrice|bestSellPrice/);
-    expect(opportunityFormatters).not.toMatch(/strategicLines/);
-    // It names bank and amount, which only an executable cell can supply.
-    expect(opportunityFormatters).toMatch(/opportunity\.bank/);
-    expect(opportunityFormatters).toMatch(/opportunity\.amountVes/);
+    expect(makerFormatters.length).toBeGreaterThan(500);
+    expect(makerFormatters).not.toMatch(/strategic/);
+    expect(makerFormatters).not.toMatch(/bestBuyPrice|bestSellPrice/);
+    expect(makerFormatters).not.toMatch(/strategicLines/);
+    // Bank and amount come from the cell, which only a real capture supplies.
+    expect(makerFormatters).toMatch(/cell\.bankDisplayName/);
+    expect(makerFormatters).toMatch(/cell\.amountKey/);
   });
 
   it('the notifier never evaluates executability itself', () => {
@@ -234,7 +231,8 @@ describe('TEST 11 / 12 - one source of truth for the opportunity', () => {
     const notifier = read(SERVER, 'telegramNotifier.ts');
 
     expect(notifier).toMatch(/MARGEN BRUTO/);
-    expect(notifier).toMatch(/NO es beneficio neto/);
+    expect(notifier).toMatch(/No es una operación garantizada/);
+    expect(notifier).not.toMatch(/ganancia garantizada|beneficio garantizado/i);
   });
 });
 
@@ -401,9 +399,16 @@ describe('the maker interface renders decisions rather than making them', () => 
   it('the panel and Telegram cannot disagree about what to publish', () => {
     const routes = code(SERVER, 'routes.ts');
     const store = code(SERVER, 'centralStore.ts');
-    // One function decides the best cell for both surfaces.
+    /*
+     * The panel's "best cell" is still decided server-side by
+     * selectBestMakerCell. Telegram no longer needs it: the summary reports
+     * every cell rather than a single winner, so there is no ranking for the
+     * two surfaces to disagree about. Both still read one matrix, built by one
+     * function, from one capture.
+     */
     expect(routes).toMatch(/selectBestMakerCell\(makerMatrix\)/);
-    expect(store).toMatch(/selectBestMakerCell\(matrix\)/);
+    expect(store).toMatch(/buildMakerMatrix\(\{/);
+    expect(store).not.toMatch(/selectBestMakerCell/);
   });
 });
 

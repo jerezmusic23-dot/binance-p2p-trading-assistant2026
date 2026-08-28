@@ -23,7 +23,7 @@ import {
   TelegramSystemAlert,
 } from './types.js';
 import type { MakerAlert } from './makerAlerts.js';
-import type { MakerMatrixCell } from './makerMatrix.js';
+import type { MakerMatrix, MakerMatrixCell } from './makerMatrix.js';
 import type { MakerPairing } from './makerRecommendation.js';
 
 /**
@@ -168,121 +168,65 @@ function strategicLines(snapshot: MarketSnapshot | null): string[] {
   if (recompra === null || recompra === undefined || venta === null || venta === undefined) {
     return [];
   }
+  /*
+   * NAMED BY THE LISTING AND THE ADVERTISER'S ACTION, never as "my" purchase
+   * or sale.
+   *
+   * These lines used to read "Referencia compra (lado Binance BUY)". For a
+   * maker that is backwards: the tradeType=BUY listing holds the ads I compete
+   * with when I SELL, so calling it my compra points the reader at the wrong
+   * book. What is true of it without any reference to me is that it contains
+   * ads whose advertisers are selling USDT, and that is what it now says.
+   *
+   * This is a market level, not a price to publish. The price to publish is
+   * the maker summary's business and never appears in a rule alert.
+   */
   return [
     '',
-    `Referencia compra (lado Binance BUY): <b>${escapeHtml(recompra.toFixed(2))} VES</b>`,
-    `Referencia venta (lado Binance SELL): <b>${escapeHtml(venta.toFixed(2))} VES</b>`,
+    `Mediana del listado BUY (anuncios que VENDEN USDT): <b>${escapeHtml(
+      recompra.toFixed(2)
+    )} VES</b>`,
+    `Mediana del listado SELL (anuncios que COMPRAN USDT): <b>${escapeHtml(
+      venta.toFixed(2)
+    )} VES</b>`,
+    'Nivel de mercado, no un precio para publicar.',
   ];
 }
 
-/**
- * The BEST_OPPORTUNITY message.
+/*
+ * formatOpportunityMessage and formatOpportunityLifecycleMessage USED TO LIVE
+ * HERE, and both are gone.
  *
- * Reports ONE real operation: a bank, an amount, an executable repurchase and
- * an executable sale. Nothing here comes from the raw extremes of the book, so
- * an isolated 980 VES ad cannot produce this message.
+ * They wrote the taker's model onto the operator's phone: "OPORTUNIDAD DE
+ * ARBITRAJE", legs labelled COMPRA/VENTA USDT sourced from "Binance ASK" and
+ * "Binance BID", and the API parameter printed underneath - tradeType BUY under
+ * COMPRA, tradeType SELL under VENTA. For a MAKER that mapping is inverted:
+ * my BUY ad competes in the tradeType=SELL listing, not the BUY one. Anyone
+ * acting on those messages was reading the wrong book.
  *
- * The margin is stated as GROSS on purpose. Binance commission, bank transfer
- * fees, slippage and rounding are not modelled anywhere in this project, so
- * calling it profit would be inventing a number.
- */
-export function formatOpportunityMessage(
-  opportunity: Opportunity,
-  rule: AlertRule,
-  timestamp: number,
-  /** When the book behind this operation was captured. Omitted if unknown. */
-  capturedAt?: number | null
-): string {
-  const n = (value: number, decimals = 2) => escapeHtml(value.toFixed(decimals));
-
-  const lines = [
-    '🚨 <b>BEST OPPORTUNITY</b>',
-    '',
-    `Banco: <b>${escapeHtml(opportunity.bank)}</b>`,
-    `Monto: <b>${escapeHtml(opportunity.amountVes.toLocaleString('es-VE'))} VES</b>`,
-    '',
-    /*
-     * Both legs name the Binance side they came from. "Recompra" alone reads
-     * as the advertiser's action to anyone thinking in ad direction, which is
-     * exactly the inversion this wording exists to prevent.
-     */
-    `COMPRA arbitraje (lado Binance BUY): <b>${n(opportunity.buyPrice)} VES</b>`,
-    `VENTA arbitraje (lado Binance SELL): <b>${n(opportunity.sellPrice)} VES</b>`,
-    '',
-    `Spread: <b>${n(opportunity.spreadPct, 4)}%</b>`,
-    `Margen BRUTO: <b>${n(opportunity.marginAbsolute)} VES por USDT</b>`,
-  ];
-
-  // Absent liquidity is never printed as a number.
-  if (opportunity.availableUsdt !== null) {
-    lines.push(`Liquidez: <b>${n(opportunity.availableUsdt)} USDT</b>`);
-  } else {
-    lines.push('Liquidez: no verificable');
-  }
-
-  /*
-   * The opportunity comes from the bank-matrix cache, which can be up to 45s
-   * old. Stating the age lets the reader judge whether the prices are still
-   * on the book. Printed only when a real capture timestamp exists - never
-   * invented, and never shown as 0 when unknown.
-   */
-  if (capturedAt !== null && capturedAt !== undefined && Number.isFinite(capturedAt)) {
-    const ageSeconds = Math.max(0, Math.round((timestamp - capturedAt) / 1000));
-    lines.push(`Antiguedad del dato: ${escapeHtml(String(ageSeconds))}s`);
-  } else {
-    lines.push('Antiguedad del dato: no verificable');
-  }
-
-  lines.push(
-    '',
-    `Umbral: ${escapeHtml(rule.targetValue.toFixed(4))}%`,
-    `Estado: ${escapeHtml(opportunity.verification)} / EXECUTABLE`,
-    '',
-    'MARGEN BRUTO: no descuenta comision de Binance,',
-    'transferencia bancaria, slippage, redondeos',
-    'ni otros costes operativos. NO es beneficio neto.',
-    '',
-    `Hora: ${formatVenezuelaClock(timestamp)}`
-  );
-
-  return lines.join('\n');
-}
-
-/**
- * Builds the message body.
- *
- * Only values that actually exist are printed. Nothing is invented, and no
- * metric is renamed into something it is not - notably VOLATILITY_SPIKE is
- * evaluated against the spread, so the message says "spread", not "volatility
- * index".
+ * The taker engine still exists and still feeds the executable matrix screen,
+ * which asks a different and legitimate question. What it no longer has is a
+ * route to Telegram. Telegram now has exactly one source of truth: the maker
+ * layer, below.
  */
 export function formatAlertMessage(
   trigger: AlertTriggerLog,
   rule: AlertRule,
-  snapshot: MarketSnapshot | null,
-  opportunity?: Opportunity | null,
-  capturedAt?: number | null
+  snapshot: MarketSnapshot | null
 ): string {
   const time = formatVenezuelaClock(trigger.timestamp);
 
   /*
-   * An opportunity alert reports the operation, never the market aggregate.
-   * Without the opportunity there is nothing truthful to say, so no message
-   * is fabricated from the snapshot instead.
+   * OPPORTUNITY_ABOVE used to be handled here, reporting the taker engine's
+   * BEST_OPPORTUNITY. It is gone: that rule is refused before it reaches this
+   * function (see CentralMarketStore.evaluateAlerts), so no arbitrage figure
+   * can reach Telegram through a user rule. The condition survives in the
+   * AlertRule type because it is present in stored rule files, and silently
+   * rewriting somebody's saved rules is not this phase's business.
+   *
+   * What remains here are MARKET rules over the strategic medians. They report
+   * the level of the book, never an operation, and never a price to publish.
    */
-  if (rule.condition === 'OPPORTUNITY_ABOVE') {
-    if (!opportunity) {
-      return [
-        '🚨 <b>BEST OPPORTUNITY</b>',
-        '',
-        'La alerta se disparo pero la oportunidad ya no esta disponible.',
-        'No se reporta ningun precio: el dato falta.',
-        '',
-        `Hora: ${time}`,
-      ].join('\n');
-    }
-    return formatOpportunityMessage(opportunity, rule, trigger.timestamp, capturedAt);
-  }
   const market = escapeHtml(marketLabel(snapshot));
   /*
    * FASE 2: the STRATEGIC spread, the same number the rule was evaluated on.
@@ -346,256 +290,231 @@ export function formatAlertMessage(
   ].join('\n');
 }
 
+
 /**
- * Identity of an opportunity POSITION: one bank, one amount.
- *
- * Deliberately NOT keyed on the prices. Prices move on every poll, so a
- * price-keyed identity would treat each tick as a brand new opportunity and
- * defeat the very deduplication it looks like it provides. The position is
- * what opens, moves and closes; the prices are what it currently shows.
+ * Telegram refuses a message longer than this. Splitting is deterministic and
+ * happens on BANK boundaries - never per cell, which would be 42 messages.
  */
-export function opportunityIdentity(opportunity: Opportunity): string {
-  return `${opportunity.bank}|${opportunity.amountVes}`;
+export const TELEGRAM_MESSAGE_LIMIT = 4096;
+
+/** Absent numbers are words. A price that was not derived is never printed. */
+const vesPrice = (value: number | null): string =>
+  value === null ? 'no verificable' : escapeHtml(value.toFixed(2));
+
+const signedVes = (value: number, decimals = 2): string =>
+  `${value >= 0 ? '+' : ''}${escapeHtml(value.toFixed(decimals))}`;
+
+/**
+ * What a cell says when it has no price to publish.
+ *
+ * Each state gets its own words. None of them is a number, and none of them
+ * is an invented tick: a cell whose price step was never observed says so,
+ * rather than quietly becoming leader + 0.01.
+ */
+function cellStateLine(cell: MakerMatrixCell): string {
+  const rec = cell.recommendation;
+  const tickUnknown =
+    rec !== null &&
+    (rec.buyAnalysis.tickProvenance === 'NOT_VERIFIABLE' ||
+      rec.sellAnalysis.tickProvenance === 'NOT_VERIFIABLE');
+
+  if (tickUnknown) return '⚠️ PRECIO NO VERIFICABLE';
+
+  switch (cell.status) {
+    case 'NO_MARGIN':
+      return '⚪ Sin margen positivo';
+    case 'FETCH_FAILED':
+      return '⚠️ Binance no respondió';
+    case 'STALE':
+      return '⚠️ Dato antiguo';
+    default:
+      return '⚪ Sin datos';
+  }
 }
 
-/**
- * The lifecycle message for a position.
- *
- * DETECTED once, UPDATED while it stays open and the cooldown allows, CLOSED
- * when it leaves the book. The reader can follow one position instead of
- * receiving the same paragraph every few seconds.
- */
-export function formatOpportunityLifecycleMessage(
-  phase: OpportunityPhase,
-  opportunity: Opportunity,
-  timestamp: number,
-  capturedAt?: number | null
-): string {
-  const n = (value: number, decimals = 2) => escapeHtml(value.toFixed(decimals));
-  const signed = (value: number, decimals = 2) =>
-    `${value >= 0 ? '+' : ''}${escapeHtml(value.toFixed(decimals))}`;
+/** One cell, in the compact block the operator reads on a phone. */
+function summaryCellBlock(cell: MakerMatrixCell): string[] {
+  const pair = cell.recommendation?.recommended ?? null;
+  const lines = [`💰 ${escapeHtml(cell.amountKey)}`];
 
-  if (phase === 'CLOSED') {
-    return [
-      '✅ <b>OPORTUNIDAD CERRADA</b>',
-      '',
-      'USDT/VES',
-      '',
-      `Banco: <b>${escapeHtml(opportunity.bank)}</b>`,
-      `Monto: <b>${escapeHtml(opportunity.amountVes.toLocaleString('es-VE'))} VES</b>`,
-      '',
-      'Esta operación ya no está en el libro con las condiciones anteriores.',
-      '',
-      `Hora: ${formatVenezuelaClock(timestamp)}`,
-    ].join('\n');
-  }
-
-  /*
-   * Each leg states the ECONOMICS first, then the Binance side, then the API
-   * parameter. In that order on purpose: "what this does to my money" is the
-   * part that cannot be misread, and it is what the reader needs before the
-   * technical label. tradeType is printed last, and only because someone
-   * verifying against the API by hand needs it.
-   */
-  const lines = [
-    phase === 'DETECTED'
-      ? '🟢 <b>OPORTUNIDAD DE ARBITRAJE</b>'
-      : '🔄 <b>OPORTUNIDAD ACTUALIZADA</b>',
-    '',
-    'USDT/VES',
-    '',
-    '<b>COMPRA USDT</b> (entrada)',
-    'Fuente: Binance ASK · anuncio que vende USDT',
-    'tradeType/API: BUY',
-    `Precio: <b>${n(opportunity.buyPrice)} VES</b>`,
-    '',
-    '<b>VENTA USDT</b> (salida)',
-    'Fuente: Binance BID · anuncio que compra USDT',
-    'tradeType/API: SELL',
-    `Precio: <b>${n(opportunity.sellPrice)} VES</b>`,
-    '',
-    `SPREAD: <b>${signed(opportunity.spreadAbsolute)} VES</b>`,
-    `RENDIMIENTO: <b>${signed(opportunity.marginPct, 4)}%</b>`,
-    '',
-    /*
-     * Both legs are the SAME bank by construction: a purchase at one bank and
-     * a sale at another is not an operation anyone can execute, so the
-     * executability engine never pairs across banks. Printed twice because
-     * that is what makes the constraint visible.
-     */
-    `Banco compra: <b>${escapeHtml(opportunity.bank)}</b>`,
-    `Banco venta: <b>${escapeHtml(opportunity.bank)}</b>`,
-    `Monto: <b>${escapeHtml(opportunity.amountVes.toLocaleString('es-VE'))} VES</b>`,
-    '',
-    // Absent liquidity is never printed as a number.
-    opportunity.buyAvailableUsdt !== null
-      ? `Liquidez compra: <b>${n(opportunity.buyAvailableUsdt)} USDT</b>`
-      : 'Liquidez compra: no verificable',
-    opportunity.sellAvailableUsdt !== null
-      ? `Liquidez venta: <b>${n(opportunity.sellAvailableUsdt)} USDT</b>`
-      : 'Liquidez venta: no verificable',
-  ];
-
-  if (capturedAt !== null && capturedAt !== undefined && Number.isFinite(capturedAt)) {
-    const ageSeconds = Math.max(0, Math.round((timestamp - capturedAt) / 1000));
-    lines.push(`Antiguedad del dato: ${escapeHtml(String(ageSeconds))}s`);
-  } else {
-    lines.push('Antiguedad del dato: no verificable');
+  if (pair === null) {
+    lines.push(cellStateLine(cell), '');
+    return lines;
   }
 
   lines.push(
-    '',
-    `Estado: ${escapeHtml(opportunity.verification)} / EXECUTABLE`,
-    '',
-    'MARGEN BRUTO: no descuenta comision de Binance,',
-    'transferencia bancaria, slippage, redondeos',
-    'ni otros costes operativos. NO es beneficio neto.',
-    '',
-    `Hora: ${formatVenezuelaClock(timestamp)}`
+    `🟢 Compra: <b>${escapeHtml(pair.buy.price.toFixed(2))}</b>  (#${escapeHtml(
+      String(pair.buy.position)
+    )})`,
+    `🔵 Venta: <b>${escapeHtml(pair.sell.price.toFixed(2))}</b>  (#${escapeHtml(
+      String(pair.sell.position)
+    )})`,
+    `💵 Margen: <b>${signedVes(pair.grossMarginVes)} VES</b>${
+      pair.grossMarginPct !== null ? ` · ${signedVes(pair.grossMarginPct, 4)}%` : ''
+    }`,
+    ''
   );
-
-  return lines.join('\n');
+  return lines;
 }
 
 /**
- * The system-condition message.
+ * 🟢 MIS PRECIOS PARA PUBLICAR — the whole BANCO x MONTO picture.
  *
- * These are the alerts that fire when the bot stops being able to SEE the
- * market. Without them an outage is indistinguishable from a quiet market:
- * both produce no opportunity messages.
+ * Returns ONE message whenever it fits, and otherwise as few as it takes,
+ * split on bank boundaries so a bank is never cut in half. Never one message
+ * per cell: 7 banks x 6 amounts is 42 notifications nobody would read.
+ *
+ * This is not an opportunity feed. It answers "if I publish an ad right now,
+ * what price does it carry" for every bank and amount, and says plainly where
+ * it has no answer.
  */
+export function formatMakerSummaryMessages(
+  matrix: MakerMatrix,
+  timestamp: number
+): string[] {
+  const header = [
+    '🟢 <b>MIS PRECIOS PARA PUBLICAR</b>',
+    '',
+    `⏱ Capturado hace ${escapeHtml(String(matrix.ageSeconds))}s`,
+    `👥 Compitiendo contra ${
+      matrix.config.publisherFilter === 'ALL'
+        ? 'todos los anunciantes'
+        : matrix.config.publisherFilter === 'MERCHANT_ONLY'
+        ? 'sólo comerciantes'
+        : 'sólo no comerciantes'
+    }`,
+    `📊 Profundidad TOP ${escapeHtml(String(matrix.config.ladderDepth))}`,
+    matrix.stale ? '⚠️ DATO ANTIGUO' : '',
+    '',
+  ].filter((line) => line !== '');
+
+  const footer = [
+    '━━━━━━━━━━━━━━━━━━',
+    '',
+    '⚠️ <b>MARGEN BRUTO POTENCIAL</b>',
+    '',
+    'No es una operación garantizada.',
+    'No incluye comisiones, transferencias,',
+    'slippage ni otros costos.',
+    '',
+    `Hora: ${formatVenezuelaClock(timestamp)}`,
+  ];
+
+  /* One block per bank, built whole so a split can never cut one apart. */
+  const bankBlocks: string[][] = [];
+  for (const bank of matrix.bankOrder) {
+    const row = matrix.cells[bank];
+    if (row === undefined) continue;
+
+    const block = [
+      '━━━━━━━━━━━━━━━━━━',
+      '',
+      `🏦 <b>${escapeHtml(matrix.bankDisplayNames[bank] ?? bank)}</b>`,
+      '',
+    ];
+    for (const amountKey of matrix.amountKeys) {
+      const cell = row[amountKey];
+      if (cell === undefined) continue;
+      block.push(...summaryCellBlock(cell));
+    }
+    bankBlocks.push(block);
+  }
+
+  if (bankBlocks.length === 0) {
+    return [
+      [
+        ...header,
+        'No hay ninguna celda capturada todavía.',
+        '',
+        `Hora: ${formatVenezuelaClock(timestamp)}`,
+      ].join('\n'),
+    ];
+  }
+
+  /* Greedy packing over whole banks: deterministic given the same matrix. */
+  const parts: string[][] = [];
+  let current: string[] = [...header];
+
+  for (const block of bankBlocks) {
+    const candidate = [...current, ...block];
+    if (
+      current.length > header.length &&
+      [...candidate, ...footer].join('\n').length > TELEGRAM_MESSAGE_LIMIT
+    ) {
+      parts.push(current);
+      current = [...header, ...block];
+    } else {
+      current = candidate;
+    }
+  }
+  parts.push(current);
+
+  const total = parts.length;
+  return parts.map((part, index) => {
+    const marker = total > 1 ? [`(${index + 1}/${total})`, ''] : [];
+    return [...part, ...footer, ...marker].join('\n');
+  });
+}
+
 /**
- * 🟢 PRECIO RECOMENDADO PARA PUBLICAR.
+ * 🔔 CAMBIO DE PRECIO PARA PUBLICAR.
  *
- * Written for a MAKER. Every line answers "what do I type into the ad form?",
- * and the ad each price steps ahead of is named so the operator can open
- * Binance and check the recommendation against the book themselves.
- *
- * The price that would take first place is printed even when the engine
- * recommends a different one - the operator asked never to lose sight of it.
+ * Sent ONLY when the number the operator would type into the ad form is
+ * different from the one they were last told. A leader that moved without
+ * moving the recommendation produces nothing, and so does a change of
+ * position, of advertised volume or of who is in the ladder.
  */
-export function formatMakerPublishMessage(
+export function formatMakerPriceChangeMessage(
   cell: MakerMatrixCell,
   pairing: MakerPairing,
+  previous: { buyPrice: number; sellPrice: number },
   timestamp: number
 ): string {
-  const n = (value: number, decimals = 2) => escapeHtml(value.toFixed(decimals));
-  const signed = (value: number, decimals = 2) =>
-    `${value >= 0 ? '+' : ''}${escapeHtml(value.toFixed(decimals))}`;
-  const rec = cell.recommendation;
-
-  const lines = [
-    '🟢 <b>PRECIO RECOMENDADO PARA PUBLICAR</b>',
-    '',
-    'USDT/VES · anuncios propios (maker)',
-    '',
-    `Banco: <b>${escapeHtml(cell.bankDisplayName)}</b>`,
-    `Monto: <b>${escapeHtml(cell.amountVes.toLocaleString('es-VE'))} VES</b>`,
-    '',
-    '<b>MI COMPRA DE USDT</b> (publico: COMPRO USDT)',
-    'Compito contra: compradores de USDT · listado tradeType SELL',
-    `Líder actual: <b>${rec?.buyAnalysis.leaderPrice !== null && rec !== null ? n(rec.buyAnalysis.leaderPrice as number) : 'no verificable'} VES</b>`,
-    `PUBLICAR A: <b>${n(pairing.buy.price)} VES</b>`,
-    `Posición estimada: <b>${escapeHtml(String(pairing.buy.position))}</b>`,
-    `Supera al anuncio ${escapeHtml(pairing.buy.beatsAdvNo)} de ${escapeHtml(pairing.buy.beatsMerchant)} (${n(pairing.buy.beatsPrice)} VES)`,
-    '',
-    '<b>MI VENTA DE USDT</b> (publico: VENDO USDT)',
-    'Compito contra: vendedores de USDT · listado tradeType BUY',
-    `Líder actual: <b>${rec?.sellAnalysis.leaderPrice !== null && rec !== null ? n(rec.sellAnalysis.leaderPrice as number) : 'no verificable'} VES</b>`,
-    `PUBLICAR A: <b>${n(pairing.sell.price)} VES</b>`,
-    `Posición estimada: <b>${escapeHtml(String(pairing.sell.position))}</b>`,
-    `Supera al anuncio ${escapeHtml(pairing.sell.beatsAdvNo)} de ${escapeHtml(pairing.sell.beatsMerchant)} (${n(pairing.sell.beatsPrice)} VES)`,
-    '',
-    `MARGEN BRUTO: <b>${signed(pairing.grossMarginVes)} VES por USDT</b>`,
-    pairing.grossMarginPct !== null
-      ? `MARGEN BRUTO: <b>${signed(pairing.grossMarginPct, 4)}%</b>`
-      : 'MARGEN BRUTO %: no verificable',
-  ];
-
-  /* Being first is always reported, whatever the engine chose to recommend. */
-  if (rec !== null && pairing.position !== 1) {
-    lines.push(
-      '',
-      'Ser #1 en ambos lados no es lo recomendado aquí.',
-      `Precio para ser #1 comprando: <b>${rec.priceToBeFirstBuy !== null ? n(rec.priceToBeFirstBuy) : 'no verificable'} VES</b>`,
-      `Precio para ser #1 vendiendo: <b>${rec.priceToBeFirstSell !== null ? n(rec.priceToBeFirstSell) : 'no verificable'} VES</b>`,
-      rec.firstPositionPairing !== null
-        ? `Margen en la posición 1: <b>${signed(rec.firstPositionPairing.grossMarginVes)} VES por USDT</b>`
-        : 'Margen en la posición 1: no verificable'
-    );
-  }
-
-  // Absent volume is never printed as a number.
-  lines.push(
-    '',
-    pairing.buy.queueAheadUsdt !== null
-      ? `Volumen por delante (compra): <b>${n(pairing.buy.queueAheadUsdt)} USDT</b>`
-      : 'Volumen por delante (compra): no verificable',
-    pairing.sell.queueAheadUsdt !== null
-      ? `Volumen por delante (venta): <b>${n(pairing.sell.queueAheadUsdt)} USDT</b>`
-      : 'Volumen por delante (venta): no verificable',
-    `Antiguedad del dato: ${escapeHtml(String(cell.ageSeconds))}s`,
-    '',
-    'MARGEN BRUTO: no descuenta comision de Binance,',
-    'transferencia bancaria, slippage, redondeos',
-    'ni otros costes operativos. NO es beneficio neto.',
-    'La posición es una ESTIMACION: Binance ordena tambien',
-    'por factores que esta captura no expone.',
-    '',
-    `Hora: ${formatVenezuelaClock(timestamp)}`
-  );
-
-  return lines.join('\n');
-}
-
-/**
- * 🔔 CAMBIO DE PRECIO — somebody moved ahead of the price I recommended.
- *
- * Only ever about a price this robot actually announced. A leader moving in a
- * cell nobody was told to publish in is market noise, not news.
- */
-export function formatMakerDisplacedMessage(
-  announced: {
-    bankDisplayName: string;
-    amountVes: number;
-    buyPrice: number;
-    sellPrice: number;
-    buyPosition: number;
-    sellPosition: number;
-  },
-  current: {
-    buyPosition: number;
-    sellPosition: number;
-    priceToBeFirstBuy: number | null;
-    priceToBeFirstSell: number | null;
-  },
-  timestamp: number
-): string {
-  const n = (value: number, decimals = 2) => escapeHtml(value.toFixed(decimals));
-  const pos = (value: number) => escapeHtml(String(value));
+  const n = (value: number) => escapeHtml(value.toFixed(2));
 
   return [
-    '🔔 <b>CAMBIO DE PRECIO</b>',
+    '🔔 <b>CAMBIO DE PRECIO PARA PUBLICAR</b>',
     '',
-    'USDT/VES · anuncios propios (maker)',
+    `🏦 ${escapeHtml(cell.bankDisplayName)}`,
+    `💰 Filtro: ${escapeHtml(cell.amountKey)} (${escapeHtml(
+      cell.amountVes.toLocaleString('es-VE')
+    )} VES)`,
     '',
-    `Banco: <b>${escapeHtml(announced.bankDisplayName)}</b>`,
-    `Monto: <b>${escapeHtml(announced.amountVes.toLocaleString('es-VE'))} VES</b>`,
+    '🟢 <b>COMPRA USDT</b>',
+    `Antes: ${n(previous.buyPrice)}`,
+    `Ahora: <b>${n(pairing.buy.price)}</b>`,
+    `Posición estimada: #${escapeHtml(String(pairing.buy.position))}`,
     '',
-    'El precio recomendado ya no ocupa la posición que ocupaba.',
+    '🔵 <b>VENTA USDT</b>',
+    `Antes: ${n(previous.sellPrice)}`,
+    `Ahora: <b>${n(pairing.sell.price)}</b>`,
+    `Posición estimada: #${escapeHtml(String(pairing.sell.position))}`,
     '',
-    `MI COMPRA a ${n(announced.buyPrice)} VES: posición ${pos(announced.buyPosition)} → <b>${pos(current.buyPosition)}</b>`,
-    `MI VENTA a ${n(announced.sellPrice)} VES: posición ${pos(announced.sellPosition)} → <b>${pos(current.sellPosition)}</b>`,
+    `📊 Nuevo margen: <b>${signedVes(pairing.grossMarginVes)} VES/USDT</b>`,
+    pairing.grossMarginPct !== null
+      ? `📈 Margen: <b>${signedVes(pairing.grossMarginPct, 4)}%</b>`
+      : '📈 Margen: no verificable',
     '',
-    `Para ser #1 comprando: <b>${current.priceToBeFirstBuy !== null ? n(current.priceToBeFirstBuy) : 'no verificable'} VES</b>`,
-    `Para ser #1 vendiendo: <b>${current.priceToBeFirstSell !== null ? n(current.priceToBeFirstSell) : 'no verificable'} VES</b>`,
-    '',
-    'Recuperar la primera posición no siempre conviene:',
-    'revisa el margen antes de republicar.',
+    '⚠️ MARGEN BRUTO POTENCIAL. No es una operación garantizada.',
+    'La posición es una ESTIMACIÓN.',
     '',
     `Hora: ${formatVenezuelaClock(timestamp)}`,
   ].join('\n');
 }
+
+/*
+ * formatMakerDisplacedMessage USED TO LIVE HERE and is gone.
+ *
+ * It announced that an announced price had lost POSITION - somebody moved
+ * ahead of it. That is the wrong trigger: the operator's ad does not need
+ * republishing because a rival appeared, it needs republishing when the price
+ * they should be charging is different. A leader can move, a rival can
+ * disappear, volume can change and positions can shuffle without the
+ * publishable price moving one cent, and each of those produced a message.
+ *
+ * formatMakerPriceChangeMessage above replaces it, driven by the only thing
+ * the operator can act on: the number changed.
+ */
 
 export function formatSystemAlertMessage(alert: TelegramSystemAlert): string {
   const heading: Record<TelegramSystemAlert['kind'], string> = {
@@ -637,8 +556,6 @@ export class TelegramNotifier {
   private readonly lastSentAt = new Map<string, number>();
   /** Last state announced per system condition, so an unchanged one stays quiet. */
   private readonly lastSystemState = new Map<string, string>();
-  /** Positions currently announced as open, so CLOSED can be detected. */
-  private readonly openOpportunities = new Map<string, number>();
   private startupLogged = false;
 
   constructor(private readonly config: TelegramConfig | null) {}
@@ -661,12 +578,6 @@ export class TelegramNotifier {
   public resetState(): void {
     this.lastSentAt.clear();
     this.lastSystemState.clear();
-    this.openOpportunities.clear();
-  }
-
-  /** Positions currently held open, for assertions and diagnostics. */
-  public openOpportunityKeys(): string[] {
-    return [...this.openOpportunities.keys()];
   }
 
   public isEnabled(): boolean {
@@ -697,9 +608,7 @@ export class TelegramNotifier {
   public async notifyAlert(
     trigger: AlertTriggerLog,
     rule: AlertRule,
-    snapshot: MarketSnapshot | null,
-    opportunity?: Opportunity | null,
-    capturedAt?: number | null
+    snapshot: MarketSnapshot | null
   ): Promise<TelegramResult> {
     try {
       if (!this.config) return { outcome: 'DISABLED' };
@@ -721,7 +630,7 @@ export class TelegramNotifier {
       this.lastSentAt.set(key, now);
       this.prune(now);
 
-      return await this.send(formatAlertMessage(trigger, rule, snapshot, opportunity, capturedAt));
+      return await this.send(formatAlertMessage(trigger, rule, snapshot));
     } catch (err) {
       // Belt and braces: nothing above should throw, and if it somehow does,
       // the alert loop still must not notice.
@@ -825,6 +734,19 @@ export class TelegramNotifier {
    * The caller decides WHAT changed (evaluateMakerAlerts, which is pure). This
    * method only decides whether to put it on the wire.
    */
+  /**
+   * Puts the maker layer's output on the wire. THE ONLY MARKET EMITTER LEFT.
+   *
+   * SUMMARY is the periodic picture. It is never suppressed by a cooldown -
+   * evaluateMakerAlerts already decides when it is due, on its own 30-minute
+   * clock, and a second gate here would silently skip one. A summary that does
+   * not fit one Telegram message is split on bank boundaries and sent as a
+   * short deterministic sequence, never as one message per cell.
+   *
+   * PRICE_CHANGE is rate-limited PER CELL and deduplicated by the pair of
+   * prices it announces: the same change re-derived on a later sweep sends
+   * nothing, and a busy cell cannot drown out the other 41.
+   */
   public async notifyMakerAlerts(
     alerts: readonly MakerAlert[],
     timestamp: number
@@ -836,42 +758,39 @@ export class TelegramNotifier {
 
     for (const alert of alerts) {
       try {
-        if (alert.kind === 'PUBLISH') {
-          const key = `maker:publish:${alert.cell.bank}:${alert.cell.amountKey}:${alert.pairing.buy.price}:${alert.pairing.sell.price}`;
-          if (this.lastSentAt.has(key)) {
-            results.push({ outcome: 'UNCHANGED' });
-            continue;
+        if (alert.kind === 'SUMMARY') {
+          for (const message of formatMakerSummaryMessages(alert.matrix, now)) {
+            results.push(await this.send(message));
           }
-          this.lastSentAt.set(key, now);
-          this.prune(now);
-          results.push(
-            await this.send(formatMakerPublishMessage(alert.cell, alert.pairing, now))
-          );
           continue;
         }
 
-        const key = `maker:displaced:${alert.cell.bank}:${alert.cell.amountKey}`;
-        const previous = this.lastSentAt.get(key);
+        const cell = alert.cell;
+        /*
+         * Dedup key carries the prices, so re-announcing the same move is a
+         * no-op; cooldown key carries only the cell, so a cell that keeps
+         * moving is throttled rather than repeated.
+         */
+        const dedupKey = `maker:price:${cell.bank}:${cell.amountKey}:${alert.pairing.buy.price}:${alert.pairing.sell.price}`;
+        if (this.lastSentAt.has(dedupKey)) {
+          results.push({ outcome: 'UNCHANGED' });
+          continue;
+        }
+
+        const cooldownKeyForCell = `maker:cell:${cell.bank}:${cell.amountKey}`;
+        const previous = this.lastSentAt.get(cooldownKeyForCell);
         if (previous !== undefined && now - previous < this.config.cooldownMs) {
           results.push({ outcome: 'COOLDOWN' });
           continue;
         }
-        this.lastSentAt.set(key, now);
+
+        this.lastSentAt.set(dedupKey, now);
+        this.lastSentAt.set(cooldownKeyForCell, now);
         this.prune(now);
+
         results.push(
           await this.send(
-            formatMakerDisplacedMessage(
-              {
-                bankDisplayName: alert.announced.bankDisplayName,
-                amountVes: alert.announced.amountVes,
-                buyPrice: alert.announced.buyPrice,
-                sellPrice: alert.announced.sellPrice,
-                buyPosition: alert.announced.buyPosition,
-                sellPosition: alert.announced.sellPosition,
-              },
-              alert,
-              now
-            )
+            formatMakerPriceChangeMessage(cell, alert.pairing, alert.previous, now)
           )
         );
       } catch (err) {
@@ -883,125 +802,19 @@ export class TelegramNotifier {
     return results;
   }
 
-  /**
-   * Announces an opportunity position by phase.
+
+  /*
+   * notifyOpportunityLifecycle, closeOpenOpportunities and closeOpportunity
+   * USED TO LIVE HERE, together with the openOpportunities map that tracked
+   * which arbitrage position was "open".
    *
-   * DETECTED the first time the position appears - never suppressed by the
-   * cooldown, because the first sighting is the message that matters. UPDATED
-   * while it stays open, and only once per cooldown window. Passing null means
-   * no position is open, which closes whatever was.
-   *
-   * Only VERIFIED / EXECUTABLE opportunities reach here; a strategic median is
-   * not a position and has no lifecycle.
+   * They were the loudest emitter in the system: driven by the 6-second poll,
+   * announcing DETECTED / UPDATED / CLOSED for the taker engine's
+   * BEST_OPPORTUNITY. Deleting the call site alone would have left a public
+   * method any future caller could pick up again, so the method is gone with
+   * it. There is no arbitrage lifecycle to announce any more, because Telegram
+   * does not speak that model.
    */
-  public async notifyOpportunityLifecycle(
-    opportunity: Opportunity | null,
-    timestamp: number,
-    capturedAt?: number | null
-  ): Promise<TelegramResult> {
-    try {
-      if (!this.config) return { outcome: 'DISABLED' };
-      const now = timestamp || Date.now();
-
-      if (opportunity === null) {
-        return await this.closeOpenOpportunities(now);
-      }
-
-      /*
-       * Two independent guards, both required.
-       *
-       * selectBestOpportunity already refuses anything that is not VERIFIED or
-       * whose margin is not strictly positive, so in the normal path these
-       * never fire. They are here because this method is public: a future
-       * caller handing it any Opportunity must not be able to announce a loss,
-       * or an operation whose liquidity could not be established, as something
-       * to execute. Break-even is excluded too - zero before Binance
-       * commission, transfer fees and slippage is a loss once they are paid.
-       */
-      if (opportunity.verification !== 'VERIFIED') {
-        return { outcome: 'UNCHANGED' };
-      }
-      if (!(opportunity.marginPct > 0)) {
-        return { outcome: 'UNCHANGED' };
-      }
-
-      const identity = opportunityIdentity(opportunity);
-
-      /* A different position opened: the previous one is no longer current. */
-      for (const key of this.openOpportunities.keys()) {
-        if (key !== identity) {
-          await this.closeOpportunity(key, now);
-        }
-      }
-
-      const isNew = !this.openOpportunities.has(identity);
-      const phase: OpportunityPhase = isNew ? 'DETECTED' : 'UPDATED';
-      const cooldownKeyForPosition = `opportunity:${identity}`;
-
-      if (!isNew) {
-        const previous = this.lastSentAt.get(cooldownKeyForPosition);
-        if (previous !== undefined && now - previous < this.config.cooldownMs) {
-          this.openOpportunities.set(identity, now);
-          return { outcome: 'COOLDOWN' };
-        }
-      }
-
-      this.openOpportunities.set(identity, now);
-      this.lastSentAt.set(cooldownKeyForPosition, now);
-      this.prune(now);
-
-      return await this.send(
-        formatOpportunityLifecycleMessage(phase, opportunity, now, capturedAt)
-      );
-    } catch (err) {
-      console.warn(`[Telegram] Unexpected notifier error: ${this.describe(err)}`);
-      return { outcome: 'NETWORK_ERROR', detail: this.describe(err) };
-    }
-  }
-
-  /** CLOSED for every position still marked open. */
-  private async closeOpenOpportunities(now: number): Promise<TelegramResult> {
-    const keys = [...this.openOpportunities.keys()];
-    if (keys.length === 0) return { outcome: 'UNCHANGED' };
-
-    let last: TelegramResult = { outcome: 'UNCHANGED' };
-    for (const key of keys) {
-      last = await this.closeOpportunity(key, now);
-    }
-    return last;
-  }
-
-  /**
-   * CLOSED is not rate-limited.
-   *
-   * A position announced as open must always be announced as gone, or the
-   * reader is left believing an operation is still on the book. Silence here
-   * is the one failure mode this layer must not have.
-   */
-  private async closeOpportunity(identity: string, now: number): Promise<TelegramResult> {
-    this.openOpportunities.delete(identity);
-    this.lastSentAt.delete(`opportunity:${identity}`);
-
-    const [bank, amountRaw] = identity.split('|');
-    const amountVes = Number(amountRaw);
-
-    return await this.send(
-      [
-        '✅ <b>OPORTUNIDAD CERRADA</b>',
-        '',
-        'USDT/VES',
-        '',
-        `Banco: <b>${escapeHtml(bank)}</b>`,
-        `Monto: <b>${escapeHtml(
-          Number.isFinite(amountVes) ? amountVes.toLocaleString('es-VE') : amountRaw
-        )} VES</b>`,
-        '',
-        'Esta operación ya no está en el libro con las condiciones anteriores.',
-        '',
-        `Hora: ${formatVenezuelaClock(now)}`,
-      ].join('\n')
-    );
-  }
 
   /** Keeps the cooldown map bounded; rules are few but the map is long-lived. */
   private prune(now: number): void {

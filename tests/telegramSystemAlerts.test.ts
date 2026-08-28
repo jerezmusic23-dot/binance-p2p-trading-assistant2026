@@ -1,5 +1,5 @@
 /**
- * Telegram: system alerts and the opportunity lifecycle.
+ * Telegram: system alerts, and the maker emitter's anti-spam discipline.
  *
  * NOTHING here talks to Telegram or to Binance. fetch is stubbed in every
  * test. These assertions are about the notifier's discipline - that it stays
@@ -14,13 +14,15 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   TelegramNotifier,
   readTelegramConfig,
-  opportunityIdentity,
-  formatOpportunityLifecycleMessage,
   formatSystemAlertMessage,
   DEFAULT_ALERT_COOLDOWN_MS,
   DEFAULT_SYSTEM_ALERT_COOLDOWN_MS,
 } from '../server/telegramNotifier.js';
-import type { Opportunity, TelegramSystemAlert } from '../server/types.js';
+import { buildMakerMatrix } from '../server/makerMatrix.js';
+import { DEFAULT_MAKER_CONFIG } from '../server/makerStrategy.js';
+import { makeNormalizedAd } from './helpers/fixtures.js';
+import type { MakerAlert } from '../server/makerAlerts.js';
+import type { NormalizedAd, TelegramSystemAlert } from '../server/types.js';
 
 const TOKEN = '1234567890:TEST-TOKEN-NOT-REAL';
 const CHAT = '-1001234567890';
@@ -35,30 +37,45 @@ function configured() {
   });
 }
 
-function makeOpportunity(overrides: Partial<Opportunity> = {}): Opportunity {
-  const buyPrice = 944;
-  const sellPrice = 955;
+/** A cell whose recommended prices are exactly the two given. */
+function makeCell(myBuyLeader: number, mySellLeader: number) {
+  const ad = (price: number, payType = 'Banesco'): NormalizedAd => ({
+    ...makeNormalizedAd(price),
+    advNo: `adv-${price}`,
+    paymentOptions: [{ payType, tradeMethodName: payType }],
+  });
+  // Establishes the 0.01 step by observation, without competing for Banesco.
+  const witness = ad(900.25, 'Provincial');
+
+  return buildMakerMatrix({
+    bankOrder: ['banesco'],
+    bankDisplayNames: { banesco: 'Banesco' },
+    bankAllowedCodes: { banesco: ['Banesco'] },
+    amounts: [{ key: '10K', val: 10_000 }],
+    listingsByTier: {
+      '10K': {
+        banesco: { SELL: [ad(myBuyLeader), witness], BUY: [ad(mySellLeader), witness] },
+      },
+    },
+    failedBanksByTier: {},
+    capturedAtByTier: { '10K': T0 },
+    capturedAt: T0,
+    config: DEFAULT_MAKER_CONFIG,
+    nowMs: T0,
+  }).cells.banesco['10K'];
+}
+
+function priceChange(myBuyLeader: number, mySellLeader: number): MakerAlert {
+  const cell = makeCell(myBuyLeader, mySellLeader);
   return {
-    bank: 'Banco de Venezuela',
-    amountVes: 50_000,
-    buyPrice,
-    sellPrice,
-    // Same values under the unambiguous names.
-    arbitrageBuyPrice: buyPrice,
-    arbitrageSellPrice: sellPrice,
-    buyAdvNo: 'BUY-1',
-    sellAdvNo: 'SELL-1',
-    spreadAbsolute: sellPrice - buyPrice,
-    spreadPct: Number((((sellPrice - buyPrice) / buyPrice) * 100).toFixed(4)),
-    marginAbsolute: sellPrice - buyPrice,
-    marginPct: Number((((sellPrice - buyPrice) / buyPrice) * 100).toFixed(4)),
-    buyAvailableUsdt: 500,
-    sellAvailableUsdt: 400,
-    availableUsdt: 400,
-    verification: 'VERIFIED',
-    provenance: 'EXECUTABLE',
-    reason: null,
-    ...overrides,
+    kind: 'PRICE_CHANGE',
+    cell,
+    pairing: cell.recommendation!.recommended!,
+    previous: { buyPrice: 1, sellPrice: 2 },
+    current: {
+      buyPrice: cell.recommendation!.recommended!.buy.price,
+      sellPrice: cell.recommendation!.recommended!.sell.price,
+    },
   };
 }
 
@@ -117,11 +134,11 @@ describe('Telegram without a token', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('reports DISABLED and sends nothing for an opportunity', async () => {
+  it('reports DISABLED and sends nothing for a maker alert', async () => {
     const notifier = new TelegramNotifier(null);
-    const result = await notifier.notifyOpportunityLifecycle(makeOpportunity(), T0);
+    const results = await notifier.notifyMakerAlerts([priceChange(940, 945)], T0);
 
-    expect(result.outcome).toBe('DISABLED');
+    expect(results.map((r) => r.outcome)).toEqual(['DISABLED']);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
@@ -282,175 +299,136 @@ describe('Telegram: storage error', () => {
   });
 });
 
-describe('Telegram: opportunity deduplication', () => {
-  it('identifies a position by bank and amount, not by its current prices', () => {
-    const a = makeOpportunity({ buyPrice: 944, sellPrice: 955 });
-    const b = makeOpportunity({ buyPrice: 943.5, sellPrice: 956.2 });
-
-    expect(opportunityIdentity(a)).toBe(opportunityIdentity(b));
-  });
-
-  it('distinguishes two different positions at the same bank', () => {
-    const small = makeOpportunity({ amountVes: 10_000 });
-    const large = makeOpportunity({ amountVes: 100_000 });
-
-    expect(opportunityIdentity(small)).not.toBe(opportunityIdentity(large));
-  });
-
-  it('announces DETECTED once and then stays quiet at the poll rate', async () => {
+/*
+ * THESE TWO BLOCKS USED TO COVER THE ARBITRAGE LIFECYCLE - DETECTED, UPDATED,
+ * CLOSED, dedup by bank+amount, and "EXECUTABLE is never confused with
+ * STRATEGIC".
+ *
+ * That emitter is gone. The GUARANTEES it was protecting are not: an emitter
+ * driven by a fast loop must not repeat itself, must not let one noisy cell
+ * drown the rest, and must never publish a number nobody observed. They are
+ * re-pinned here against the maker emitter, which is the only market emitter
+ * left.
+ */
+describe('Telegram: the maker emitter does not repeat itself', () => {
+  it('sends a price change once and stays quiet at the sweep rate', async () => {
     const notifier = configured();
-    const outcomes: string[] = [];
+    const alert = priceChange(940, 945);
 
-    // 6-second polling for two minutes on the same live position.
-    for (let i = 0; i < 20; i++) {
-      const result = await notifier.notifyOpportunityLifecycle(
-        makeOpportunity({ buyPrice: 944 + i * 0.1 }),
-        T0 + i * 6_000
-      );
-      outcomes.push(result.outcome);
+    for (let i = 0; i < 5; i += 1) {
+      await notifier.notifyMakerAlerts([alert], T0 + i * 45_000);
     }
 
-    expect(outcomes[0]).toBe('SENT');
-    expect(outcomes.slice(1).every((o) => o === 'COOLDOWN')).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(sentBodies()[0]).toContain('OPORTUNIDAD DE ARBITRAJE');
   });
 
-  it('sends UPDATED, not a second DETECTED, once the cooldown elapses', async () => {
+  it('deduplicates by the prices announced, not by the moment', async () => {
+    const notifier = configured();
+    const alert = priceChange(940, 945);
+
+    const first = await notifier.notifyMakerAlerts([alert], T0);
+    // Far beyond any cooldown: the same two prices are still not news.
+    const later = await notifier.notifyMakerAlerts([alert], T0 + 86_400_000);
+
+    expect(first[0].outcome).toBe('SENT');
+    expect(later[0].outcome).toBe('UNCHANGED');
+  });
+
+  it('throttles a cell that keeps moving, rather than repeating it', async () => {
     const notifier = configured();
 
-    await notifier.notifyOpportunityLifecycle(makeOpportunity(), T0);
-    await notifier.notifyOpportunityLifecycle(
-      makeOpportunity({ buyPrice: 940 }),
-      T0 + DEFAULT_ALERT_COOLDOWN_MS + 1_000
+    const first = await notifier.notifyMakerAlerts([priceChange(940, 945)], T0);
+    const second = await notifier.notifyMakerAlerts([priceChange(941, 946)], T0 + 45_000);
+
+    expect(first[0].outcome).toBe('SENT');
+    expect(second[0].outcome).toBe('COOLDOWN');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets the same cell speak again once the cooldown has passed', async () => {
+    const notifier = configured();
+
+    await notifier.notifyMakerAlerts([priceChange(940, 945)], T0);
+    const later = await notifier.notifyMakerAlerts(
+      [priceChange(941, 946)],
+      T0 + DEFAULT_ALERT_COOLDOWN_MS + 1
     );
 
-    const bodies = sentBodies();
-    expect(bodies).toHaveLength(2);
-    expect(bodies[0]).toContain('OPORTUNIDAD DE ARBITRAJE');
-    expect(bodies[1]).toContain('OPORTUNIDAD ACTUALIZADA');
+    expect(later[0].outcome).toBe('SENT');
   });
 
-  it('closes a position when it leaves the book', async () => {
+  it('keeps every cell on its own cooldown', async () => {
     const notifier = configured();
+    const banesco = priceChange(940, 945);
+    const other = priceChange(942, 947);
+    // Same bank in the fixture, so force a different cell identity.
+    (other as { cell: { amountKey: string } }).cell.amountKey = '50K';
 
-    await notifier.notifyOpportunityLifecycle(makeOpportunity(), T0);
-    const closed = await notifier.notifyOpportunityLifecycle(null, T0 + 30_000);
+    const results = await notifier.notifyMakerAlerts([banesco, other], T0);
 
-    expect(closed.outcome).toBe('SENT');
-    expect(sentBodies()[1]).toContain('OPORTUNIDAD CERRADA');
-    expect(notifier.openOpportunityKeys()).toEqual([]);
-  });
-
-  it('does not send CLOSED for a position that was never announced', async () => {
-    const notifier = configured();
-    const result = await notifier.notifyOpportunityLifecycle(null, T0);
-
-    expect(result.outcome).toBe('UNCHANGED');
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
-
-  it('closes the previous position when a different one takes over', async () => {
-    const notifier = configured();
-
-    await notifier.notifyOpportunityLifecycle(makeOpportunity({ amountVes: 10_000 }), T0);
-    await notifier.notifyOpportunityLifecycle(
-      makeOpportunity({ amountVes: 100_000 }),
-      T0 + 30_000
-    );
-
-    const bodies = sentBodies();
-    expect(bodies).toHaveLength(3);
-    expect(bodies[0]).toContain('OPORTUNIDAD DE ARBITRAJE');
-    expect(bodies[1]).toContain('OPORTUNIDAD CERRADA');
-    expect(bodies[2]).toContain('OPORTUNIDAD DE ARBITRAJE');
-    expect(notifier.openOpportunityKeys()).toHaveLength(1);
-  });
-
-  it('CLOSED is never suppressed by a cooldown', async () => {
-    const notifier = configured();
-
-    await notifier.notifyOpportunityLifecycle(makeOpportunity(), T0);
-    // One second later - far inside the cooldown window.
-    const closed = await notifier.notifyOpportunityLifecycle(null, T0 + 1_000);
-
-    expect(closed.outcome).toBe('SENT');
+    expect(results.map((r) => r.outcome)).toEqual(['SENT', 'SENT']);
   });
 });
 
-describe('Telegram: EXECUTABLE is never confused with STRATEGIC', () => {
-  it('ignores an opportunity that is not VERIFIED', async () => {
+describe('Telegram: the summary is the periodic voice, and is never throttled', () => {
+  function matrixOf(cell: ReturnType<typeof makeCell>) {
+    return {
+      capturedAt: T0,
+      ageSeconds: 12,
+      stale: false,
+      staleAfterSeconds: 315,
+      bankOrder: ['banesco'],
+      bankDisplayNames: { banesco: 'Banesco' },
+      amountKeys: ['10K'],
+      cells: { banesco: { '10K': cell } },
+      config: DEFAULT_MAKER_CONFIG,
+    };
+  }
+
+  it('sends the summary every time it is handed one', async () => {
     const notifier = configured();
-    const result = await notifier.notifyOpportunityLifecycle(
-      makeOpportunity({
-        verification: 'NOT_VERIFIABLE',
-        availableUsdt: null,
-        reason: 'Un lado no publicó volumen.',
-      }),
+    const summary: MakerAlert = { kind: 'SUMMARY', matrix: matrixOf(makeCell(940, 945)) };
+
+    await notifier.notifyMakerAlerts([summary], T0);
+    await notifier.notifyMakerAlerts([summary], T0 + 1_800_000);
+
+    // The 30-minute clock lives in evaluateMakerAlerts; a second gate here
+    // would silently swallow a due summary.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('names the bank, the amount, both prices and the margin', async () => {
+    const notifier = configured();
+    await notifier.notifyMakerAlerts(
+      [{ kind: 'SUMMARY', matrix: matrixOf(makeCell(940, 945)) }],
       T0
     );
 
-    expect(result.outcome).toBe('UNCHANGED');
-    expect(fetchMock).not.toHaveBeenCalled();
+    const [body] = sentBodies();
+    expect(body).toContain('MIS PRECIOS PARA PUBLICAR');
+    expect(body).toContain('Banesco');
+    expect(body).toContain('10K');
+    expect(body).toContain('🟢 Compra: <b>940.01</b>');
+    expect(body).toContain('🔵 Venta: <b>944.99</b>');
+    expect(body).toContain('💵 Margen: <b>+4.98 VES</b>');
   });
 
-  it('labels the message EXECUTABLE and names the bank and amount', () => {
-    const body = formatOpportunityLifecycleMessage('DETECTED', makeOpportunity(), T0, T0 - 20_000);
-
-    expect(body).toContain('EXECUTABLE');
-    expect(body).toContain('Banco de Venezuela');
-    /*
-     * The economics lead, the Binance side follows, the API parameter last.
-     * A reader must never have to infer which side of the book a leg came
-     * from, nor what it does to their money.
-     */
-    expect(body).toContain('COMPRA USDT');
-    expect(body).toContain('Fuente: Binance ASK');
-    expect(body).toContain('VENTA USDT');
-    expect(body).toContain('Fuente: Binance BID');
-    expect(body).not.toContain('STRATEGIC');
-    expect(body).not.toContain('mediana');
-  });
-
-  it('calls the result MARGEN BRUTO and never net profit', () => {
-    const body = formatOpportunityLifecycleMessage('DETECTED', makeOpportunity(), T0);
-
-    expect(body).toContain('MARGEN BRUTO');
-    expect(body).toContain('NO es beneficio neto');
-    expect(body).not.toMatch(/beneficio neto:/i);
-    expect(body).not.toMatch(/ganancia/i);
-    expect(body).not.toMatch(/profit/i);
-  });
-
-  it('never issues an instruction to trade', () => {
-    const body = formatOpportunityLifecycleMessage('DETECTED', makeOpportunity(), T0);
-
-    expect(body).not.toMatch(/COMPRA AHORA/i);
-    expect(body).not.toMatch(/VENTA AHORA/i);
-    expect(body).not.toMatch(/GARANTIZAD/i);
-  });
-
-  it('prints absent liquidity as not verifiable rather than as zero', () => {
-    const body = formatOpportunityLifecycleMessage(
-      'DETECTED',
-      /*
-       * The buy leg published nothing. Reported per leg now, so an unknown on
-       * one side cannot be masked by a known figure on the other - which is
-       * what a single combined "Liquidez" line used to allow.
-       */
-      makeOpportunity({ buyAvailableUsdt: null, availableUsdt: null }),
+  it('never speaks the arbitrage vocabulary', async () => {
+    const notifier = configured();
+    await notifier.notifyMakerAlerts(
+      [{ kind: 'SUMMARY', matrix: matrixOf(makeCell(940, 945)) }],
       T0
     );
 
-    expect(body).toContain('Liquidez compra: no verificable');
-    expect(body).not.toContain('Liquidez compra: <b>0.00 USDT</b>');
-    // The side that DID publish is still reported as the number it is.
-    expect(body).toContain('Liquidez venta: <b>400.00 USDT</b>');
-  });
-
-  it('prints an unknown capture age as not verifiable rather than as 0s', () => {
-    const body = formatOpportunityLifecycleMessage('DETECTED', makeOpportunity(), T0, null);
-    expect(body).toContain('Antiguedad del dato: no verificable');
+    const [body] = sentBodies();
+    expect(body).not.toMatch(
+      /ARBITRAJE|OPORTUNIDAD|EXECUTABLE|EJECUTABLE|NO_OPPORTUNITY|BEST.?OPPORTUNITY/i
+    );
+    expect(body).toContain('MARGEN BRUTO POTENCIAL');
+    // The three phrasings the operator ruled out by name. The disclaimer's own
+    // "No es una operación garantizada" is the opposite claim and must stay.
+    expect(body).not.toMatch(/ganancia garantizada|arbitraje garantizado|oportunidad garantizada/i);
+    expect(body).toContain('No es una operación garantizada.');
   });
 });
 
@@ -464,7 +442,7 @@ describe('Telegram: failures never escape the notifier', () => {
 
   it('returns a result instead of throwing when Telegram rejects the message', async () => {
     fetchMock.mockResolvedValueOnce(new Response('nope', { status: 429 }));
-    const result = await configured().notifyOpportunityLifecycle(makeOpportunity(), T0);
+    const [result] = await configured().notifyMakerAlerts([priceChange(940, 945)], T0);
 
     expect(result.outcome).toBe('HTTP_ERROR');
     expect(result.detail).toContain('429');

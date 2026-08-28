@@ -1,24 +1,30 @@
 /**
  * THE WHOLE ROBOT, END TO END.
  *
- *   Binance -> capture -> history -> executable matrix -> opportunity engine
- *           -> lastOpportunities -> Telegram
+ *   Binance -> capture -> BANCO x MONTO -> maker strategy -> maker
+ *           -> recommendation -> maker matrix -> Telegram
  *
- * Driven by time alone. Nothing here calls /api/market/opportunities or
- * /api/market/matrix, because the point is that the bot works with nobody
- * watching - which is exactly what it could not do before the matrix interval
- * existed.
+ * Driven by time alone. Nothing here calls an HTTP route, because the point is
+ * that the bot works with nobody watching.
  *
  * The Binance responses are SYNTHETIC and say nothing about the real market.
- * What they prove is that a book which DOES contain an executable operation
- * travels the whole chain and comes out as a correctly worded Telegram
- * message, and that a book which does not stays silent.
+ * What they prove is that a captured book travels the whole chain and comes
+ * out as a correctly worded price to publish, and that the taker engine - which
+ * still runs, and still feeds the executable-matrix screen - no longer reaches
+ * Telegram at all.
  *
- * ECONOMICS UNDER TEST
+ * THE TWO MODELS, AND WHY THEY DISAGREE ON PURPOSE
  *
- *   ASK 940 = an ad SELLING USDT   = I buy   = arbitrageBuyPrice
- *   BID 950 = an ad BUYING USDT    = I sell  = arbitrageSellPrice
- *   opportunity <=> sell > buy
+ *   TAKER  ASK 940 / BID 950  ->  buy at 940, sell at 950, +10: an opportunity
+ *   MAKER  the same book      ->  my buy ad competes in the SELL listing, whose
+ *                                 leader is 950, and my sell ad in the BUY
+ *                                 listing, whose leader is 940: publishing
+ *                                 950.01 to sell at 939.99 LOSES 10.02
+ *
+ * That is not a contradiction, it is the spread: what the taker crosses, the
+ * maker earns, and vice versa. A book that pays a taker cannot pay a maker on
+ * both sides at once, which is why these suites assert opposite outcomes over
+ * identical ads.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -100,64 +106,99 @@ afterEach(() => {
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-describe('a book WITH an executable operation reaches Telegram on its own', () => {
-  it('ASK 940 / BID 950 becomes an arbitrage message, no HTTP request involved', async () => {
+describe('a captured book becomes a price to publish, on its own', () => {
+  /*
+   * MY BUY rivals live in the tradeType=SELL listing, so they arrive as
+   * `bidAds`; MY SELL rivals live in the tradeType=BUY listing and arrive as
+   * `askAds`. Swap the two arguments below and the margin inverts - which is
+   * exactly the mistake this whole phase exists to make impossible.
+   *
+   * The cents in 938.75 / 946.25 are load-bearing: they are what lets the
+   * engine OBSERVE a 0.01 step. Without a single decimal anywhere in the book
+   * the tick is unestablished and no price is proposed.
+   */
+  const myBuyRivals = [banesco('bid-1', '940.00'), banesco('bid-2', '938.75')];
+  const mySellRivals = [banesco('ask-1', '945.00'), banesco('ask-2', '946.25')];
+
+  it('publishes 940.01 / 944.99 and says so on Telegram, with no HTTP request', async () => {
     vi.useFakeTimers();
-    stubWorld([banesco('ask-1', '940.00')], [banesco('bid-1', '950.00')]);
+    stubWorld(mySellRivals, myBuyRivals);
 
     const { store } = await freshStore();
     store.start();
 
     // Boot snapshot, then the 2s matrix population. Time only.
     await vi.advanceTimersByTimeAsync(3_000);
-    // One poll after the matrix exists, so evaluateAlerts sees the result.
     await vi.advanceTimersByTimeAsync(7_000);
 
-    const opportunity = store.getCachedBestOpportunity();
-    expect(opportunity).not.toBeNull();
+    const matrix = await store.getMakerMatrix();
+    const cell = matrix.cells.BANESCO['20K'];
 
-    // The economics, as MY operation.
-    expect(opportunity?.buyPrice).toBe(940);
-    expect(opportunity?.sellPrice).toBe(950);
-    expect(opportunity?.spreadAbsolute).toBe(10);
-    expect(opportunity?.marginPct).toBeGreaterThan(0);
-    expect(opportunity?.marginPct).toBeCloseTo(1.0638, 3);
-    expect(opportunity?.verification).toBe('VERIFIED');
-    expect(opportunity?.bank).toBe('BANESCO');
+    // MI COMPRA: one tick above the highest buyer, read from the SELL listing.
+    expect(cell.recommendation!.buyAnalysis.definition.listingTradeType).toBe('SELL');
+    expect(cell.recommendation!.buyAnalysis.leaderPrice).toBe(940);
+    expect(cell.recommendation!.priceToBeFirstBuy).toBe(940.01);
+
+    // MI VENTA: one tick below the lowest seller, read from the BUY listing.
+    expect(cell.recommendation!.sellAnalysis.definition.listingTradeType).toBe('BUY');
+    expect(cell.recommendation!.sellAnalysis.leaderPrice).toBe(945);
+    expect(cell.recommendation!.priceToBeFirstSell).toBe(944.99);
+
+    expect(cell.recommendation!.recommended!.grossMarginVes).toBe(4.98);
+    expect(cell.status).toBe('PUBLISH_AT_TOP');
 
     // And it left the building.
-    const arbitrage = telegramSent.filter((t) => t.includes('OPORTUNIDAD DE ARBITRAJE'));
-    expect(arbitrage.length).toBeGreaterThan(0);
+    const summaries = telegramSent.filter((t) => t.includes('MIS PRECIOS PARA PUBLICAR'));
+    expect(summaries.length).toBeGreaterThan(0);
 
-    const body = arbitrage[0];
-    expect(body).toContain('COMPRA USDT');
-    expect(body).toContain('Fuente: Binance ASK');
-    expect(body).toContain('940.00 VES');
-    expect(body).toContain('VENTA USDT');
-    expect(body).toContain('Fuente: Binance BID');
-    expect(body).toContain('950.00 VES');
-    expect(body).toContain('SPREAD: <b>+10.00 VES</b>');
-    expect(body).toContain('Estado: VERIFIED / EXECUTABLE');
-    expect(body).toContain('MARGEN BRUTO');
+    const body = summaries[0];
+    expect(body).toContain('Banesco');
+    expect(body).toContain('🟢 Compra: <b>940.01</b>');
+    expect(body).toContain('🔵 Venta: <b>944.99</b>');
+    expect(body).toContain('💵 Margen: <b>+4.98 VES</b>');
+    expect(body).toContain('MARGEN BRUTO POTENCIAL');
 
     store.stop();
   });
 
-  it('a stable opportunity is announced once, not every 45 seconds', async () => {
+  it('sends nothing from the old arbitrage model, whatever the book pays', async () => {
     vi.useFakeTimers();
+    // The classic taker opportunity: ASK 940, BID 950, +10 VES for a taker.
     stubWorld([banesco('ask-1', '940.00')], [banesco('bid-1', '950.00')]);
 
     const { store } = await freshStore();
     store.start();
     await vi.advanceTimersByTimeAsync(10_000);
 
-    const afterFirst = telegramSent.filter((t) => t.includes('ARBITRAJE')).length;
+    // The taker engine still sees it...
+    expect(store.getCachedBestOpportunity()?.marginPct).toBeGreaterThan(0);
+
+    // ...and Telegram heard nothing about it.
+    for (const body of telegramSent) {
+      expect(body).not.toMatch(
+        /ARBITRAJE|OPORTUNIDAD|EXECUTABLE|Binance ASK|Binance BID|tradeType\/API/
+      );
+    }
+
+    store.stop();
+  });
+
+  it('a stable book produces one summary, not one every 45 seconds', async () => {
+    vi.useFakeTimers();
+    stubWorld(mySellRivals, myBuyRivals);
+
+    const { store } = await freshStore();
+    store.start();
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    const afterFirst = telegramSent.filter((t) => t.includes('MIS PRECIOS')).length;
     expect(afterFirst).toBe(1);
 
-    // Four more matrix windows, same book. The cooldown must hold.
+    // Four more matrix windows, same book. The 30-minute clock must hold.
     await vi.advanceTimersByTimeAsync(45_000 * 4);
-    const afterFour = telegramSent.filter((t) => t.includes('ARBITRAJE')).length;
-    expect(afterFour).toBe(1);
+    expect(telegramSent.filter((t) => t.includes('MIS PRECIOS')).length).toBe(1);
+    // And no price changed, so no change alert either.
+    expect(telegramSent.filter((t) => t.includes('CAMBIO DE PRECIO')).length).toBe(0);
 
     store.stop();
   });
@@ -185,26 +226,31 @@ describe('a book WITH an executable operation reaches Telegram on its own', () =
 });
 
 describe('the mandatory scenario, all the way to Telegram', () => {
-  it('ASK 950.00 / BID 950.50 -> +0.50 VES, +0.0526%, and those exact prices', async () => {
+  it('leader 940.00 / 945.00 -> publish 940.01 / 944.99, +4.98 VES, +0.5298%', async () => {
     vi.useFakeTimers();
-    stubWorld([banesco('ask-1', '950.00')], [banesco('bid-1', '950.50')]);
+    stubWorld(
+      [banesco('ask-1', '945.00'), banesco('ask-2', '946.25')],
+      [banesco('bid-1', '940.00'), banesco('bid-2', '938.75')]
+    );
 
     const { store } = await freshStore();
     store.start();
     await vi.advanceTimersByTimeAsync(10_000);
 
-    const opportunity = store.getCachedBestOpportunity();
-    expect(opportunity?.buyPrice).toBe(950.0);
-    expect(opportunity?.sellPrice).toBe(950.5);
-    expect(opportunity?.spreadAbsolute).toBeCloseTo(0.5, 6);
-    expect(opportunity?.marginPct).toBeCloseTo(0.0526, 4);
+    const cell = (await store.getMakerMatrix()).cells.BANESCO['20K'];
+    const pair = cell.recommendation!.recommended!;
 
-    const body = telegramSent.filter((t) => t.includes('ARBITRAJE'))[0];
-    // The prices Telegram prints are the ads' own prices, not a derived figure.
-    expect(body).toContain('950.00 VES');
-    expect(body).toContain('950.50 VES');
-    expect(body).toContain('SPREAD: <b>+0.50 VES</b>');
-    expect(body).toContain('RENDIMIENTO: <b>+0.0526%</b>');
+    expect(pair.buy.price).toBe(940.01);
+    expect(pair.sell.price).toBe(944.99);
+    expect(pair.grossMarginVes).toBe(4.98);
+    expect(pair.grossMarginPct).toBeCloseTo(0.5298, 4);
+
+    const body = telegramSent.filter((t) => t.includes('MIS PRECIOS'))[0];
+    // The prices Telegram prints are one observed tick off a real ad's price,
+    // never a derived or rounded figure.
+    expect(body).toContain('🟢 Compra: <b>940.01</b>');
+    expect(body).toContain('🔵 Venta: <b>944.99</b>');
+    expect(body).toContain('💵 Margen: <b>+4.98 VES</b> · +0.5298%');
 
     store.stop();
   });

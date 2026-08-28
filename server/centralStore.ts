@@ -24,8 +24,12 @@ import {
 import { BinanceP2PService, BANK_CODE_MAP } from './binanceP2PService.js';
 import { countVerifications } from './bankMatching.js';
 import { AMOUNT_TIERS, evaluateBankAmount } from './executability.js';
-import { evaluateMakerAlerts, type AnnouncedPublication } from './makerAlerts.js';
-import { buildMakerMatrix, selectBestMakerCell, type MakerMatrix } from './makerMatrix.js';
+import {
+  EMPTY_MAKER_ALERT_STATE,
+  evaluateMakerAlerts,
+  type MakerAlertState,
+} from './makerAlerts.js';
+import { buildMakerMatrix, type MakerMatrix } from './makerMatrix.js';
 import type { CapturedListings } from './makerRecommendation.js';
 import { readMakerConfig, type MakerConfig } from './makerStrategy.js';
 import { runOpportunityEngine } from './opportunityEngine.js';
@@ -116,8 +120,13 @@ export class CentralMarketStore {
    */
   private readonly makerConfig: MakerConfig = readMakerConfig();
 
-  /** The last price pair the operator was told to publish. */
-  private announcedPublication: AnnouncedPublication | null = null;
+  /**
+   * What Telegram has already said: the recommended prices per BANCO x MONTO,
+   * and when the last periodic summary went out. In memory only - a restart
+   * re-sends the summary and re-learns the prices silently, which is the safe
+   * direction: it can repeat itself, never invent a change that did not happen.
+   */
+  private makerAlertState: MakerAlertState = EMPTY_MAKER_ALERT_STATE;
 
   private bankMatrixCache: {
     /** Last time ANY tier was refreshed. */
@@ -1041,14 +1050,13 @@ export class CentralMarketStore {
       });
 
       const now = Date.now();
-      const { alerts, announced } = evaluateMakerAlerts({
+      const { alerts, state } = evaluateMakerAlerts({
         matrix,
-        announced: this.announcedPublication,
-        best: selectBestMakerCell(matrix),
+        state: this.makerAlertState,
         nowMs: now,
       });
 
-      this.announcedPublication = announced;
+      this.makerAlertState = state;
       if (alerts.length > 0) {
         void TelegramNotifier.getInstance().notifyMakerAlerts(alerts, now);
       }
@@ -1280,23 +1288,18 @@ export class CentralMarketStore {
 
   private evaluateAlerts(snapshot: MarketSnapshot): void {
     /*
-     * Opportunity lifecycle, once per pass and independent of the alert rules.
+     * THE ARBITRAGE LIFECYCLE ANNOUNCEMENT USED TO BE HERE, and it is gone.
      *
-     * Guarded on lastOpportunities having been computed at all: null there
-     * means "not evaluated yet", which must never be reported as a position
-     * closing. Only once the engine has produced an answer does a null best
-     * opportunity mean the book no longer holds one.
+     * It ran on the 6-second poll and pushed the taker engine's
+     * BEST_OPPORTUNITY to Telegram as "OPORTUNIDAD DE ARBITRAJE", with legs
+     * labelled from the Binance ASK/BID sides. The operator is a maker: that
+     * mapping is inverted for them, and the whole message answered a question
+     * they never asked. lastOpportunities is still computed and still feeds
+     * /api/market/opportunities and the executable matrix screen; what it no
+     * longer has is a path to Telegram.
      *
-     * The notifier dedups by position, so calling this every poll produces one
-     * DETECTED, then silence until the cooldown allows an UPDATED.
+     * Telegram's market voice is now announceMakerAlerts, and only that.
      */
-    if (this.lastOpportunities !== null) {
-      void TelegramNotifier.getInstance().notifyOpportunityLifecycle(
-        this.lastOpportunities.bestOpportunity ?? null,
-        snapshot.timestamp,
-        this.bankMatrixCache?.timestamp ?? null
-      );
-    }
 
     const rules = StorageEngine.getAlerts().filter((r) => r.enabled);
     const now = Date.now();
@@ -1320,15 +1323,16 @@ export class CentralMarketStore {
         rule.targetSide === 'BUY' ? snapshot.strategicBuyPrice : snapshot.strategicSellPrice;
       const spreadPct = snapshot.strategicSpreadPct;
       /*
-       * Read from cache only. Computing it here would force a bank-matrix
-       * refresh on every 6s poll and multiply the request budget; the cached
-       * value is refreshed by refreshBankMatrix at most every 45s.
+       * OPPORTUNITY_ABOVE IS REFUSED HERE, before anything else looks at it.
        *
-       * null means "no verifiable opportunity right now" OR "not computed
-       * yet". Neither may fire an alert - a missing opportunity is never
-       * reported as one.
+       * It fired on the taker engine's BEST_OPPORTUNITY, which is the model
+       * Telegram no longer speaks. The condition still exists in the AlertRule
+       * type because saved rule files may contain it, and rewriting a user's
+       * stored rules is not this phase's business - so the rule is kept,
+       * disabled at the only place that could give it a voice.
        */
-      const opportunity = this.getCachedBestOpportunity();
+      if (rule.condition === 'OPPORTUNITY_ABOVE') continue;
+
       let triggered = false;
       let message = '';
 
@@ -1344,7 +1348,6 @@ export class CentralMarketStore {
       ) {
         continue;
       }
-      if (rule.condition === 'OPPORTUNITY_ABOVE' && opportunity === null) continue;
 
       switch (rule.condition) {
         case 'ABOVE':
@@ -1365,25 +1368,10 @@ export class CentralMarketStore {
             message = `Spread estratégico (${spreadPct.toFixed(2)}%) superó el umbral de ${rule.targetValue}%.`;
           }
           break;
-        case 'OPPORTUNITY_ABOVE':
-          /*
-           * Fires on a real operation: same bank, same amount, both legs
-           * executable, liquidity established on both. Never on a spread
-           * between two ads nobody can pair.
-           */
-          if (
-            opportunity !== null &&
-            opportunity.verification === 'VERIFIED' &&
-            opportunity.marginPct >= rule.targetValue
-          ) {
-            triggered = true;
-            message =
-              `Oportunidad ejecutable en ${opportunity.bank} para ` +
-              `${opportunity.amountVes} VES: recompra ${opportunity.buyPrice.toFixed(2)}, ` +
-              `venta ${opportunity.sellPrice.toFixed(2)}, margen bruto ` +
-              `${opportunity.marginPct.toFixed(4)}%.`;
-          }
-          break;
+        /*
+         * No 'OPPORTUNITY_ABOVE' case: the rule is refused above and can never
+         * reach this switch.
+         */
         case 'VOLATILITY_SPIKE':
           if (spreadPct !== null && spreadPct > rule.targetValue * 1.5) {
             triggered = true;
@@ -1399,10 +1387,7 @@ export class CentralMarketStore {
          * spread implies both sides exist). The guard keeps the persisted
          * AlertTriggerLog schema free of nulls without touching storage.ts.
          */
-        // An opportunity alert logs the sale price of the operation it reports;
-        // every other condition already required a non-null strategic price.
-        const loggedPrice =
-          rule.condition === 'OPPORTUNITY_ABOVE' ? (opportunity?.sellPrice ?? null) : targetPrice;
+        const loggedPrice = targetPrice;
         if (loggedPrice === null) continue;
 
         rule.lastTriggeredAt = now;
@@ -1424,13 +1409,7 @@ export class CentralMarketStore {
          * throws and never rejects, so a Telegram outage cannot interrupt the
          * alert loop, the polling cycle or persistence.
          */
-        void TelegramNotifier.getInstance().notifyAlert(
-          log,
-          rule,
-          snapshot,
-          opportunity,
-          this.bankMatrixCache?.timestamp ?? null
-        );
+        void TelegramNotifier.getInstance().notifyAlert(log, rule, snapshot);
       }
     }
   }

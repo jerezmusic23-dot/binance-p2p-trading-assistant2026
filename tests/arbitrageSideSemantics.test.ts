@@ -250,80 +250,78 @@ describe('REGRESSION: the sides must not be swapped', () => {
   });
 });
 
-describe('the labels state the economics before the API parameter', () => {
-  const opportunity = {
-    bank: 'Banesco',
-    amountVes: 20_000,
-    buyPrice: 940,
-    sellPrice: 950,
-    // Same values under the unambiguous names.
-    arbitrageBuyPrice: 940,
-    arbitrageSellPrice: 950,
-    buyAdvNo: 'a',
-    sellAdvNo: 'b',
-    spreadAbsolute: 10,
-    spreadPct: 1.0638,
-    marginAbsolute: 10,
-    marginPct: 1.0638,
-    buyAvailableUsdt: 500,
-    sellAvailableUsdt: 400,
-    availableUsdt: 400,
-    verification: 'VERIFIED' as const,
-    provenance: 'EXECUTABLE' as const,
-    reason: null,
-  };
-
-  it('the Telegram message names what I do, the Binance side, and the parameter', async () => {
-    const { formatOpportunityLifecycleMessage } = await import('../server/telegramNotifier.js');
-    const body = formatOpportunityLifecycleMessage('DETECTED', opportunity, NOW);
-
-    expect(body).toContain('OPORTUNIDAD DE ARBITRAJE');
-    expect(body).toContain('<b>COMPRA USDT</b> (entrada)');
-    expect(body).toContain('Fuente: Binance ASK');
-    expect(body).toContain('<b>VENTA USDT</b> (salida)');
-    expect(body).toContain('Fuente: Binance BID');
-    // The API parameter is present but subordinate to the economics.
-    expect(body.indexOf('COMPRA USDT')).toBeLessThan(body.indexOf('tradeType/API: BUY'));
-    expect(body.indexOf('VENTA USDT')).toBeLessThan(body.indexOf('tradeType/API: SELL'));
+/*
+ * THIS BLOCK USED TO ASSERT THE ARBITRAGE TELEGRAM MESSAGE, and the assertion
+ * it made is now the defect.
+ *
+ * It pinned that "COMPRA USDT" appeared above "tradeType/API: BUY" and
+ * "VENTA USDT" above "tradeType/API: SELL". Correct for a TAKER. Backwards for
+ * the operator, who is a MAKER: their buy ad competes in the tradeType=SELL
+ * listing, so a message pairing MI COMPRA with tradeType BUY sends them to the
+ * wrong book. The formatter is gone, and this block now pins that it stays
+ * gone and that the maker message carries the opposite - and correct - pairing.
+ *
+ * The rest of this file still describes the taker engine, which still exists
+ * and still feeds the executable-matrix screen. What it no longer has is a
+ * route to Telegram.
+ */
+describe('the arbitrage vocabulary can no longer reach Telegram', () => {
+  it('the arbitrage message formatters no longer exist', async () => {
+    const notifier = await import('../server/telegramNotifier.js');
+    expect('formatOpportunityLifecycleMessage' in notifier).toBe(false);
+    expect('formatOpportunityMessage' in notifier).toBe(false);
+    expect('opportunityIdentity' in notifier).toBe(false);
   });
 
-  it('reports the spread and the yield with their signs', async () => {
-    const { formatOpportunityLifecycleMessage } = await import('../server/telegramNotifier.js');
-    const body = formatOpportunityLifecycleMessage('DETECTED', opportunity, NOW);
-
-    expect(body).toContain('SPREAD: <b>+10.00 VES</b>');
-    expect(body).toContain('RENDIMIENTO: <b>+1.0638%</b>');
-    expect(body).toContain('Liquidez compra: <b>500.00 USDT</b>');
-    expect(body).toContain('Liquidez venta: <b>400.00 USDT</b>');
-    expect(body).toContain('Estado: VERIFIED / EXECUTABLE');
+  it('the notifier can no longer be asked to announce an opportunity', async () => {
+    const { TelegramNotifier } = await import('../server/telegramNotifier.js');
+    const instance = TelegramNotifier.getInstance();
+    expect('notifyOpportunityLifecycle' in instance).toBe(false);
+    expect(
+      (instance as unknown as Record<string, unknown>).notifyOpportunityLifecycle
+    ).toBeUndefined();
   });
 
-  it('states both legs are the same bank, which is a structural constraint', async () => {
-    const { formatOpportunityLifecycleMessage } = await import('../server/telegramNotifier.js');
-    const body = formatOpportunityLifecycleMessage('DETECTED', opportunity, NOW);
+  it('the maker message pairs MI COMPRA with the SELL listing, not the BUY one', async () => {
+    const { formatMakerPriceChangeMessage } = await import('../server/telegramNotifier.js');
+    const { buildMakerMatrix } = await import('../server/makerMatrix.js');
+    const { DEFAULT_MAKER_CONFIG } = await import('../server/makerStrategy.js');
+    const { makeNormalizedAd } = await import('./helpers/fixtures.js');
 
-    expect(body).toContain('Banco compra: <b>Banesco</b>');
-    expect(body).toContain('Banco venta: <b>Banesco</b>');
-  });
+    const ad = (price: number) => ({ ...makeNormalizedAd(price), advNo: `adv-${price}` });
+    const witness = {
+      ...makeNormalizedAd(900.25),
+      advNo: 'w',
+      paymentOptions: [{ payType: 'Provincial', tradeMethodName: 'Provincial' }],
+    };
 
-  it('calls the result MARGEN BRUTO and never net profit', async () => {
-    const { formatOpportunityLifecycleMessage } = await import('../server/telegramNotifier.js');
-    const body = formatOpportunityLifecycleMessage('DETECTED', opportunity, NOW);
+    const cell = buildMakerMatrix({
+      bankOrder: ['banesco'],
+      bankDisplayNames: { banesco: 'Banesco' },
+      bankAllowedCodes: { banesco: ['Banesco'] },
+      amounts: [{ key: '10K', val: 10_000 }],
+      // My BUY rivals arrive under SELL. Swap these and the margin inverts.
+      listingsByTier: {
+        '10K': { banesco: { SELL: [ad(940), witness], BUY: [ad(945), witness] } },
+      },
+      failedBanksByTier: {},
+      capturedAtByTier: { '10K': NOW },
+      capturedAt: NOW,
+      config: DEFAULT_MAKER_CONFIG,
+      nowMs: NOW,
+    }).cells.banesco['10K'];
 
-    expect(body).toContain('MARGEN BRUTO');
-    expect(body).toContain('NO es beneficio neto');
-    expect(body).not.toMatch(/ganancia|profit/i);
-  });
-
-  it('prints absent liquidity as not verifiable, never as zero', async () => {
-    const { formatOpportunityLifecycleMessage } = await import('../server/telegramNotifier.js');
-    const body = formatOpportunityLifecycleMessage(
-      'DETECTED',
-      { ...opportunity, buyAvailableUsdt: null, availableUsdt: null },
+    const body = formatMakerPriceChangeMessage(
+      cell,
+      cell.recommendation!.recommended!,
+      { buyPrice: 939.5, sellPrice: 945.5 },
       NOW
     );
 
-    expect(body).toContain('Liquidez compra: no verificable');
-    expect(body).not.toContain('Liquidez compra: <b>0.00 USDT</b>');
+    // One tick ABOVE the highest buyer; one tick BELOW the lowest seller.
+    expect(body).toContain('Ahora: <b>940.01</b>');
+    expect(body).toContain('Ahora: <b>944.99</b>');
+    expect(body).toContain('CAMBIO DE PRECIO PARA PUBLICAR');
+    expect(body).not.toMatch(/ARBITRAJE|EXECUTABLE|Binance ASK|Binance BID/);
   });
 });

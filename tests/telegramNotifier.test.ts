@@ -502,13 +502,22 @@ describe('message formatting', () => {
     );
 
     /*
-     * A SPREAD_ABOVE alert is about the MARKET level, not about an operation,
-     * so its lines say "Referencia". The word arbitraje is reserved for a real
-     * bank-and-amount operation; using it here would let a market threshold
-     * read as something executable.
+     * A SPREAD_ABOVE alert is about the MARKET level, not about an operation.
+     *
+     * These lines used to read "Referencia compra (lado Binance BUY)", which
+     * labelled the tradeType=BUY listing as MY purchase. For a maker that is
+     * inverted - my buy ad competes in the SELL listing - so the lines now name
+     * the listing and what its advertisers are doing, and claim nothing about
+     * my side of anything.
      */
-    expect(text).toContain('Referencia compra (lado Binance BUY): <b>921.39 VES</b>');
-    expect(text).toContain('Referencia venta (lado Binance SELL): <b>921.79 VES</b>');
+    expect(text).toContain(
+      'Mediana del listado BUY (anuncios que VENDEN USDT): <b>921.39 VES</b>'
+    );
+    expect(text).toContain(
+      'Mediana del listado SELL (anuncios que COMPRAN USDT): <b>921.79 VES</b>'
+    );
+    expect(text).toContain('Nivel de mercado, no un precio para publicar.');
+    expect(text).not.toMatch(/Referencia compra|Referencia venta/);
   });
 
   it('FASE 2: omits both levels rather than inventing one when a side is empty', () => {
@@ -606,10 +615,25 @@ describe('integration - the alert engine keeps running when Telegram fails', () 
   });
 });
 
-describe('BEST_OPPORTUNITY message', () => {
+/*
+ * TWO BLOCKS USED TO LIVE HERE: "BEST_OPPORTUNITY message" and "data age in
+ * the opportunity message".
+ *
+ * They pinned an alert body reading "COMPRA arbitraje (lado Binance BUY)" and
+ * "VENTA arbitraje (lado Binance SELL)" - the taker's mapping, which is
+ * inverted for the operator. A user rule can no longer produce any of it:
+ * OPPORTUNITY_ABOVE is refused in CentralMarketStore.evaluateAlerts, and
+ * formatAlertMessage cannot even accept an Opportunity any more.
+ *
+ * What replaces them is the assertion that the door is shut. The data-age
+ * discipline they also covered - a real age, "no verificable" instead of an
+ * invented 0, never a negative - now lives on the maker messages and is
+ * asserted in tests/makerTelegram.test.ts.
+ */
+describe('a user alert rule can no longer speak the arbitrage model', () => {
   const opportunityRule: AlertRule = {
-    id: 'op-rule',
-    name: 'Oportunidad ejecutable',
+    id: 'op',
+    name: 'Oportunidad',
     condition: 'OPPORTUNITY_ABOVE',
     targetValue: 0.05,
     targetSide: 'BUY',
@@ -617,119 +641,24 @@ describe('BEST_OPPORTUNITY message', () => {
     createdAt: 1,
   };
 
-  const opportunity = {
-    bank: 'BANESCO',
-    amountVes: 50_000,
-    buyPrice: 921.39,
-    sellPrice: 921.79,
-    // Same values under the unambiguous names.
-    arbitrageBuyPrice: 921.39,
-    arbitrageSellPrice: 921.79,
-    buyAdvNo: 'b',
-    sellAdvNo: 's',
-    spreadAbsolute: 0.4,
-    spreadPct: 0.0434,
-    marginAbsolute: 0.4,
-    marginPct: 0.0434,
-    buyAvailableUsdt: 900,
-    sellAvailableUsdt: 480,
-    availableUsdt: 480,
-    verification: 'VERIFIED' as const,
-    provenance: 'EXECUTABLE' as const,
-    reason: null,
-  };
-
-  it('reports the operation: bank, amount, both prices, spread and liquidity', () => {
-    const text = formatAlertMessage(makeTrigger(), opportunityRule, makeSnapshot(), opportunity);
-
-    expect(text).toContain('BEST OPPORTUNITY');
-    expect(text).toContain('Banco: <b>BANESCO</b>');
-    // Each leg names the Binance side it came from, so the reader never has
-    // to infer it from the direction of the advertiser's ad.
-    expect(text).toContain('COMPRA arbitraje (lado Binance BUY): <b>921.39 VES</b>');
-    expect(text).toContain('VENTA arbitraje (lado Binance SELL): <b>921.79 VES</b>');
-    expect(text).toContain('0.0434%');
-    expect(text).toContain('480.00 USDT');
-    expect(text).toContain('VERIFIED');
+  it('formatAlertMessage takes no opportunity argument at all', () => {
+    expect(formatAlertMessage.length).toBe(3);
   });
 
-  it('calls the margin GROSS and says what it does not discount', () => {
-    const text = formatAlertMessage(makeTrigger(), opportunityRule, makeSnapshot(), opportunity);
+  it('produces no arbitrage vocabulary for an OPPORTUNITY_ABOVE rule', () => {
+    const text = formatAlertMessage(makeTrigger(), opportunityRule, makeSnapshot());
 
-    expect(text).toContain('Margen BRUTO');
-    expect(text).toContain('NO es beneficio neto');
-    expect(text).not.toMatch(/beneficio neto:/i);
+    expect(text).not.toMatch(/BEST OPPORTUNITY/i);
+    expect(text).not.toMatch(/arbitraje/i);
+    expect(text).not.toMatch(/lado Binance (BUY|SELL)/);
+    expect(text).not.toMatch(/EXECUTABLE/);
   });
 
-  it('never reports a raw extreme, whatever the snapshot carries', () => {
-    const text = formatAlertMessage(
-      makeTrigger(),
-      opportunityRule,
-      makeSnapshot({ bestBuyPrice: 919, bestSellPrice: 980, spreadPercentage: 6.64 }),
-      opportunity
+  it('the store refuses the rule before it can be logged or sent', () => {
+    const store = fs.readFileSync(
+      path.join(process.cwd(), 'server', 'centralStore.ts'),
+      'utf8'
     );
-
-    expect(text).not.toContain('980');
-    expect(text).not.toContain('6.64');
-  });
-
-  it('says liquidity is unverifiable instead of printing a number', () => {
-    const text = formatAlertMessage(makeTrigger(), opportunityRule, makeSnapshot(), {
-      ...opportunity,
-      availableUsdt: null,
-      sellAvailableUsdt: null,
-      verification: 'NOT_VERIFIABLE',
-      provenance: 'NOT_VERIFIABLE',
-    });
-
-    expect(text).toContain('Liquidez: no verificable');
-    expect(text).not.toMatch(/Liquidez: <b>0/);
-  });
-
-  it('fabricates no opportunity when there is none to report', () => {
-    const text = formatAlertMessage(makeTrigger(), opportunityRule, makeSnapshot(), null);
-
-    expect(text).toContain('ya no esta disponible');
-    expect(text).not.toContain('921');
-  });
-});
-
-describe('data age in the opportunity message', () => {
-  const rule: AlertRule = {
-    id: 'op', name: 'Oportunidad', condition: 'OPPORTUNITY_ABOVE',
-    targetValue: 0.05, targetSide: 'BUY', enabled: true, createdAt: 1,
-  };
-  const opportunity = {
-    bank: 'BANESCO', amountVes: 50_000, buyPrice: 921.39, sellPrice: 921.79,
-    arbitrageBuyPrice: 921.39, arbitrageSellPrice: 921.79,
-    buyAdvNo: 'b', sellAdvNo: 's', spreadAbsolute: 0.4, spreadPct: 0.0434,
-    marginAbsolute: 0.4, marginPct: 0.0434, buyAvailableUsdt: 900,
-    sellAvailableUsdt: 480, availableUsdt: 480,
-    verification: 'VERIFIED' as const, provenance: 'EXECUTABLE' as const, reason: null,
-  };
-
-  it('reports the real age between capture and alert', () => {
-    const firedAt = Date.parse('2026-08-23T03:51:31Z');
-    const text = formatAlertMessage(
-      makeTrigger({ timestamp: firedAt }), rule, makeSnapshot(), opportunity, firedAt - 32_000
-    );
-
-    expect(text).toContain('Antiguedad del dato: 32s');
-  });
-
-  it('says the age is not verifiable rather than inventing 0', () => {
-    const text = formatAlertMessage(makeTrigger(), rule, makeSnapshot(), opportunity, null);
-
-    expect(text).toContain('Antiguedad del dato: no verificable');
-    expect(text).not.toContain('Antiguedad del dato: 0s');
-  });
-
-  it('never reports a negative age', () => {
-    const firedAt = Date.parse('2026-08-23T03:51:31Z');
-    const text = formatAlertMessage(
-      makeTrigger({ timestamp: firedAt }), rule, makeSnapshot(), opportunity, firedAt + 5_000
-    );
-
-    expect(text).toContain('Antiguedad del dato: 0s');
+    expect(store).toContain("if (rule.condition === 'OPPORTUNITY_ABOVE') continue;");
   });
 });
