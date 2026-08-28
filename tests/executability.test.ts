@@ -6,6 +6,7 @@ import {
   evaluateBankAmount,
   evaluateBankTiers,
 } from '../server/executability.js';
+import { buildOpportunity, selectBestOpportunity } from '../server/opportunityEngine.js';
 import { BANK_CODE_MAP } from '../server/binanceP2PService.js';
 import { NormalizedAd } from '../server/types.js';
 
@@ -465,5 +466,157 @@ describe('determinism', () => {
 
     expect(cell.spreadPct).toBeCloseTo(((918 - 941) / 941) * 100, 2);
     expect(cell.spreadPct!).toBeLessThan(0);
+  });
+});
+
+/**
+ * LA SEGUNDA PIERNA DEBE PODER VENDER LOS USDT QUE COMPRÓ LA PRIMERA.
+ *
+ * THE FALSE POSITIVE THIS PINS
+ *
+ * The operation is VES -> USDT -> VES. Both legs used to be checked against
+ * their own price, so the seller was verified for `amountVes / sellPrice` when
+ * the quantity actually being sold is `amountVes / buyPrice`. An opportunity
+ * requires sellPrice > buyPrice, so the second number is ALWAYS larger and the
+ * check was ALWAYS too lenient - by exactly the margin. The more profitable
+ * the operation looked, the more liquidity went unverified.
+ *
+ * Units are kept apart on purpose throughout:
+ *   amountVes    the VES capital of the operation
+ *   requiredUsdt the USDT the leg must move
+ *   available    the USDT the ad published
+ */
+describe('liquidez de la segunda pierna', () => {
+  const AMOUNT_VES = 50_000;
+  const BUY_PRICE = 940;
+  const SELL_PRICE = 950;
+  /** 50.000 / 940 = 53.191489... - what the first leg actually buys. */
+  const USDT_BOUGHT = AMOUNT_VES / BUY_PRICE;
+
+  const leg = (advNo: string, price: number, available: number): NormalizedAd =>
+    ad({ advNo, price, availableUsdt: available, availableUsdtReported: available });
+
+  const cellWith = (sellAvailable: number, buyPrice = BUY_PRICE, sellPrice = SELL_PRICE) =>
+    evaluateBankAmount({
+      bank: 'BANESCO',
+      allowedCodes: BANESCO,
+      amountVes: AMOUNT_VES,
+      buyAds: [leg('A-buy', buyPrice, 5_000)],
+      sellAds: [leg('B-sell', sellPrice, sellAvailable)],
+    });
+
+  it('la cantidad en juego es la que compra la primera pierna, no la derivada del precio de venta', () => {
+    expect(USDT_BOUGHT).toBeCloseTo(53.191489, 6);
+    // The number the check used to compare against, kept here so the gap is
+    // visible rather than described.
+    expect(AMOUNT_VES / SELL_PRICE).toBeCloseTo(52.631579, 6);
+    expect(USDT_BOUGHT).toBeGreaterThan(AMOUNT_VES / SELL_PRICE);
+  });
+
+  it('CASO 1 - liquidez 53.20 USDT: suficiente, ejecutable', () => {
+    const cell = cellWith(53.2);
+
+    expect(53.2).toBeGreaterThan(USDT_BOUGHT);
+    expect(cell.sellQuotes).toHaveLength(1);
+    expect(cell.bestExecutableSell?.advNo).toBe('B-sell');
+    expect(buildOpportunity(cell)).not.toBeNull();
+  });
+
+  it('CASO 2 - liquidez 52.90 USDT: insuficiente, rechazada', () => {
+    /*
+     * THE EXACT FALSE POSITIVE. 52.90 clears the old check (52.6316) and fails
+     * the real requirement (53.1915), so this cell used to report EXECUTABLE
+     * for an operation that could only partially fill.
+     */
+    const cell = cellWith(52.9);
+
+    expect(52.9).toBeGreaterThan(AMOUNT_VES / SELL_PRICE); // passed the old check
+    expect(52.9).toBeLessThan(USDT_BOUGHT); // fails the real one
+    expect(cell.sellQuotes).toHaveLength(0);
+    expect(cell.sellRejections.LIQUIDITY_INSUFFICIENT).toBe(1);
+    expect(cell.bestExecutableSell).toBeNull();
+    expect(buildOpportunity(cell)).toBeNull();
+  });
+
+  it('CASO 3 - margen cero: el comportamiento no cambia', () => {
+    // Both legs at 950: the quantities coincide, so nothing about the
+    // liquidity check moves. There is simply no opportunity.
+    const cell = cellWith(60, 950, 950);
+
+    expect(AMOUNT_VES / 950).toBeCloseTo(52.631579, 6);
+    expect(cell.buyQuotes).toHaveLength(1);
+    expect(cell.sellQuotes).toHaveLength(1);
+    expect(cell.spreadPct).toBe(0);
+    // Break-even is not an opportunity, and never was.
+    expect(buildOpportunity(cell)?.marginPct).toBe(0);
+  });
+
+  it('CASO 4 - pérdida: sigue sin ser una oportunidad', () => {
+    const cell = cellWith(60, 950, 940);
+
+    expect(cell.spreadPct as number).toBeLessThan(0);
+    const opportunity = buildOpportunity(cell);
+    expect(opportunity?.marginPct).toBeLessThan(0);
+    expect(selectBestOpportunity(opportunity ? [opportunity] : [])).toBeNull();
+  });
+
+  it('CASO 5 - a más margen, más USDT debe soportar la segunda pierna', () => {
+    /*
+     * The requirement is amountVes / buyPrice and does not depend on the sell
+     * price at all - so a cheaper purchase, which is what widens the margin,
+     * buys more USDT and demands more of the seller. Measured across three
+     * buy prices with the sell price held at 950.
+     */
+    const measured = [960, 940, 900].map((buyPrice) => ({
+      buyPrice,
+      marginPct: ((SELL_PRICE - buyPrice) / buyPrice) * 100,
+      requiredUsdt: AMOUNT_VES / buyPrice,
+    }));
+
+    expect(measured[0].marginPct).toBeLessThan(measured[1].marginPct);
+    expect(measured[1].marginPct).toBeLessThan(measured[2].marginPct);
+    expect(measured[0].requiredUsdt).toBeLessThan(measured[1].requiredUsdt);
+    expect(measured[1].requiredUsdt).toBeLessThan(measured[2].requiredUsdt);
+
+    // And the engine enforces it: a seller holding 53.19 covers a 940 purchase
+    // and not a 900 one, on the same 50.000 VES.
+    expect(cellWith(53.2, 940).sellQuotes).toHaveLength(1);
+    expect(cellWith(53.2, 900).sellQuotes).toHaveLength(0);
+    expect(AMOUNT_VES / 900).toBeCloseTo(55.555556, 6);
+  });
+
+  it('el precio de venta NO participa en el tamaño exigido a la segunda pierna', () => {
+    // Same purchase, two very different sell prices: the requirement is the
+    // same 53.19 USDT in both, because that is what was bought.
+    const dearer = cellWith(53.19, BUY_PRICE, 1_200);
+    const cheaper = cellWith(53.19, BUY_PRICE, 941);
+
+    // 53.19 sits just below 53.191489 and is rejected either way.
+    expect(dearer.sellQuotes).toHaveLength(0);
+    expect(cheaper.sellQuotes).toHaveLength(0);
+  });
+
+  it('evaluar un anuncio aislado sigue midiéndose contra su propio precio', () => {
+    /*
+     * evaluateAd without a stated requirement is a standalone question - "can
+     * this one ad move this amount" - and that is what a first leg needs. The
+     * override exists only for the caller that already knows the other price.
+     */
+    const standalone = evaluateAd(leg('solo', SELL_PRICE, 52.7), {
+      bank: 'BANESCO',
+      allowedCodes: BANESCO,
+      amountVes: AMOUNT_VES,
+      side: 'SELL',
+    });
+    expect(standalone.provenance).toBe('EXECUTABLE');
+
+    const paired = evaluateAd(leg('solo', SELL_PRICE, 52.7), {
+      bank: 'BANESCO',
+      allowedCodes: BANESCO,
+      amountVes: AMOUNT_VES,
+      side: 'SELL',
+      requiredUsdt: USDT_BOUGHT,
+    });
+    expect(paired.rejection).toBe('LIQUIDITY_INSUFFICIENT');
   });
 });

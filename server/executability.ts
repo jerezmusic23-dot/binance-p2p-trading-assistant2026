@@ -75,7 +75,28 @@ const REJECTION_REASONS: Record<ExecutabilityRejection, string> = {
  */
 export function evaluateAd(
   ad: NormalizedAd,
-  params: { bank: string; allowedCodes: readonly string[]; amountVes: number; side: 'BUY' | 'SELL' }
+  params: {
+    bank: string;
+    allowedCodes: readonly string[];
+    /** The VES capital of the operation. Never a USDT quantity. */
+    amountVes: number;
+    side: 'BUY' | 'SELL';
+    /**
+     * How many USDT this ad must be able to move, when the caller already
+     * knows it. In USDT, never in VES.
+     *
+     * Needed because the two legs do not require the same quantity. The first
+     * leg spends amountVes at ITS OWN price, so the volume it consumes is
+     * derivable from the ad alone. The second leg has to move exactly the USDT
+     * the first one bought - a quantity that depends on the OTHER ad's price,
+     * which a single-ad evaluation cannot see.
+     *
+     * Omitted, the requirement falls back to this ad's own price. That is
+     * correct for a first leg and for evaluating one ad in isolation; it is
+     * what the second leg must not do.
+     */
+    requiredUsdt?: number;
+  }
 ): ExecutableQuote {
   const { bank, allowedCodes, amountVes, side } = params;
   const verification = verifyBank(ad.paymentOptions, allowedCodes);
@@ -128,8 +149,14 @@ export function evaluateAd(
   if (liquidityStatus === 'LIQUIDITY_NOT_VERIFIABLE') return reject('LIQUIDITY_NOT_VERIFIABLE');
   if (liquidityStatus === 'LIQUIDITY_ZERO') return reject('LIQUIDITY_INSUFFICIENT');
 
-  // The volume the operation consumes, in USDT, at this ad's own price.
-  const requiredUsdt = amountVes / ad.price;
+  /*
+   * THE VOLUME THIS AD MUST BE ABLE TO MOVE, IN USDT.
+   *
+   * Supplied by the caller when the other leg's price is already known;
+   * otherwise derived from this ad's own price, which is right for a first leg
+   * and for a standalone evaluation.
+   */
+  const requiredUsdt = params.requiredUsdt ?? amountVes / ad.price;
   if ((ad.availableUsdtReported ?? 0) < requiredUsdt) return reject('LIQUIDITY_INSUFFICIENT');
 
   return { ...base, provenance: 'EXECUTABLE', rejection: null, reason: null };
@@ -199,15 +226,6 @@ export function evaluateBankAmount(params: {
 }): BankAmountExecutability {
   const { bank, allowedCodes, amountVes, buyAds, sellAds } = params;
 
-  const evaluate = (ads: readonly NormalizedAd[], side: 'BUY' | 'SELL') =>
-    ads.map((ad) => evaluateAd(ad, { bank, allowedCodes, amountVes, side }));
-
-  const allBuy = evaluate(buyAds, 'BUY');
-  const allSell = evaluate(sellAds, 'SELL');
-
-  const buyQuotes = allBuy.filter((q) => q.provenance === 'EXECUTABLE');
-  const sellQuotes = allSell.filter((q) => q.provenance === 'EXECUTABLE');
-
   /*
    * Which extreme is best comes from the leg definition, not from a comment.
    * mapBinanceAdToArbitrageLeg is the only place that knows a tradeType 'BUY'
@@ -215,9 +233,52 @@ export function evaluateBankAmount(params: {
    */
   const askLeg = mapBinanceAdToArbitrageLeg('BUY');
   const bidLeg = mapBinanceAdToArbitrageLeg('SELL');
+
+  /*
+   * THE TWO LEGS ARE EVALUATED IN ORDER, AND THAT ORDER IS THE FIX.
+   *
+   * The operation is VES -> USDT -> VES. The first leg spends amountVes and
+   * receives amountVes / buyPrice USDT; the second leg has to move exactly
+   * those USDT. Because an opportunity requires sellPrice > buyPrice, that
+   * quantity is ALWAYS larger than amountVes / sellPrice.
+   *
+   * Both legs used to be checked against their own price, so the second was
+   * asked to cover the smaller number. On a 50.000 VES operation at 940 -> 950
+   * it was verified for 52,6316 USDT when 53,1915 were going to be sold: a
+   * 1,05% shortfall, unnoticed. The gap is exactly the margin, so the more
+   * profitable the operation looked, the more liquidity went unchecked.
+   *
+   * The buy leg therefore resolves first, and its price sizes the sell leg.
+   * Picking the CHEAPEST buy is also the strictest choice: it buys the most
+   * USDT, so it imposes the largest requirement on the seller.
+   */
+  const allBuy = buyAds.map((ad) =>
+    evaluateAd(ad, { bank, allowedCodes, amountVes, side: 'BUY' })
+  );
+  const buyQuotes = allBuy.filter((q) => q.provenance === 'EXECUTABLE');
   const bestExecutableBuy = pickBest(buyQuotes, (c, i) =>
     askLeg.bestIs === 'LOWEST' ? c < i : c > i
   );
+
+  /*
+   * The USDT the first leg actually obtains. null when there is no executable
+   * first leg: there is then no operation, no quantity to size against, and
+   * the sell side falls back to evaluating each ad on its own terms - which is
+   * what the per-side status on the cell reports.
+   */
+  const usdtToSell =
+    bestExecutableBuy !== null ? amountVes / bestExecutableBuy.price : null;
+
+  const allSell = sellAds.map((ad) =>
+    evaluateAd(ad, {
+      bank,
+      allowedCodes,
+      amountVes,
+      side: 'SELL',
+      requiredUsdt: usdtToSell ?? undefined,
+    })
+  );
+  const sellQuotes = allSell.filter((q) => q.provenance === 'EXECUTABLE');
   const bestExecutableSell = pickBest(sellQuotes, (c, i) =>
     bidLeg.bestIs === 'LOWEST' ? c < i : c > i
   );
