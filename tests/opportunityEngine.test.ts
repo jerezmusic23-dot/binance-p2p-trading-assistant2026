@@ -586,8 +586,15 @@ describe('TEST 25 / 26 / 27 / 28 / 29 - BEST_OPPORTUNITY', () => {
       spreadPct: ((sellPrice - buyPrice) / buyPrice) * 100,
       marginAbsolute: sellPrice - buyPrice,
       marginPct: ((sellPrice - buyPrice) / buyPrice) * 100,
-      marginVes:
-        ((overrides.amountVes ?? 20_000) * (((sellPrice - buyPrice) / buyPrice) * 100)) / 100,
+      /*
+       * DERIVED FROM THE FINAL VALUES, not from the defaults.
+       *
+       * marginVes must always equal amountVes x marginPct / 100 - that is what
+       * it means - so a test that overrides either one has to get a marginVes
+       * that agrees. Computed after the spread here and recomputed below once
+       * the overrides have been applied.
+       */
+      marginVes: ((overrides.amountVes ?? 20_000) * (((sellPrice - buyPrice) / buyPrice) * 100)) / 100,
       buyAvailableUsdt: 1_000,
       sellAvailableUsdt: 1_000,
       availableUsdt: 1_000,
@@ -595,6 +602,15 @@ describe('TEST 25 / 26 / 27 / 28 / 29 - BEST_OPPORTUNITY', () => {
       provenance: 'EXECUTABLE',
       reason: null,
       ...overrides,
+    };
+  }
+
+  /** The invariant the fixture must not break, applied after the overrides. */
+  function opWithConsistentMargin(overrides: Partial<Opportunity>): Opportunity {
+    const base = op(overrides);
+    return {
+      ...base,
+      marginVes: overrides.marginVes ?? (base.amountVes * base.marginPct) / 100,
     };
   }
 
@@ -607,7 +623,20 @@ describe('TEST 25 / 26 / 27 / 28 / 29 - BEST_OPPORTUNITY', () => {
     expect(best?.bank).toBe('BNC');
   });
 
-  it('TEST 26: on equal margin, the higher liquidity wins', () => {
+  it('TEST 26: surplus liquidity does NOT win - it is not profit', () => {
+    /*
+     * THIS TEST USED TO ASSERT THE OPPOSITE. availableUsdt was the second
+     * criterion, on the reading that more liquidity is a better operation.
+     *
+     * It is not. The operation moves what the tier requires, executability has
+     * already established that the volume covers it, and a seller holding nine
+     * times as much earns exactly the same. Ranking on it meant an operation
+     * could win for a reason that changes nobody's money.
+     *
+     * Same tier and same rate means the same VES, so the two are genuinely
+     * tied and the canonical bank order decides - which is what a tie-break is
+     * for.
+     */
     const best = selectBestOpportunity(
       [
         op({ bank: 'BANESCO', marginPct: 0.5, availableUsdt: 100 }),
@@ -616,7 +645,8 @@ describe('TEST 25 / 26 / 27 / 28 / 29 - BEST_OPPORTUNITY', () => {
       BANK_ORDER
     );
 
-    expect(best?.bank).toBe('BNC');
+    expect(best?.bank).toBe('BANESCO');
+    expect(BANK_ORDER.indexOf('BANESCO')).toBeLessThan(BANK_ORDER.indexOf('BNC'));
   });
 
   it('TEST 27: then the lower buyPrice', () => {
@@ -655,10 +685,34 @@ describe('TEST 25 / 26 / 27 / 28 / 29 - BEST_OPPORTUNITY', () => {
     expect(BANK_ORDER.indexOf('BANESCO')).toBeLessThan(BANK_ORDER.indexOf('PROVINCIAL'));
   });
 
-  it('finally the smaller amount', () => {
+  it('the LARGER amount wins at the same rate, because it is worth more money', () => {
+    /*
+     * THIS TEST USED TO ASSERT THE SMALLER AMOUNT, as the last tie-break of a
+     * ranking that never looked at the size of the operation. At the same rate
+     * the two are not tied at all: 0,5% of 50.000 is five times 0,5% of
+     * 10.000, and the ranking now says so before it ever reaches a tie-break.
+     */
     const common = { bank: 'BANESCO', marginPct: 0.5, availableUsdt: 100, buyPrice: 919, sellPrice: 921 };
     const best = selectBestOpportunity(
-      [op({ ...common, amountVes: 50_000 }), op({ ...common, amountVes: 10_000 })],
+      [
+        opWithConsistentMargin({ ...common, amountVes: 50_000 }),
+        opWithConsistentMargin({ ...common, amountVes: 10_000 }),
+      ],
+      BANK_ORDER
+    );
+
+    expect(best?.amountVes).toBe(50_000);
+    expect(best?.marginVes).toBeCloseTo((50_000 * 0.5) / 100, 9);
+  });
+
+  it('and the smaller amount still wins when the money is identical', () => {
+    // The tie-break survives; it just no longer overrides the money.
+    const common = { bank: 'BANESCO', marginPct: 0.5, buyPrice: 919, sellPrice: 921 };
+    const best = selectBestOpportunity(
+      [
+        op({ ...common, amountVes: 20_000, marginVes: 100 }),
+        op({ ...common, amountVes: 10_000, marginVes: 100 }),
+      ],
       BANK_ORDER
     );
 

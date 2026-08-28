@@ -37,7 +37,7 @@ export const OrderBookView: React.FC<OrderBookViewProps> = ({ snapshot }) => {
             )}
           </div>
           <div className="text-[11px] text-[#848e9c] font-mono">
-            {ad.ordersCount} órd. · <span className="text-[#02c076]">{ad.finishRate * 100}%</span>
+            {ad.ordersCount} órd. · <span className="text-[#02c076]">{(ad.finishRate * 100).toFixed(1)}%</span>
           </div>
         </div>
 

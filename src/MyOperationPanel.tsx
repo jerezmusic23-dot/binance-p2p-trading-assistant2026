@@ -185,6 +185,28 @@ export const MyOperationPanel: React.FC = () => {
                 {pct(best.marginPct)}
               </span>
             </div>
+            {/*
+              THE MONEY, BECAUSE THE MONEY IS WHAT PICKED THIS OPERATION.
+
+              The panel showed the rate and the per-USDT spread but never the
+              gross margin of the whole operation, which is the number the
+              selector now ranks on. Without it the screen could show 2,90%
+              beating 3,00% with no visible reason. Derived, not measured
+              separately: amountVes x marginPct / 100.
+            */}
+            <div className="bg-[#0b0e11] rounded-lg p-3 border border-[#2b2f36]">
+              <span className="text-[9px] uppercase text-[#848e9c] font-bold block">
+                Margen bruto
+              </span>
+              <span
+                className={`font-mono text-lg font-bold ${
+                  best.marginVes > 0 ? 'text-[#02c076]' : 'text-[#f6465d]'
+                }`}
+              >
+                {signedVes(best.marginVes)}
+                <span className="text-[10px] text-[#848e9c] ml-1">VES</span>
+              </span>
+            </div>
             <div className="bg-[#0b0e11] rounded-lg p-3 border border-[#2b2f36]">
               <span className="text-[9px] uppercase text-[#848e9c] font-bold block">Banco</span>
               <span className="font-mono text-sm font-bold text-[#e0e0e0]">{best.bank}</span>

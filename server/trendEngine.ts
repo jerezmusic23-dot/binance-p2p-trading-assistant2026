@@ -127,8 +127,17 @@ export interface TrendState {
    * de corto plazo" is more useful than flattening it to "alcista".
    */
   divergence: string | null;
-  /** 0..1, how consistently the series moved in the trend's direction. */
+  /**
+   * 0..1, how consistently the series moved in the trend's direction.
+   *
+   * A DERIVED STATISTIC OVER OBSERVED STEPS, never a probability: it describes
+   * the moves that happened and predicts nothing. directionalSteps carries the
+   * counts it was computed from so no consumer has to present it as a bare
+   * percentage.
+   */
   trendStrength: number | null;
+  /** The up and down steps trendStrength was computed from. */
+  directionalSteps: { up: number; down: number } | null;
   trendConfidence: Confidence;
   /** VES per hour, signed. The slope of the short window. */
   velocity: number | null;
@@ -277,8 +286,19 @@ function directionOf(
 }
 
 /** How consistently the steps pointed the same way. 0..1. */
-function consistency(points: readonly { t: number; price: number }[]): number | null {
-  if (points.length < 2) return null;
+/**
+ * How one-directional the observed steps were.
+ *
+ * NOT A PROBABILITY, and the counts travel with it so it cannot be read as
+ * one. |up - down| / (up + down) is the net agreement of the moves that
+ * actually happened; it says nothing about the next move. Rendered as a bare
+ * "fuerza 73%" it read exactly like a chance of continuing, which is why the
+ * raw counts are returned alongside and the interface prints those.
+ */
+function consistency(
+  points: readonly { t: number; price: number }[]
+): { value: number | null; up: number; down: number } {
+  if (points.length < 2) return { value: null, up: 0, down: 0 };
   let up = 0;
   let down = 0;
   for (let i = 1; i < points.length; i += 1) {
@@ -287,8 +307,8 @@ function consistency(points: readonly { t: number; price: number }[]): number | 
     else if (diff < 0) down += 1;
   }
   const moved = up + down;
-  if (moved === 0) return 0;
-  return Math.abs(up - down) / moved;
+  if (moved === 0) return { value: 0, up, down };
+  return { value: Math.abs(up - down) / moved, up, down };
 }
 
 export interface TrendOptions {
@@ -314,6 +334,7 @@ export function analyseTrend(
     horizons: [],
     divergence: null,
     trendStrength: null,
+    directionalSteps: null,
     trendConfidence: 'NO_DATA',
     velocity: null,
     acceleration: null,
@@ -491,7 +512,8 @@ export function analyseTrend(
     grade: horizons[1].grade,
     horizons,
     divergence,
-    trendStrength: strength,
+    trendStrength: strength.value,
+    directionalSteps: { up: strength.up, down: strength.down },
     trendConfidence,
     velocity,
     acceleration,

@@ -574,18 +574,22 @@ describe('the selection policy, measured', () => {
     expect(selectBestOpportunity([a, b], ['A', 'B'])!.bank).toBe('A');
   });
 
-  it('BUT a rate ignores the size of the operation, and the tiers differ tenfold', () => {
+  it('THE POLICY: the money decides, not the rate', () => {
     /*
-     * THE REAL GAP, and it is not about liquidity. marginPct is a rate;
-     * marginVes is money. Across tiers they disagree, and the selector ranks
-     * on the rate:
+     * marginPct is a rate; marginVes is money. Across tiers they disagree, and
+     * this is the case that settles which one the engine ranks on:
      *
-     *     3,00% on 10.000 VES  ->    300 VES
-     *     2,90% on 100.000 VES ->  2.900 VES
+     *     3,00% on  10.000 VES  ->    300 VES
+     *     2,90% on 100.000 VES  ->  2.900 VES
      *
-     * The engine currently answers "the 10.000 one". Whether that is right is
-     * a decision about the operator's money, not a fact about the book, so it
-     * is measured here and left to them.
+     * Ranking on the rate answered "the 10.000 one" for a tenth of a point and
+     * gave up 2.600 VES to do it. Both are fully executable here, so the
+     * larger operation is simply worth more, and the engine now says so.
+     *
+     * THIS IS A BUSINESS DECISION, not a fact about the book, and it is
+     * written down in exactly two places: the policy note on
+     * selectBestOpportunity and this test. Changing one without the other is
+     * the failure this pair exists to prevent.
      */
     const small = opportunity({ bank: 'A', amountVes: 10_000, buyPrice: 940, sellPrice: 968.2, volume: 5_000 });
     const large = opportunity({ bank: 'B', amountVes: 100_000, buyPrice: 940, sellPrice: 967.26, volume: 5_000 });
@@ -595,8 +599,37 @@ describe('the selection policy, measured', () => {
     expect(Math.round(small.marginVes)).toBe(300);
     expect(Math.round(large.marginVes)).toBe(2_900);
 
-    // What the engine does today, stated rather than implied.
-    expect(selectBestOpportunity([small, large], ['A', 'B'])!.bank).toBe('A');
+    expect(selectBestOpportunity([small, large], ['A', 'B'])!.bank).toBe('B');
+  });
+
+  it('but the rate still decides when the money is the same', () => {
+    /*
+     * PRIORIDAD 3. Two operations worth the same VES: the one that commits
+     * less capital to earn it is the better use of the capital.
+     */
+    const dense = opportunity({ bank: 'A', amountVes: 10_000, buyPrice: 940, sellPrice: 968.2, volume: 5_000 });
+    const spread = { ...dense, bank: 'B', amountVes: 100_000, marginPct: dense.marginPct / 10 };
+    const tied = { ...spread, marginVes: dense.marginVes };
+
+    expect(tied.marginVes).toBe(dense.marginVes);
+    expect(dense.marginPct).toBeGreaterThan(tied.marginPct);
+    expect(selectBestOpportunity([tied, dense], ['A', 'B'])!.bank).toBe('A');
+  });
+
+  it('an unexecutable operation never wins, however large it is', () => {
+    /*
+     * PRIORIDAD 1 outranks the money completely. A huge margin whose liquidity
+     * could not be established is not a candidate at all - it is not ranked
+     * below the small one, it is excluded.
+     */
+    const small = opportunity({ bank: 'A', amountVes: 10_000, buyPrice: 940, sellPrice: 950, volume: 5_000 });
+    const hugeButUnverifiable = {
+      ...opportunity({ bank: 'B', amountVes: 100_000, buyPrice: 940, sellPrice: 990, volume: 5_000 }),
+      verification: 'NOT_VERIFIABLE' as const,
+    };
+
+    expect(hugeButUnverifiable.marginVes).toBeGreaterThan(small.marginVes);
+    expect(selectBestOpportunity([hugeButUnverifiable, small], ['A', 'B'])!.bank).toBe('A');
   });
 
   it('marginVes is derived from the same two prices, never measured apart', () => {

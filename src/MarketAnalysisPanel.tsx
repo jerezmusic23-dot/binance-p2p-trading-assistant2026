@@ -126,9 +126,19 @@ const SidePanel: React.FC<{ projection: SideProjection }> = ({ projection }) => 
       <div className={`flex items-center gap-1 text-[11px] font-bold ${trend.className}`}>
         <trend.Icon className="w-3.5 h-3.5" />
         {GRADE_LABEL[projection.trend.grade]}
-        {projection.trend.trendStrength !== null && (
+        {/*
+          THE COUNTS, NOT A PERCENTAGE.
+
+          This read "· fuerza 73%". trendStrength is |sube - baja| / (sube +
+          baja) over the steps that actually happened - a description of the
+          past, not a chance of continuing - and a bare percentage next to a
+          trend is read as the second thing. The raw counts say exactly as much
+          and cannot be mistaken for a probability.
+        */}
+        {projection.trend.directionalSteps !== null && (
           <span className="text-[#848e9c] font-normal">
-            · fuerza {(projection.trend.trendStrength * 100).toFixed(0)}%
+            · {projection.trend.directionalSteps.up}↑ /{' '}
+            {projection.trend.directionalSteps.down}↓ movimientos
           </span>
         )}
       </div>

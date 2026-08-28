@@ -622,7 +622,16 @@ export interface TrendState {
   horizons: HorizonReading[];
   /** Set when the horizons disagree, in words. */
   divergence: string | null;
+  /**
+   * 0..1, how consistently the series moved in the trend's direction.
+   *
+   * A DERIVED STATISTIC OVER OBSERVED STEPS, never a probability. Rendered as
+   * a bare percentage it read like a chance of continuing, so the counts it
+   * came from travel with it and the interface prints those instead.
+   */
   trendStrength: number | null;
+  /** The up and down steps trendStrength was computed from. */
+  directionalSteps: { up: number; down: number } | null;
   trendConfidence: Confidence;
   velocity: number | null;
   acceleration: number | null;

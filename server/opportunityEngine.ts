@@ -148,21 +148,35 @@ export function buildOpportunity(cell: BankAmountExecutability): Opportunity | n
 /**
  * Picks the best operation among VERIFIED, PROFITABLE opportunities only.
  *
- * A NOT_VERIFIABLE opportunity is never "the best" - an unestablished
- * liquidity is not a usable operation. Neither is a margin of zero or less:
- * there is no such thing as the best loss.
+ * THE POLICY, AND IT IS A BUSINESS DECISION RATHER THAN A FACT ABOUT THE BOOK:
  *
- * Criteria, in order:
- *   1. higher marginPct
- *   2. higher availableUsdt
- *   3. lower buyPrice
- *   4. higher sellPrice
- *   5. canonical bank order
- *   6. smaller amount
+ *   1. FULLY EXECUTABLE     verification VERIFIED, and a strictly positive
+ *                           margin. Everything else is not a candidate at all.
+ *   2. HIGHER marginVes     the gross margin of the whole operation, in money.
+ *   3. HIGHER marginPct     the rate, as the secondary criterion.
+ *   4-7. price, bank order, amount - only to make the answer total.
+ *
+ * WHY THE MONEY COMES FIRST. marginPct is a rate and says nothing about how
+ * much the operation makes, and the tiers differ by a factor of ten:
+ *
+ *     3,00% on  10.000 VES  ->    300 VES
+ *     2,90% on 100.000 VES  ->  2.900 VES
+ *
+ * Ranking on the rate answered "the 10.000 one" for a difference of a tenth of
+ * a point, and gave up 2.600 VES to do it. When both are fully executable the
+ * larger operation is worth more, and that is the whole of the argument.
+ *
+ * WHAT IS NOT A CRITERION ANY MORE: availableUsdt. It used to break ties on
+ * "more liquidity is better", and surplus liquidity is not profit - the
+ * operation consumes what the tier requires and executability has already
+ * checked that the volume covers it. A seller holding ten times what the
+ * operation needs earns exactly the same as one holding just enough.
  *
  * Fully determined by the data: no clock, no arrival order, no randomness.
- * `bankOrder` supplies criterion 5; a bank absent from it sorts last, by name,
+ * `bankOrder` supplies criterion 6; a bank absent from it sorts last, by name,
  * so the result stays deterministic even for an unknown bank.
+ *
+ * CHANGING THIS MEANS CHANGING tests/opportunityPairing.test.ts, deliberately.
  */
 export function selectBestOpportunity(
   opportunities: readonly Opportunity[],
@@ -207,13 +221,18 @@ function isBetter(
   b: Opportunity,
   bankOrderIndex: (bank: string) => number
 ): boolean {
+  // THE MONEY FIRST. See the policy note on selectBestOpportunity.
+  if (a.marginVes !== b.marginVes) return a.marginVes > b.marginVes;
+
+  // The rate second: between two operations worth the same, the cheaper one
+  // to run is the one that commits less capital for it.
   if (a.marginPct !== b.marginPct) return a.marginPct > b.marginPct;
 
-  // VERIFIED implies both liquidities are known, so availableUsdt is a number.
-  const aLiq = a.availableUsdt ?? 0;
-  const bLiq = b.availableUsdt ?? 0;
-  if (aLiq !== bLiq) return aLiq > bLiq;
-
+  /*
+   * availableUsdt USED TO BE THE SECOND CRITERION, and it is gone. Surplus
+   * liquidity is not profit: the operation moves what the tier requires, and
+   * executability has already established the volume covers it.
+   */
   if (a.buyPrice !== b.buyPrice) return a.buyPrice < b.buyPrice;
   if (a.sellPrice !== b.sellPrice) return a.sellPrice > b.sellPrice;
 
