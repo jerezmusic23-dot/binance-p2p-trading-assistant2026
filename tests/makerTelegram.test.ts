@@ -9,8 +9,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   TELEGRAM_MESSAGE_LIMIT,
-  formatMakerPriceChangeMessage,
   formatMakerSummaryMessages,
+  formatPriceChangeDigestMessage,
 } from '../server/telegramNotifier.js';
 import { buildMakerMatrix } from '../server/makerMatrix.js';
 import { DEFAULT_MAKER_CONFIG } from '../server/makerStrategy.js';
@@ -207,32 +207,84 @@ describe('a cell with nothing to say says so in words', () => {
   });
 });
 
-describe('CAMBIO DE PRECIO PARA PUBLICAR', () => {
-  const cell = cellFor([ad(940.02)], [ad(945)]);
-  const text = formatMakerPriceChangeMessage(
-    cell,
-    cell.recommendation!.recommended!,
-    { buyPrice: 940.01, sellPrice: 944.99 },
-    AT + 5000
-  );
-
-  it('says which price moved, from and to', () => {
-    expect(text.startsWith('🔔 <b>CAMBIO DE PRECIO PARA PUBLICAR</b>')).toBe(true);
-    expect(text).toContain('🏦 Banesco');
-    expect(text).toContain('💰 Filtro: 10K');
-    expect(text).toContain('Antes: 940.01');
-    expect(text).toContain('Ahora: <b>940.03</b>');
-    expect(text).toContain('Antes: 944.99');
-    expect(text).toContain('Ahora: <b>944.99</b>');
+/*
+ * WAS: "CAMBIO DE PRECIO PARA PUBLICAR", one message per cell.
+ *
+ * Delivery is now grouped, so the assertions move to the digest: many cells,
+ * one message, net moves only.
+ */
+describe('CAMBIOS DE PRECIOS PARA PUBLICAR', () => {
+  const pending = (
+    bankDisplayName: string,
+    amountKey: string,
+    over: Partial<{
+      announcedBuyPrice: number;
+      announcedSellPrice: number;
+      latestBuyPrice: number;
+      latestSellPrice: number;
+      detections: number;
+    }> = {}
+  ) => ({
+    bank: bankDisplayName.toUpperCase(),
+    bankDisplayName,
+    amountKey,
+    amountVes: 10_000,
+    announcedBuyPrice: 942.1,
+    announcedSellPrice: 947.0,
+    latestBuyPrice: 942.3,
+    latestSellPrice: 947.0,
+    firstDetectedAt: AT,
+    lastDetectedAt: AT,
+    detections: 1,
+    ...over,
   });
 
-  it('states the new margin as MARGEN BRUTO, signed', () => {
-    expect(text).toContain('📊 Nuevo margen: <b>+4.96 VES/USDT</b>');
-    expect(text).toContain('MARGEN BRUTO POTENCIAL');
-    expect(text).not.toMatch(/ganancia garantizada|arbitraje garantizado|oportunidad garantizada/i);
+  const text = formatPriceChangeDigestMessage({
+    changes: [
+      pending('Banesco', '10K'),
+      pending('Banesco', '20K', { announcedBuyPrice: 941.6, latestBuyPrice: 941.8 }),
+      pending('Mercantil', '10K', {
+        announcedBuyPrice: 940,
+        latestBuyPrice: 940,
+        announcedSellPrice: 947.0,
+        latestSellPrice: 946.8,
+      }),
+    ],
+    revertedCells: 2,
+    releasedAt: AT,
+    nextReleaseAt: AT + 1_800_000,
   });
 
-  it('never speaks the arbitrage vocabulary', () => {
+  it('is one message covering every cell that moved', () => {
+    expect(text.startsWith('🔔 <b>CAMBIOS DE PRECIOS PARA PUBLICAR</b>')).toBe(true);
+    expect(text).toContain('Se detectaron 3 cambio(s).');
+  });
+
+  it('groups the cells under their bank', () => {
+    expect(text).toContain('🏦 <b>BANESCO</b>');
+    expect(text).toContain('🏦 <b>MERCANTIL</b>');
+    // Both Banesco amounts sit under one heading, not two.
+    expect(text.match(/🏦 <b>BANESCO<\/b>/g)).toHaveLength(1);
+  });
+
+  it('prints only the side that actually moved', () => {
+    expect(text).toContain('10K → compra 942.10 → <b>942.30</b>');
+    expect(text).toContain('20K → compra 941.60 → <b>941.80</b>');
+    expect(text).toContain('10K → venta 947.00 → <b>946.80</b>');
+    // Mercantil's buy price did not move, so no buy line for it.
+    expect(text).not.toContain('10K → compra 940.00');
+  });
+
+  it('reports cells that reverted rather than hiding them', () => {
+    expect(text).toContain('2 celda(s) volvieron a su precio anterior.');
+  });
+
+  it('says when the next revision is due', () => {
+    expect(text).toMatch(/Próxima revisión automática: \d{2}:\d{2}/);
+  });
+
+  it('carries no per-ad detail and no taker vocabulary', () => {
+    expect(text).not.toMatch(/advNo|adv-|posición|Volumen/i);
     expect(text).not.toMatch(/ARBITRAJE|OPORTUNIDAD|EXECUTABLE|Binance ASK|Binance BID/i);
   });
 });

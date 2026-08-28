@@ -24,6 +24,12 @@ import {
 } from './types.js';
 import type { MakerAlert } from './makerAlerts.js';
 import type { MarketSignal } from './signalEngine.js';
+import {
+  PRIORITY_ORDER,
+  priorityOf,
+  type AlertPriority,
+  type PriceChangeDigest,
+} from './alertScheduler.js';
 import type { MakerMatrix, MakerMatrixCell } from './makerMatrix.js';
 import type { MakerPairing } from './makerRecommendation.js';
 
@@ -458,64 +464,67 @@ export function formatMakerSummaryMessages(
 }
 
 /**
- * 🔔 CAMBIO DE PRECIO PARA PUBLICAR.
+ * 🔔 CAMBIOS DE PRECIOS PARA PUBLICAR — one message for the whole window.
  *
- * Sent ONLY when the number the operator would type into the ad form is
- * different from the one they were last told. A leader that moved without
- * moving the recommendation produces nothing, and so does a change of
- * position, of advertised volume or of who is in the ladder.
+ * REPLACES formatMakerPriceChangeMessage, which wrote one message per cell.
+ * Five cells moving inside half an hour produced five notifications, which is
+ * exactly the noise this phase exists to remove.
+ *
+ * Each line is one cell's NET move over the window: what the operator was last
+ * told, and what it is now. Intermediate wobbles are not shown - nobody could
+ * have acted on them - though the count is reported when a cell moved more
+ * than once, because "this one is unstable" is worth knowing.
  */
-export function formatMakerPriceChangeMessage(
-  cell: MakerMatrixCell,
-  pairing: MakerPairing,
-  previous: { buyPrice: number; sellPrice: number },
-  timestamp: number
-): string {
+export function formatPriceChangeDigestMessage(digest: PriceChangeDigest): string {
   const n = (value: number) => escapeHtml(value.toFixed(2));
+  const clock = (ts: number) => formatVenezuelaClock(ts);
 
-  return [
-    '🔔 <b>CAMBIO DE PRECIO PARA PUBLICAR</b>',
+  const lines = [
+    '🔔 <b>CAMBIOS DE PRECIOS PARA PUBLICAR</b>',
     '',
-    `🏦 ${escapeHtml(cell.bankDisplayName)}`,
-    `💰 Filtro: ${escapeHtml(cell.amountKey)} (${escapeHtml(
-      cell.amountVes.toLocaleString('es-VE')
-    )} VES)`,
+    `Actualizado: ${clock(digest.releasedAt)}`,
     '',
-    '🟢 <b>COMPRA USDT</b>',
-    `Antes: ${n(previous.buyPrice)}`,
-    `Ahora: <b>${n(pairing.buy.price)}</b>`,
-    `Posición estimada: #${escapeHtml(String(pairing.buy.position))}`,
-    '',
-    '🔵 <b>VENTA USDT</b>',
-    `Antes: ${n(previous.sellPrice)}`,
-    `Ahora: <b>${n(pairing.sell.price)}</b>`,
-    `Posición estimada: #${escapeHtml(String(pairing.sell.position))}`,
-    '',
-    `📊 Nuevo margen: <b>${signedVes(pairing.grossMarginVes)} VES/USDT</b>`,
-    pairing.grossMarginPct !== null
-      ? `📈 Margen: <b>${signedVes(pairing.grossMarginPct, 4)}%</b>`
-      : '📈 Margen: no verificable',
-    '',
-    '⚠️ MARGEN BRUTO POTENCIAL. No es una operación garantizada.',
-    'La posición es una ESTIMACIÓN.',
-    '',
-    `Hora: ${formatVenezuelaClock(timestamp)}`,
-  ].join('\n');
+  ];
+
+  let currentBank: string | null = null;
+  for (const change of digest.changes) {
+    if (change.bankDisplayName !== currentBank) {
+      if (currentBank !== null) lines.push('');
+      lines.push(`🏦 <b>${escapeHtml(change.bankDisplayName.toUpperCase())}</b>`);
+      currentBank = change.bankDisplayName;
+    }
+
+    /* Only the side that actually moved is printed. */
+    if (change.announcedBuyPrice !== change.latestBuyPrice) {
+      lines.push(
+        `${escapeHtml(change.amountKey)} → compra ${n(change.announcedBuyPrice)} → <b>${n(
+          change.latestBuyPrice
+        )}</b>`
+      );
+    }
+    if (change.announcedSellPrice !== change.latestSellPrice) {
+      lines.push(
+        `${escapeHtml(change.amountKey)} → venta ${n(change.announcedSellPrice)} → <b>${n(
+          change.latestSellPrice
+        )}</b>`
+      );
+    }
+    if (change.detections > 1) {
+      lines.push(`<i>(${escapeHtml(String(change.detections))} movimientos en la ventana)</i>`);
+    }
+  }
+
+  lines.push('', `Se detectaron ${escapeHtml(String(digest.changes.length))} cambio(s).`);
+  if (digest.revertedCells > 0) {
+    // Reported, not hidden: a cell that moved and came back still moved.
+    lines.push(
+      `${escapeHtml(String(digest.revertedCells))} celda(s) volvieron a su precio anterior.`
+    );
+  }
+  lines.push('', `Próxima revisión automática: ${clock(digest.nextReleaseAt)}`);
+
+  return lines.join('\n');
 }
-
-/*
- * formatMakerDisplacedMessage USED TO LIVE HERE and is gone.
- *
- * It announced that an announced price had lost POSITION - somebody moved
- * ahead of it. That is the wrong trigger: the operator's ad does not need
- * republishing because a rival appeared, it needs republishing when the price
- * they should be charging is different. A leader can move, a rival can
- * disappear, volume can change and positions can shuffle without the
- * publishable price moving one cent, and each of those produced a message.
- *
- * formatMakerPriceChangeMessage above replaces it, driven by the only thing
- * the operator can act on: the number changed.
- */
 
 /**
  * 📈 PROYECCIÓN DE MERCADO / 🚨 CAMBIO DE TENDENCIA.
@@ -528,7 +537,11 @@ export function formatMakerPriceChangeMessage(
  * NOT AN INSTRUCTION. There is no "publica a", no "compra ahora" and no target.
  * The operator is told what the data shows and decides for themselves.
  */
-export function formatMarketSignalMessage(signal: MarketSignal, timestamp: number): string {
+export function formatMarketSignalMessage(
+  signal: MarketSignal,
+  priority: AlertPriority,
+  timestamp: number
+): string {
   const n = (value: number | null): string =>
     value === null ? 'no verificable' : escapeHtml(value.toFixed(2));
 
@@ -555,6 +568,7 @@ export function formatMarketSignalMessage(signal: MarketSignal, timestamp: numbe
     escapeHtml(signal.headline),
     '',
     statusLine,
+    `Prioridad: <b>${escapeHtml(priority)}</b>`,
     `Confianza: <b>${escapeHtml(signal.confidence)}</b> · Muestras: <b>${escapeHtml(
       String(signal.sampleSize)
     )}</b>`,
@@ -736,17 +750,38 @@ export class TelegramNotifier {
 
     const now = timestamp || Date.now();
 
-    for (const signal of signals) {
+    /*
+     * Most urgent first, so that when the per-cell cooldown allows exactly one
+     * message from a cell, the one that gets through is the one that matters.
+     * Without this the order would be whatever the engine happened to produce,
+     * and a confirmed breakout could be crowded out by an accumulation note.
+     */
+    const ordered = [...signals].sort(
+      (a, b) => PRIORITY_ORDER[priorityOf(a)] - PRIORITY_ORDER[priorityOf(b)]
+    );
+
+    for (const signal of ordered) {
       try {
+        const priority = priorityOf(signal);
         const dedupKey = `signal:${signal.identity}:${signal.status}`;
         if (this.lastSentAt.has(dedupKey)) {
           results.push({ outcome: 'UNCHANGED' });
           continue;
         }
 
+        /*
+         * CRITICAL skips the cooldown, and only CRITICAL: a confirmed break of
+         * a level the series itself built is the one thing worth interrupting
+         * for. It is still deduplicated by identity above, so a break that
+         * persists across sweeps is announced once, not once per sweep.
+         */
         const cellKey = `signal:cell:${signal.bank}:${signal.amountKey}`;
         const previous = this.lastSentAt.get(cellKey);
-        if (previous !== undefined && now - previous < this.config.cooldownMs) {
+        if (
+          priority !== 'CRITICAL' &&
+          previous !== undefined &&
+          now - previous < this.config.cooldownMs
+        ) {
           results.push({ outcome: 'COOLDOWN' });
           continue;
         }
@@ -755,7 +790,7 @@ export class TelegramNotifier {
         this.lastSentAt.set(cellKey, now);
         this.prune(now);
 
-        results.push(await this.send(formatMarketSignalMessage(signal, now)));
+        results.push(await this.send(formatMarketSignalMessage(signal, priority, now)));
       } catch (err) {
         console.warn(`[Telegram] Unexpected notifier error: ${this.describe(err)}`);
         results.push({ outcome: 'NETWORK_ERROR', detail: this.describe(err) });
@@ -861,17 +896,18 @@ export class TelegramNotifier {
    * method only decides whether to put it on the wire.
    */
   /**
-   * Puts the maker layer's output on the wire. THE ONLY MARKET EMITTER LEFT.
+   * Sends the periodic maker summary.
    *
-   * SUMMARY is the periodic picture. It is never suppressed by a cooldown -
-   * evaluateMakerAlerts already decides when it is due, on its own 30-minute
-   * clock, and a second gate here would silently skip one. A summary that does
-   * not fit one Telegram message is split on bank boundaries and sent as a
-   * short deterministic sequence, never as one message per cell.
+   * PRICE_CHANGE NO LONGER PASSES THROUGH HERE. Detection stays immediate -
+   * makerAlerts must record a move the moment it happens or the record of what
+   * changed would be wrong - but delivery is now the digest's job, released on
+   * its own interval by notifyPriceChangeDigest. A changed cell used to become
+   * a notification within 45 seconds; now it becomes a line in one message
+   * half an hour later, alongside every other cell that moved.
    *
-   * PRICE_CHANGE is rate-limited PER CELL and deduplicated by the pair of
-   * prices it announces: the same change re-derived on a later sweep sends
-   * nothing, and a busy cell cannot drown out the other 41.
+   * The summary itself is never suppressed by a cooldown: evaluateMakerAlerts
+   * already decides when it is due on its own 30-minute clock, and a second
+   * gate here would silently skip one.
    */
   public async notifyMakerAlerts(
     alerts: readonly MakerAlert[],
@@ -884,41 +920,14 @@ export class TelegramNotifier {
 
     for (const alert of alerts) {
       try {
-        if (alert.kind === 'SUMMARY') {
-          for (const message of formatMakerSummaryMessages(alert.matrix, now)) {
-            results.push(await this.send(message));
-          }
-          continue;
-        }
-
-        const cell = alert.cell;
-        /*
-         * Dedup key carries the prices, so re-announcing the same move is a
-         * no-op; cooldown key carries only the cell, so a cell that keeps
-         * moving is throttled rather than repeated.
-         */
-        const dedupKey = `maker:price:${cell.bank}:${cell.amountKey}:${alert.pairing.buy.price}:${alert.pairing.sell.price}`;
-        if (this.lastSentAt.has(dedupKey)) {
+        if (alert.kind !== 'SUMMARY') {
+          // Accumulated by the caller into the digest; nothing leaves here.
           results.push({ outcome: 'UNCHANGED' });
           continue;
         }
-
-        const cooldownKeyForCell = `maker:cell:${cell.bank}:${cell.amountKey}`;
-        const previous = this.lastSentAt.get(cooldownKeyForCell);
-        if (previous !== undefined && now - previous < this.config.cooldownMs) {
-          results.push({ outcome: 'COOLDOWN' });
-          continue;
+        for (const message of formatMakerSummaryMessages(alert.matrix, now)) {
+          results.push(await this.send(message));
         }
-
-        this.lastSentAt.set(dedupKey, now);
-        this.lastSentAt.set(cooldownKeyForCell, now);
-        this.prune(now);
-
-        results.push(
-          await this.send(
-            formatMakerPriceChangeMessage(cell, alert.pairing, alert.previous, now)
-          )
-        );
       } catch (err) {
         console.warn(`[Telegram] Unexpected notifier error: ${this.describe(err)}`);
         results.push({ outcome: 'NETWORK_ERROR', detail: this.describe(err) });
@@ -927,6 +936,29 @@ export class TelegramNotifier {
 
     return results;
   }
+
+  /**
+   * Sends the grouped price-change digest.
+   *
+   * One message for every cell that moved during the window, whatever their
+   * number. Deduplication happened upstream in the accumulator: a cell that
+   * returned to its announced price is not in the digest at all.
+   */
+  public async notifyPriceChangeDigest(digest: PriceChangeDigest): Promise<TelegramResult> {
+    try {
+      if (!this.config) return { outcome: 'DISABLED' };
+      if (digest.changes.length === 0) return { outcome: 'UNCHANGED' };
+
+      this.lastSentAt.set('maker:digest', digest.releasedAt);
+      this.prune(digest.releasedAt);
+
+      return await this.send(formatPriceChangeDigestMessage(digest));
+    } catch (err) {
+      console.warn(`[Telegram] Unexpected notifier error: ${this.describe(err)}`);
+      return { outcome: 'NETWORK_ERROR', detail: this.describe(err) };
+    }
+  }
+
 
 
   /*

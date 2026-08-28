@@ -29,6 +29,13 @@ import {
   evaluateMakerAlerts,
   type MakerAlertState,
 } from './makerAlerts.js';
+import {
+  EMPTY_DIGEST_STATE,
+  accumulatePriceChange,
+  readPriceChangeInterval,
+  releasePriceChangeDigest,
+  type PriceChangeDigestState,
+} from './alertScheduler.js';
 import { buildMakerMatrix, type MakerMatrix } from './makerMatrix.js';
 import {
   HistoricalMarketStore,
@@ -138,6 +145,16 @@ export class CentralMarketStore {
    * direction: it can repeat itself, never invent a change that did not happen.
    */
   private makerAlertState: MakerAlertState = EMPTY_MAKER_ALERT_STATE;
+
+  /**
+   * Price changes waiting to be sent as one grouped message.
+   *
+   * Detection stays immediate; delivery waits for the interval. In memory
+   * only - a restart drops a pending window, which loses at most one digest
+   * and can never invent a change that did not happen.
+   */
+  private priceChangeDigest: PriceChangeDigestState = EMPTY_DIGEST_STATE;
+  private readonly priceChangeIntervalMs: number = readPriceChangeInterval().intervalMs;
 
   /** Projections and signals from the latest sweep. Recomputed, never stored. */
   private lastProjections: CellProjection[] = [];
@@ -1078,8 +1095,38 @@ export class CentralMarketStore {
       });
 
       this.makerAlertState = state;
-      if (alerts.length > 0) {
+
+      /*
+       * DETECTION IS IMMEDIATE, DELIVERY IS NOT.
+       *
+       * Every PRICE_CHANGE is folded into the open window the moment it is
+       * detected - that record has to be accurate. What waits is the message:
+       * the window is released as one grouped digest on its own interval, so
+       * five cells moving in half an hour produce one notification rather than
+       * five. The periodic summary is unaffected and still goes through
+       * notifyMakerAlerts on its own 30-minute clock.
+       */
+      for (const alert of alerts) {
+        if (alert.kind !== 'PRICE_CHANGE') continue;
+        this.priceChangeDigest = accumulatePriceChange(
+          this.priceChangeDigest,
+          { cell: alert.cell, pairing: alert.pairing, previous: alert.previous },
+          now
+        );
+      }
+
+      const released = releasePriceChangeDigest(
+        this.priceChangeDigest,
+        now,
+        this.priceChangeIntervalMs
+      );
+      this.priceChangeDigest = released.state;
+
+      if (alerts.some((a) => a.kind === 'SUMMARY')) {
         void TelegramNotifier.getInstance().notifyMakerAlerts(alerts, now);
+      }
+      if (released.digest !== null) {
+        void TelegramNotifier.getInstance().notifyPriceChangeDigest(released.digest);
       }
 
       /*

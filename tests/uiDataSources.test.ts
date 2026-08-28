@@ -217,9 +217,10 @@ describe('TEST 11 / 12 - one source of truth for the opportunity', () => {
     expect(makerFormatters).not.toMatch(/strategic/);
     expect(makerFormatters).not.toMatch(/bestBuyPrice|bestSellPrice/);
     expect(makerFormatters).not.toMatch(/strategicLines/);
-    // Bank and amount come from the cell, which only a real capture supplies.
-    expect(makerFormatters).toMatch(/cell\.bankDisplayName/);
-    expect(makerFormatters).toMatch(/cell\.amountKey/);
+    // Bank and amount come from the captured cell or the accumulated change,
+    // never from a global aggregate.
+    expect(makerFormatters).toMatch(/cell\.bankDisplayName|change\.bankDisplayName/);
+    expect(makerFormatters).toMatch(/cell\.amountKey|change\.amountKey/);
   });
 
   it('the notifier never evaluates executability itself', () => {

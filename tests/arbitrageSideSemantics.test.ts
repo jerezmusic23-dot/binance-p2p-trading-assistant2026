@@ -283,7 +283,7 @@ describe('the arbitrage vocabulary can no longer reach Telegram', () => {
   });
 
   it('the maker message pairs MI COMPRA with the SELL listing, not the BUY one', async () => {
-    const { formatMakerPriceChangeMessage } = await import('../server/telegramNotifier.js');
+    const { formatMakerSummaryMessages } = await import('../server/telegramNotifier.js');
     const { buildMakerMatrix } = await import('../server/makerMatrix.js');
     const { DEFAULT_MAKER_CONFIG } = await import('../server/makerStrategy.js');
     const { makeNormalizedAd } = await import('./helpers/fixtures.js');
@@ -295,7 +295,7 @@ describe('the arbitrage vocabulary can no longer reach Telegram', () => {
       paymentOptions: [{ payType: 'Provincial', tradeMethodName: 'Provincial' }],
     };
 
-    const cell = buildMakerMatrix({
+    const matrix = buildMakerMatrix({
       bankOrder: ['banesco'],
       bankDisplayNames: { banesco: 'Banesco' },
       bankAllowedCodes: { banesco: ['Banesco'] },
@@ -309,19 +309,13 @@ describe('the arbitrage vocabulary can no longer reach Telegram', () => {
       capturedAt: NOW,
       config: DEFAULT_MAKER_CONFIG,
       nowMs: NOW,
-    }).cells.banesco['10K'];
+    });
 
-    const body = formatMakerPriceChangeMessage(
-      cell,
-      cell.recommendation!.recommended!,
-      { buyPrice: 939.5, sellPrice: 945.5 },
-      NOW
-    );
+    const [body] = formatMakerSummaryMessages(matrix, NOW);
 
     // One tick ABOVE the highest buyer; one tick BELOW the lowest seller.
-    expect(body).toContain('Ahora: <b>940.01</b>');
-    expect(body).toContain('Ahora: <b>944.99</b>');
-    expect(body).toContain('CAMBIO DE PRECIO PARA PUBLICAR');
+    expect(body).toContain('🟢 Compra: <b>940.01</b>');
+    expect(body).toContain('🔵 Venta: <b>944.99</b>');
     expect(body).not.toMatch(/ARBITRAJE|EXECUTABLE|Binance ASK|Binance BID/);
   });
 });

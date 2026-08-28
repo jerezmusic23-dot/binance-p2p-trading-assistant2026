@@ -133,6 +133,8 @@ describe('two emitters can never speak at once', () => {
     const store = code('centralStore.ts');
     const marketCalls = store.match(/notifyMakerAlerts|notifyOpportunityLifecycle/g) ?? [];
     expect(marketCalls).toEqual(['notifyMakerAlerts']);
+    // The digest is the delivery half of the same maker path, not a new voice.
+    expect(store).toMatch(/notifyPriceChangeDigest/);
   });
 
   it('the remaining emitters are the maker layer, user rules and system health', () => {
@@ -149,6 +151,7 @@ describe('two emitters can never speak at once', () => {
       'public async notifyAlert',
       'public async notifyMakerAlerts',
       'public async notifyMarketSignals',
+      'public async notifyPriceChangeDigest',
       'public async notifySystemAlert',
     ]);
   });

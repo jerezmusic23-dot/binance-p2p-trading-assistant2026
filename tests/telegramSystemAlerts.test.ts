@@ -22,6 +22,11 @@ import { buildMakerMatrix } from '../server/makerMatrix.js';
 import { DEFAULT_MAKER_CONFIG } from '../server/makerStrategy.js';
 import { makeNormalizedAd } from './helpers/fixtures.js';
 import type { MakerAlert } from '../server/makerAlerts.js';
+import {
+  EMPTY_DIGEST_STATE,
+  accumulatePriceChange,
+  releasePriceChangeDigest,
+} from '../server/alertScheduler.js';
 import type { NormalizedAd, TelegramSystemAlert } from '../server/types.js';
 
 const TOKEN = '1234567890:TEST-TOKEN-NOT-REAL';
@@ -139,6 +144,19 @@ describe('Telegram without a token', () => {
     const results = await notifier.notifyMakerAlerts([priceChange(940, 945)], T0);
 
     expect(results.map((r) => r.outcome)).toEqual(['DISABLED']);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('reports DISABLED and sends nothing for a price digest', async () => {
+    const notifier = new TelegramNotifier(null);
+    const result = await notifier.notifyPriceChangeDigest({
+      changes: [],
+      revertedCells: 0,
+      releasedAt: T0,
+      nextReleaseAt: T0,
+    });
+
+    expect(result.outcome).toBe('DISABLED');
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
@@ -310,63 +328,111 @@ describe('Telegram: storage error', () => {
  * re-pinned here against the maker emitter, which is the only market emitter
  * left.
  */
-describe('Telegram: the maker emitter does not repeat itself', () => {
-  it('sends a price change once and stays quiet at the sweep rate', async () => {
-    const notifier = configured();
-    const alert = priceChange(940, 945);
+/*
+ * THIS BLOCK USED TO TEST A PER-CELL EMITTER: one message per changed cell,
+ * throttled per cell.
+ *
+ * That emitter is gone. Detection still happens per cell and immediately, but
+ * delivery is now one grouped digest per window, so the guarantees move with
+ * it: a window that produced no NET change sends nothing, a cell that moved
+ * five times contributes one line, and the whole matrix produces one message.
+ */
+describe('Telegram: price changes are grouped, not repeated', () => {
+  /*
+   * `to` is the RECOMMENDED price, which sits one observed tick above the
+   * leader - so the fixture builds the cell from `to - 0.01`. Passing `to` as
+   * the leader would silently produce a recommendation of `to + 0.01` and make
+   * every assertion below one cent wrong.
+   */
+  const change = (bank: string, amountKey: string, from: number, to: number) => {
+    const cell = makeCell(Number((to - 0.01).toFixed(2)), 945);
+    return {
+      cell: { ...cell, bank, amountKey, bankDisplayName: bank },
+      pairing: cell.recommendation!.recommended!,
+      previous: { buyPrice: from, sellPrice: 944.99 },
+    };
+  };
 
-    for (let i = 0; i < 5; i += 1) {
-      await notifier.notifyMakerAlerts([alert], T0 + i * 45_000);
+  it('sends ONE message for many cells that moved', async () => {
+    const notifier = configured();
+    let state = EMPTY_DIGEST_STATE;
+    for (const [bank, amount, from, to] of [
+      ['Banesco', '10K', 941, 942],
+      ['Banesco', '20K', 940, 941],
+      ['Mercantil', '10K', 939, 940],
+      ['Venezuela', '30K', 938, 939],
+    ] as const) {
+      state = accumulatePriceChange(state, change(bank, amount, from, to), T0);
     }
 
+    const released = releasePriceChangeDigest(state, T0, 1_800_000);
+    await notifier.notifyPriceChangeDigest(released.digest!);
+
     expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [body] = sentBodies();
+    expect(body).toContain('CAMBIOS DE PRECIOS PARA PUBLICAR');
+    expect(body).toContain('Se detectaron 4 cambio(s).');
   });
 
-  it('deduplicates by the prices announced, not by the moment', async () => {
-    const notifier = configured();
-    const alert = priceChange(940, 945);
+  it('holds the window shut until the interval has elapsed', () => {
+    let state = releasePriceChangeDigest(
+      accumulatePriceChange(EMPTY_DIGEST_STATE, change('Banesco', '10K', 941, 942), T0),
+      T0,
+      1_800_000
+    ).state;
 
-    const first = await notifier.notifyMakerAlerts([alert], T0);
-    // Far beyond any cooldown: the same two prices are still not news.
-    const later = await notifier.notifyMakerAlerts([alert], T0 + 86_400_000);
-
-    expect(first[0].outcome).toBe('SENT');
-    expect(later[0].outcome).toBe('UNCHANGED');
+    state = accumulatePriceChange(state, change('Banesco', '10K', 942, 943), T0 + 60_000);
+    expect(releasePriceChangeDigest(state, T0 + 60_000, 1_800_000).digest).toBeNull();
+    expect(releasePriceChangeDigest(state, T0 + 1_800_000, 1_800_000).digest).not.toBeNull();
   });
 
-  it('throttles a cell that keeps moving, rather than repeating it', async () => {
+  it('drops a cell that moved and came back, rather than reporting a non-change', async () => {
     const notifier = configured();
-
-    const first = await notifier.notifyMakerAlerts([priceChange(940, 945)], T0);
-    const second = await notifier.notifyMakerAlerts([priceChange(941, 946)], T0 + 45_000);
-
-    expect(first[0].outcome).toBe('SENT');
-    expect(second[0].outcome).toBe('COOLDOWN');
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-  });
-
-  it('lets the same cell speak again once the cooldown has passed', async () => {
-    const notifier = configured();
-
-    await notifier.notifyMakerAlerts([priceChange(940, 945)], T0);
-    const later = await notifier.notifyMakerAlerts(
-      [priceChange(941, 946)],
-      T0 + DEFAULT_ALERT_COOLDOWN_MS + 1
+    let state = accumulatePriceChange(
+      EMPTY_DIGEST_STATE,
+      change('Banesco', '10K', 941, 942),
+      T0
     );
+    // Back to where it started, inside the same window.
+    state = accumulatePriceChange(state, change('Banesco', '10K', 942, 941), T0 + 60_000);
 
-    expect(later[0].outcome).toBe('SENT');
+    const released = releasePriceChangeDigest(state, T0, 1_800_000);
+    expect(released.digest).toBeNull();
+
+    const result = await notifier.notifyPriceChangeDigest({
+      changes: [],
+      revertedCells: 1,
+      releasedAt: T0,
+      nextReleaseAt: T0 + 1_800_000,
+    });
+    expect(result.outcome).toBe('UNCHANGED');
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('keeps every cell on its own cooldown', async () => {
+  it('reports the NET move, not every wobble', async () => {
     const notifier = configured();
-    const banesco = priceChange(940, 945);
-    const other = priceChange(942, 947);
-    // Same bank in the fixture, so force a different cell identity.
-    (other as { cell: { amountKey: string } }).cell.amountKey = '50K';
+    let state = accumulatePriceChange(EMPTY_DIGEST_STATE, change('Banesco', '10K', 941, 942), T0);
+    state = accumulatePriceChange(state, change('Banesco', '10K', 942, 943), T0 + 60_000);
 
-    const results = await notifier.notifyMakerAlerts([banesco, other], T0);
+    await notifier.notifyPriceChangeDigest(releasePriceChangeDigest(state, T0, 1_800_000).digest!);
 
-    expect(results.map((r) => r.outcome)).toEqual(['SENT', 'SENT']);
+    const [body] = sentBodies();
+    // Announced 941, now 943: the 942 in between is not a decision anybody made.
+    expect(body).toContain('10K → compra 941.00 → <b>943.00</b>');
+    expect(body).not.toContain('942.00 →');
+    expect(body).toContain('2 movimientos en la ventana');
+  });
+
+  it('says when the next revision is due', async () => {
+    const notifier = configured();
+    const state = accumulatePriceChange(
+      EMPTY_DIGEST_STATE,
+      change('Banesco', '10K', 941, 942),
+      T0
+    );
+    await notifier.notifyPriceChangeDigest(releasePriceChangeDigest(state, T0, 1_800_000).digest!);
+
+    expect(sentBodies()[0]).toMatch(/Próxima revisión automática:/);
   });
 });
 
@@ -442,7 +508,26 @@ describe('Telegram: failures never escape the notifier', () => {
 
   it('returns a result instead of throwing when Telegram rejects the message', async () => {
     fetchMock.mockResolvedValueOnce(new Response('nope', { status: 429 }));
-    const [result] = await configured().notifyMakerAlerts([priceChange(940, 945)], T0);
+    const result = await configured().notifyPriceChangeDigest({
+      changes: [
+        {
+          bank: 'BANESCO',
+          bankDisplayName: 'Banesco',
+          amountKey: '10K',
+          amountVes: 10_000,
+          announcedBuyPrice: 941,
+          announcedSellPrice: 946,
+          latestBuyPrice: 942,
+          latestSellPrice: 946,
+          firstDetectedAt: T0,
+          lastDetectedAt: T0,
+          detections: 1,
+        },
+      ],
+      revertedCells: 0,
+      releasedAt: T0,
+      nextReleaseAt: T0 + 1_800_000,
+    });
 
     expect(result.outcome).toBe('HTTP_ERROR');
     expect(result.detail).toContain('429');
