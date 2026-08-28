@@ -10,12 +10,12 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { ProjectionEngine } from '../server/projectionEngine.js';
+import fs from 'node:fs';
+import path from 'node:path';
 import { BinanceP2PService } from '../server/binanceP2PService.js';
 import {
   makeAdItem,
   makeBinanceResponse,
-  makeHistory,
   makeNormalizedAd,
   makeSnapshot,
 } from './helpers/fixtures.js';
@@ -31,11 +31,6 @@ afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
-
-function project(history = makeHistory(60), snapshot = makeSnapshot()) {
-  const analysis = ProjectionEngine.analyzeMarket(snapshot, history);
-  return ProjectionEngine.generateProjections(snapshot, history, analysis);
-}
 
 describe('capture provenance', () => {
   const buyAds = [makeAdItem({ advNo: 'b1', price: '918.00' })];
@@ -97,185 +92,81 @@ describe('capture provenance', () => {
   });
 });
 
-describe('analysis provenance', () => {
-  it('separates derived statistics from hand-tuned constants', () => {
-    const analysis = ProjectionEngine.analyzeMarket(makeSnapshot(), makeHistory(60));
+/*
+ * THE ANALYSIS, ORDER-BOOK-PRESSURE, PROJECTION AND HOURLY-TIMELINE PROVENANCE
+ * BLOCKS USED TO LIVE HERE, and they went with the engine they described.
+ *
+ * They were an honest record of a dishonest thing: they asserted that a
+ * 1.6-sigma support band was labelled HEURISTIC, that a per-hour session curve
+ * marked future points PROJECTED, and that a point-scored distribution never
+ * claimed to be AGGREGATED. Labelling a fabricated number correctly was the
+ * best that could be done while it was still on the screen.
+ *
+ * ProjectionEngine is gone from the production chain and from the repository.
+ * What replaces those assertions is the structural guarantee below: no module
+ * can bring the heuristic forecast back without this failing.
+ */
+describe('the heuristic forecast engine is gone, not hidden', () => {
+  const serverDir = path.join(process.cwd(), 'server');
+  const srcDir = path.join(process.cwd(), 'src');
 
-    expect(analysis.provenance.overall).toBe('AGGREGATED');
-    // C2 removed the +35 floor, so trendStrength is now a plain derived
-    // magnitude. The support/resistance band still uses a hand-picked 1.6
-    // sigma multiplier and stays HEURISTIC.
-    expect(analysis.provenance.trendStrength).toBe('AGGREGATED');
-    expect(analysis.provenance.supportResistance).toBe('HEURISTIC');
+  const sources = (dir: string, ext: string[]): { file: string; body: string }[] =>
+    fs
+      .readdirSync(dir)
+      .filter((f) => ext.some((e) => f.endsWith(e)))
+      .map((f) => ({ file: f, body: fs.readFileSync(path.join(dir, f), 'utf8') }));
+
+  /** Source with comments stripped: prose about the removal is not code. */
+  const code = (body: string): string =>
+    body.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+
+  it('neither engine file exists any more', () => {
+    expect(fs.existsSync(path.join(serverDir, 'projectionEngine.ts'))).toBe(false);
+    expect(fs.existsSync(path.join(serverDir, 'backtestEngine.ts'))).toBe(false);
   });
 
-  it('reports the window the statistics were computed over', () => {
-    const history = makeHistory(100, { stepMs: 6000 }); // 99 * 6s = 9.9 min
-    const analysis = ProjectionEngine.analyzeMarket(makeSnapshot(), history);
-
-    expect(analysis.dataWindow.sampleCount).toBe(100);
-    expect(analysis.dataWindow.spanMinutes).toBe(9.9);
-    expect(analysis.dataWindow.fromTimestamp).toBe(history[0].timestamp);
-    expect(analysis.dataWindow.toTimestamp).toBe(history[99].timestamp);
+  it('nothing on the server imports it', () => {
+    for (const { file, body } of sources(serverDir, ['.ts'])) {
+      expect(code(body), file).not.toMatch(/from '\.\/projectionEngine\.js'/);
+      expect(code(body), file).not.toMatch(/from '\.\/backtestEngine\.js'/);
+      expect(code(body), file).not.toMatch(/\bProjectionEngine\./);
+      expect(code(body), file).not.toMatch(/\bBacktestEngine\./);
+    }
   });
 
-  it('reports an empty window rather than inventing one', () => {
-    const analysis = ProjectionEngine.analyzeMarket(makeSnapshot(), []);
-    expect(analysis.dataWindow).toEqual({
-      sampleCount: 0,
-      fromTimestamp: null,
-      toTimestamp: null,
-      spanMinutes: null,
-    });
-  });
-});
-
-describe('order book pressure provenance', () => {
-  it('is AGGREGATED when summed from real ads', () => {
-    const snapshot = makeSnapshot({
-      topBuyAds: [makeNormalizedAd(918, 800)],
-      topSellAds: [makeNormalizedAd(921, 200)],
-    });
-    const pressure = ProjectionEngine.computeOrderBookPressure(snapshot);
-
-    expect(pressure.buyVolume.provenance).toBe('AGGREGATED');
-    expect(pressure.buyVolume.value).toBe(pressure.buyVolumeUsdt);
-    expect(pressure.buyVolume.reason).toBeUndefined();
-  });
-
-  it('is a REAL null when the book was empty - absence is an observation', () => {
-    const pressure = ProjectionEngine.computeOrderBookPressure(
-      makeSnapshot({ topBuyAds: [], topSellAds: [] })
-    );
-    expect(pressure.buyVolume.value).toBeNull();
-    expect(pressure.sellVolume.value).toBeNull();
-    expect(pressure.buyVolume.provenance).toBe('REAL');
-    expect(pressure.buyVolume.reason).toBeTruthy();
-  });
-});
-
-describe('projection provenance', () => {
-  it('classifies every projection block explicitly', () => {
-    const p = project();
-    expect(p.provenance).toEqual({
-      daily: 'PROJECTED',
-      probabilities: 'HEURISTIC',
-      confidence: 'HEURISTIC',
-      seasonality: 'HEURISTIC',
-      merchantAdvice: 'HEURISTIC',
-      risk: 'HEURISTIC',
-    });
-  });
-
-  it('never labels the point-scoring probabilities as anything but HEURISTIC', () => {
+  it('the heuristic multipliers exist nowhere in the server', () => {
     /*
-     * The label survives the removal of the numbers, deliberately. The block
-     * now carries { up: null, neutral: null, down: null } - the point-scoring
-     * rule clamped to [8, 88] is gone - and HEURISTIC remains the honest
-     * classification of a block that has never been calibrated against
-     * anything. If a measured distribution is ever built, the label is what
-     * has to change with it.
+     * The exact constants the audit named. Each was a forecast input nobody
+     * measured: a 1.6-sigma band, a +6H factor, a floor-proximity threshold and
+     * an afternoon seasonal bump.
      */
-    expect(project().provenance.probabilities).toBe('HEURISTIC');
-    expect(project().probabilities).toEqual({ up: null, neutral: null, down: null });
-  });
-
-  it('never labels the sample-count confidence as measured evidence', () => {
-    // confidencePct = 62 + min(25, n * 0.35): a function of row count, not error.
-    const p = project();
-    expect(p.provenance.confidence).toBe('HEURISTIC');
-    expect(p.provenance.confidence).not.toBe('AGGREGATED');
-  });
-
-  it('carries the live price provenance through to currentBuy / currentSell', () => {
-    const tagged = makeSnapshot({
-      bestBuy: { value: 918, provenance: 'REAL', reason: 'lado presente' },
-    });
-    const p = project(makeHistory(60), tagged);
-    expect(p.currentBuy.provenance).toBe('REAL');
-    expect(p.currentBuy.reason).toBe('lado presente');
-    expect(p.currentSell.provenance).toBe('REAL');
-  });
-
-  it('reports null prices instead of the old hardcoded 918 fallback', () => {
-    const dead = makeSnapshot({
-      bestBuyPrice: null,
-      bestSellPrice: null,
-      bestBuy: { value: null, provenance: 'REAL', reason: 'sin anuncios' },
-      bestSell: { value: null, provenance: 'REAL', reason: 'sin anuncios' },
-    });
-    const p = project([], dead);
-
-    expect(p.currentBuyPrice).toBeNull();
-    expect(p.currentBuy.value).toBeNull();
-    expect(p.currentBuy.provenance).toBe('REAL');
-    expect(p.currentSell.value).toBeNull();
-  });
-
-  it('reports the data window the projections rest on', () => {
-    const p = project(makeHistory(60));
-    expect(p.dataWindow.sampleCount).toBe(60);
-    expect(p.dataWindow.spanMinutes).toBe(5.9);
-  });
-});
-
-describe('hourly timeline provenance', () => {
-  function timeline(history = makeHistory(60)) {
-    const snapshot = makeSnapshot();
-    const analysis = ProjectionEngine.analyzeMarket(snapshot, history);
-    return ProjectionEngine.generateProjections(snapshot, history, analysis).hourlyTimeline;
-  }
-
-  it('labels future hours PROJECTED', () => {
-    for (const point of timeline().filter((p) => p.hour > 12)) {
-      expect(point.provenance).toBe('PROJECTED');
-      expect(point.provenanceReason).toMatch(/aun no ha ocurrido/i);
+    for (const { file, body } of sources(serverDir, ['.ts'])) {
+      const body_ = code(body);
+      expect(body_, file).not.toMatch(/stdDev \* 1\.6/);
+      expect(body_, file).not.toMatch(/\* 1\.15\b/);
+      expect(body_, file).not.toMatch(/\* 1\.004\b/);
+      expect(body_, file).not.toMatch(/seasonalFactor/);
+      expect(body_, file).not.toMatch(/sessionCurveMultipliers/);
     }
   });
 
-  it('leaves a past hour with no tick as a REAL gap, not a synthesised price', () => {
-    // Audit B1, fixed in C2: the session curve no longer manufactures past
-    // observations.
-    const past = timeline([]).filter((p) => p.hour < 12);
-    expect(past).toHaveLength(4);
-
-    for (const point of past) {
-      expect(point.isProjected).toBe(false); // past, not future
-      expect(point.buyPrice).toBeNull();
-      expect(point.provenance).toBe('REAL');
-      expect(point.provenanceReason).toMatch(/No se capturó ningún tick/i);
-    }
+  it('no endpoint serves the old engine any more', () => {
+    const routes = code(fs.readFileSync(path.join(serverDir, 'routes.ts'), 'utf8'));
+    expect(routes).not.toMatch(/'\/market\/analysis'/);
+    expect(routes).not.toMatch(/'\/market\/projections'/);
+    expect(routes).not.toMatch(/'\/market\/backtest'/);
+    // And the replacement is there.
+    expect(routes).toMatch(/'\/market\/projections\/general'/);
   });
 
-  it('labels an hour backed by a stored tick REAL', () => {
-    const history = makeHistory(5, {
-      startTs: Date.parse('2026-08-23T16:10:00Z'),
-      drift: 1,
-    });
-    const point = timeline(history).find((p) => p.hour === 12);
-    expect(point?.provenance).toBe('REAL');
-    expect(point?.provenanceReason).toBeUndefined();
-  });
-
-  it('isProjected means "future hour" and nothing else', () => {
-    const points = timeline(makeHistory(60));
-    for (const point of points) {
-      if (point.isProjected) {
-        expect(point.hour).toBeGreaterThan(12);
-        expect(point.buyPrice).toBeNull();
-        expect(point.sellPrice).toBeNull();
-        expect(point.provenance).toBe('PROJECTED');
-      } else {
-        expect(point.hour).toBeLessThanOrEqual(12);
-        expect(point.projectedBuy).toBeNull();
-        expect(point.provenance).toBe('REAL');
-      }
-    }
-  });
-
-  it('every point carries a provenance', () => {
-    for (const point of timeline()) {
-      expect(['REAL', 'AGGREGATED', 'PROJECTED', 'HEURISTIC']).toContain(point.provenance);
+  it('the interface no longer renders a probability distribution', () => {
+    for (const { file, body } of sources(srcDir, ['.tsx'])) {
+      const body_ = code(body);
+      expect(body_, file).not.toMatch(/DISTRIBUCIÓN DE PROBABILIDAD/);
+      expect(body_, file).not.toMatch(/REGRESIÓN & PROFUNDIDAD/);
+      expect(body_, file).not.toMatch(/probabilities/);
+      expect(body_, file).not.toMatch(/intradayHorizons/);
+      expect(body_, file).not.toMatch(/merchantAdvice/);
     }
   });
 });

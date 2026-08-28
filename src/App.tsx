@@ -19,7 +19,7 @@ import {
 } from './GlobalFilterBar';
 
 import { MainOverview } from './MainOverview';
-import { DailyFluctuationChart } from './DailyFluctuationChart';
+import { MarketProjectionPanel } from './MarketProjectionPanel';
 import { BankMatrix } from './BankMatrix';
 import { MakerMatrix } from './MakerMatrix';
 import { MarketAnalysisPanel } from './MarketAnalysisPanel';
@@ -31,8 +31,6 @@ import { ApiService } from './api';
 
 import type {
   MarketSnapshot,
-  MarketAnalysis,
-  MarketProjections,
   GlobalFilterState,
   BankFilterKey,
   AmountFilterKey,
@@ -63,12 +61,6 @@ export default function App() {
   const [snapshot, setSnapshot] =
     useState<MarketSnapshot | null>(null);
 
-  const [analysis, setAnalysis] =
-    useState<MarketAnalysis | null>(null);
-
-  const [projections, setProjections] =
-    useState<MarketProjections | null>(null);
-
   const [ageSeconds, setAgeSeconds] =
     useState<number>(0);
 
@@ -82,19 +74,14 @@ export default function App() {
     useState<string | null>(null);
 
   /*
-   * C1 / decision C.4(ii): cuando el análisis o las proyecciones no se pueden
-   * refrescar, conservamos el último valor válido pero anotamos CUÁNDO se
-   * obtuvo, para poder marcarlo como STALE con su antigüedad real. Nunca debe
-   * parecer un dato en tiempo real.
+   * THE DERIVED-STALENESS CLOCK USED TO LIVE HERE.
+   *
+   * analysis and projections arrived from two extra endpoints that could fail
+   * independently of the snapshot, so the screen had to be able to say "these
+   * numbers are the last good ones, and this is how old they are". Both
+   * endpoints are gone with the old engine; every derived reading now comes
+   * from components that fetch and report their own freshness.
    */
-  const [derivedUpdatedAt, setDerivedUpdatedAt] =
-    useState<number | null>(null);
-
-  const [derivedStale, setDerivedStale] =
-    useState<boolean>(false);
-
-  const [nowTick, setNowTick] =
-    useState<number>(() => Date.now());
 
   /*
    * Refs para evitar closures obsoletas dentro
@@ -110,23 +97,6 @@ export default function App() {
   useEffect(() => {
     snapshotRef.current = snapshot;
   }, [snapshot]);
-
-  /*
-   * Sólo mientras el dato derivado esté rancio hace falta un reloj: es lo que
-   * permite mostrar su antigüedad real en lugar de un número congelado.
-   */
-  useEffect(() => {
-    if (!derivedStale) return;
-
-    setNowTick(Date.now());
-    const timer = setInterval(() => setNowTick(Date.now()), 1000);
-    return () => clearInterval(timer);
-  }, [derivedStale]);
-
-  const derivedAgeSeconds =
-    derivedStale && derivedUpdatedAt !== null
-      ? Math.max(0, (nowTick - derivedUpdatedAt) / 1000)
-      : 0;
 
   /*
    * Convierte el filtro actual en parámetros para la API.
@@ -171,7 +141,19 @@ export default function App() {
       }
 
       try {
-        const results = await Promise.allSettled([
+        /*
+         * ONE REQUEST, NOT THREE.
+         *
+         * getMarketAnalysis and getMarketProjections used to ride alongside
+         * this call. Both were served by the old ProjectionEngine - a
+         * 1.6-sigma band, a hand-picked intraday session curve, a 0.0035
+         * seasonal coefficient and a point-scored probability distribution -
+         * and every screen that consumed them now reads the engine that
+         * derives everything from the stored series. The endpoints, the state
+         * they filled and the staleness flag they needed are all gone; what is
+         * left is the observed snapshot.
+         */
+        const [latestResult] = await Promise.allSettled([
           force
             ? ApiService.refreshMarket(
                 bankParam,
@@ -181,23 +163,7 @@ export default function App() {
                 bankParam,
                 amountParam
               ),
-
-          ApiService.getMarketAnalysis(
-            bankParam,
-            amountParam
-          ),
-
-          ApiService.getMarketProjections(
-            bankParam,
-            amountParam
-          ),
         ]);
-
-        const [
-          latestResult,
-          analysisResult,
-          projectionsResult,
-        ] = results;
 
         let hasError = false;
 
@@ -249,65 +215,6 @@ export default function App() {
         }
 
         /*
-         * MARKET ANALYSIS
-         */
-        let derivedOk = true;
-
-        if (
-          analysisResult.status === 'fulfilled' &&
-          analysisResult.value?.analysis
-        ) {
-          setAnalysis(
-            analysisResult.value.analysis
-          );
-        } else {
-          /*
-           * Rechazo o `analysis: null`. Conservamos el valor previo, pero
-           * deja de ser un dato fresco.
-           */
-          derivedOk = false;
-
-          if (analysisResult.status === 'rejected') {
-            hasError = true;
-
-            console.warn(
-              '[Market] Analysis request failed:',
-              analysisResult.reason
-            );
-          }
-        }
-
-        /*
-         * MARKET PROJECTIONS
-         */
-        if (
-          projectionsResult.status === 'fulfilled' &&
-          projectionsResult.value?.projections
-        ) {
-          setProjections(
-            projectionsResult.value.projections
-          );
-        } else {
-          derivedOk = false;
-
-          if (projectionsResult.status === 'rejected') {
-            hasError = true;
-
-            console.warn(
-              '[Market] Projections request failed:',
-              projectionsResult.reason
-            );
-          }
-        }
-
-        if (derivedOk) {
-          setDerivedUpdatedAt(Date.now());
-          setDerivedStale(false);
-        } else {
-          setDerivedStale(true);
-        }
-
-        /*
          * Mostramos error solamente si alguna
          * petición realmente falló.
          */
@@ -329,8 +236,6 @@ export default function App() {
         } else {
           setEffectiveStatus('OFFLINE');
         }
-
-        setDerivedStale(true);
 
         setErrorMessage(
           error instanceof Error
@@ -506,24 +411,24 @@ export default function App() {
         {activeTab === 'overview' && (
           <MainOverview
             snapshot={snapshot}
-            analysis={analysis}
-            projections={projections}
             ageSeconds={ageSeconds}
             effectiveStatus={effectiveStatus}
-            derivedStale={derivedStale}
-            derivedAgeSeconds={derivedAgeSeconds}
             onNavigateTab={handleNavigateTab}
           />
         )}
 
         {/* PROJECTIONS */}
-        {activeTab === 'projections' && (
-          <DailyFluctuationChart
-            snapshot={snapshot}
-            projections={projections}
-            analysis={analysis}
-          />
-        )}
+        {/*
+          DailyFluctuationChart USED TO BE HERE.
+
+          It drew the old engine's forecast: a per-hour session curve for the
+          hours that had not happened yet, a 1.6-sigma daily band, and a
+          "spread máximo esperado" that was the current spread times 1.15.
+          Nothing in it was measured. MarketProjectionPanel answers the same
+          question from the stored series - the real history, then a band that
+          is the 10th and 90th percentile of the moves the book actually made.
+        */}
+        {activeTab === 'projections' && <MarketProjectionPanel />}
 
         {/* WHAT PRICE MY OWN AD SHOULD CARRY */}
         {activeTab === 'publish' && <MakerMatrix />}

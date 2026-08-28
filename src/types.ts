@@ -167,135 +167,22 @@ export interface HistorySummary {
   availableHours: number;
 }
 
-export interface HourlyChartPoint {
-  hour: number;
-  label: string;
-  fullTimestamp?: number;
-  sellPrice: number | null;
-  buyPrice: number | null;
-  spreadPct: number | null;
-  projectedSell?: number | null;
-  projectedBuy?: number | null;
-  floor?: number | null;
-  ceiling?: number | null;
-  isPeak?: boolean;
-  isTrough?: boolean;
-  isCoincide?: boolean;
-  isProjected: boolean;
-  notes?: string;
-  provenance: DataProvenance;
-  provenanceReason?: string;
-}
+
 
 export type MarketTrend = 'ALCISTA' | 'BAJISTA' | 'LATERAL';
 export type MomentumLevel = 'ALTO' | 'MODERADO' | 'NEUTRO' | 'NEGATIVO';
 export type VolatilityLevel = 'ALTA' | 'MEDIA' | 'BAJA';
 export type RiskLevel = 'BAJO' | 'MEDIO' | 'ALTO';
 
-export interface MarketAnalysis {
-  trend: MarketTrend | null;
-  /** 0 means a genuinely flat slope; null means it could not be computed. */
-  trendStrength: number | null;
-  momentum: MomentumLevel | null;
-  volatility: VolatilityLevel | null;
-  volatilityPct: number | null;
-  priceVsSmaPct: number | null;
-  /** null when the series has no movement - RSI is undefined there. */
-  rsi: number | null;
-  supportLevel: number | null;
-  resistanceLevel: number | null;
-  summaryText: string;
-  reasons: string[];
-  provenance: {
-    overall: DataProvenance;
-    trendStrength: DataProvenance;
-    supportResistance: DataProvenance;
-  };
-  dataWindow: DataWindow;
-}
 
-export interface HourlyProjectionItem {
-  horizon: string;
-  targetTime: string;
-  projectedBuy: number | null;
-  projectedSell: number | null;
-  rangeMin: number | null;
-  rangeMax: number | null;
-  confidence: number | null;
-}
 
-export interface MerchantDecisionAdvice {
-  action: 'VENDER_AHORA' | 'MANTENER_INVENTARIO' | 'RECOMPRAR_AHORA' | 'ESPERAR_RETROCESO' | 'ARBITRAJE_RAPIDO';
-  actionTitle: string;
-  actionExplanation: string;
-  optimalSellTimeWindow: string | null;
-  optimalBuyTimeWindow: string | null;
-  projectedPeakRate: number | null;
-  projectedTroughRate: number | null;
-  /** null: no cost model yet (fees, slippage, liquidity). */
-  estimatedNetProfitPer1000UsdtVes: number | null;
-  orderBookPressure: {
-    buyVolumeUsdt: number | null;
-    sellVolumeUsdt: number | null;
-    buyPressurePct: number | null;
-    sellPressurePct: number | null;
-    dominantSide: 'COMPRA' | 'VENTA' | 'EQUILIBRADO' | null;
-    buyVolume: Valued<number | null>;
-    sellVolume: Valued<number | null>;
-  };
-}
 
-export interface MarketProjections {
-  hasSufficientData: boolean;
-  insufficientDataReason?: string;
-  currentBuyPrice: number | null;
-  currentSellPrice: number | null;
 
-  currentBuy: Valued<number | null>;
-  currentSell: Valued<number | null>;
-  dataWindow: DataWindow;
-  provenance: {
-    daily: DataProvenance;
-    probabilities: DataProvenance;
-    confidence: DataProvenance;
-    seasonality: DataProvenance;
-    merchantAdvice: DataProvenance;
-    risk: DataProvenance;
-  };
-  daily: {
-    floor: number | null;
-    ceiling: number | null;
-    rangeText: string | null;
-    direction: MarketTrend | null;
-    /** null until the backtest measures real error. Never a sample-count proxy. */
-    confidencePct: number | null;
-    spreadMaxExpected: number | null;
-    reasons: string[];
-  };
-  intradayHorizons: HourlyProjectionItem[];
-  probabilities: {
-    up: number | null;
-    neutral: number | null;
-    down: number | null;
-  };
-  hourlyTimeline: HourlyChartPoint[];
-  merchantAdvice: MerchantDecisionAdvice;
-  risk: {
-    level: RiskLevel | null;
-    factors: string[];
-  };
-}
 
-export interface BacktestMetrics {
-  hasSufficientData: boolean;
-  sampleSize: number;
-  samplePeriodDays: number;
-  mae: number;
-  rmse: number;
-  mape: number;
-  directionalAccuracyPct: number;
-  lastEvaluatedAt: string;
-}
+
+
+
+
 
 /*
  * BankRateItem REMOVED in FASE 5 - the shape of the old "best price" cell.
@@ -896,6 +783,64 @@ export interface CellSeriesResponse {
     usableObservations: number;
   };
   observations: SeriesPoint[];
+}
+
+/**
+ * THE WHOLE BOOK, READ BY THE SAME ENGINE AS EVERY CELL.
+ *
+ * `projection` carries MERCADO_GENERAL as its bank and amountKey, because it
+ * describes the book and is not a statement about any bank at any amount.
+ * null before the first sweep has written observations.
+ */
+export interface GeneralProjectionResponse {
+  projection: CellProjection | null;
+  series: SeriesPoint[];
+}
+
+/** One anchor of the walk-forward replay. */
+export interface BacktestAnchor {
+  index: number;
+  timestamp: number;
+  priceAtAnchor: number | null;
+  actualPrice: number | null;
+  predictedDirection: 'UP' | 'DOWN' | 'FLAT' | null;
+  actualDirection: 'UP' | 'DOWN' | 'FLAT' | null;
+  bandLow: number | null;
+  bandHigh: number | null;
+  insideBand: boolean | null;
+  skipped: string | null;
+}
+
+/**
+ * How the projection engine ACTUALLY did, measured against a baseline.
+ *
+ * Replaces BacktestMetrics, which scored the old heuristic engine. A
+ * directional accuracy is only meaningful next to the persistence baseline -
+ * "the price will not move" - so both are reported and neither is presented as
+ * a probability of being right next time.
+ */
+export interface BacktestReport {
+  bank: string;
+  amountKey: string;
+  side: 'BUY' | 'SELL';
+  anchorsEvaluated: number;
+  anchorsSkipped: number;
+  skipReasons: Record<string, number>;
+  directionalCalls: number;
+  directionalCorrect: number;
+  directionalAccuracy: number | null;
+  bandedCalls: number;
+  bandHits: number;
+  bandCoverage: number | null;
+  baselineCorrect: number;
+  baselineAccuracy: number | null;
+  anchors: BacktestAnchor[];
+  reason: 'NO_DATA' | 'INSUFFICIENT_HISTORY' | null;
+}
+
+export interface ProjectionBacktestResponse {
+  series: { observations: number; firstTimestamp: number | null; lastTimestamp: number | null };
+  report: BacktestReport;
 }
 
 export interface MakerProjectionsResponse {

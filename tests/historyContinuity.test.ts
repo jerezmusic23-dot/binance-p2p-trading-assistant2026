@@ -14,11 +14,10 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { venezuelaHour } from '../server/patternEngine.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { ProjectionEngine } from '../server/projectionEngine.js';
-import { BacktestEngine } from '../server/backtestEngine.js';
 import { makeHistory } from './helpers/fixtures.js';
 import type { HistoryRecord } from '../server/types.js';
 
@@ -52,7 +51,7 @@ function minutes(n: number, endTs: number): HistoryRecord[] {
       id: `tick-${ts}`,
       timestamp: ts,
       dateStr: new Date(ts).toISOString(),
-      hour: ProjectionEngine.getVenezuelaHour(ts),
+      hour: venezuelaHour(ts),
       buyPrice: 945.75,
       sellPrice: 944.75,
       spreadPct: -0.11,
@@ -65,98 +64,19 @@ function minutes(n: number, endTs: number): HistoryRecord[] {
   });
 }
 
-// 21:00 VET, so the session chart has all thirteen past hours behind it.
-const NOW = Date.UTC(2026, 7, 28, 1, 0, 0);
-
-function timelineFor(history: HistoryRecord[]) {
-  const snapshot = BacktestEngine.reconstructSnapshot(history[history.length - 1]);
-  const stats = history.slice(-100);
-  const analysis = ProjectionEngine.analyzeMarket(snapshot, stats);
-  const projections = ProjectionEngine.generateProjections(
-    snapshot,
-    stats,
-    analysis,
-    NOW,
-    history
-  );
-  const past = projections.hourlyTimeline.filter((p) => !p.isProjected);
-  return {
-    past: past.length,
-    empty: past.filter((p) => p.buyPrice === null).length,
-    filled: past.filter((p) => p.buyPrice !== null).length,
-  };
-}
-
-describe('the reported symptom, reproduced exactly', () => {
-  it('100 records over 99 minutes leave 11 of 13 hours empty', () => {
-    /*
-     * The old call path: generateProjections received the 100-record window
-     * and used it for the timeline too. Passing that same window as the
-     * timeline source reproduces production verbatim.
-     */
-    const history = minutes(100, NOW);
-    const snapshot = BacktestEngine.reconstructSnapshot(history[history.length - 1]);
-    const analysis = ProjectionEngine.analyzeMarket(snapshot, history);
-    const projections = ProjectionEngine.generateProjections(snapshot, history, analysis, NOW);
-
-    const past = projections.hourlyTimeline.filter((p) => !p.isProjected);
-    const empty = past.filter((p) => p.buyPrice === null);
-
-    expect(past).toHaveLength(13);
-    expect(empty).toHaveLength(11);
-    expect(past.length - empty.length).toBe(2);
-  });
-
-  it('the gap is a window problem: the same records over a day fill the chart', () => {
-    // 24 hours of ticks, one per minute. Same data rate, wider window.
-    const result = timelineFor(minutes(24 * 60, NOW));
-
-    expect(result.past).toBe(13);
-    expect(result.empty).toBe(0);
-    expect(result.filled).toBe(13);
-  });
-
-  it('a real gap still reads as a gap - nothing is invented to fill it', () => {
-    /*
-     * Only the last three hours were captured. The earlier buckets must stay
-     * null: an absent observation is never replaced by a session curve.
-     */
-    const result = timelineFor(minutes(3 * 60, NOW));
-
-    expect(result.past).toBe(13);
-    expect(result.empty).toBeGreaterThan(0);
-    expect(result.filled).toBeGreaterThan(0);
-    expect(result.filled).toBeLessThanOrEqual(4);
-  });
-
-  it('the statistical window is untouched by the wider timeline', () => {
-    const history = minutes(24 * 60, NOW);
-    const snapshot = BacktestEngine.reconstructSnapshot(history[history.length - 1]);
-    const stats = history.slice(-100);
-
-    const analysis = ProjectionEngine.analyzeMarket(snapshot, stats);
-    const withWideTimeline = ProjectionEngine.generateProjections(
-      snapshot,
-      stats,
-      analysis,
-      NOW,
-      history
-    );
-    const withoutTimelineArg = ProjectionEngine.generateProjections(
-      snapshot,
-      stats,
-      analysis,
-      NOW
-    );
-
-    // Everything statistical is identical; only the timeline differs.
-    expect(withWideTimeline.daily).toEqual(withoutTimelineArg.daily);
-    expect(withWideTimeline.probabilities).toEqual(withoutTimelineArg.probabilities);
-    expect(withWideTimeline.intradayHorizons).toEqual(withoutTimelineArg.intradayHorizons);
-    expect(withWideTimeline.dataWindow).toEqual(withoutTimelineArg.dataWindow);
-    expect(withWideTimeline.hourlyTimeline).not.toEqual(withoutTimelineArg.hourlyTimeline);
-  });
-});
+/*
+ * THE "ELEVEN MISSING HOURS" BLOCK USED TO LIVE HERE.
+ *
+ * It reproduced a real production symptom - a thirteen-hour session chart
+ * handed a 100-record window, filling two buckets and reporting eleven as
+ * empty - and pinned the fix. Both the chart and the engine behind it are
+ * gone: the hourly session view was drawn by ProjectionEngine's session curve,
+ * which manufactured the hours that had not happened yet.
+ *
+ * The guarantee those tests really protected is that CAPTURE never loses a
+ * tick and a gap is never filled in. That is not about any chart, and it is
+ * pinned by the two blocks below, which survive unchanged.
+ */
 
 describe('history survives archiving and a restart', () => {
   it('the summary knows the range of archive + active, not just active', async () => {

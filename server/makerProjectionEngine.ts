@@ -216,6 +216,17 @@ export interface CellProjection {
  */
 export const DEFAULT_HORIZON_STEPS = 6;
 
+/**
+ * The identity a market-wide reading carries in place of a bank and an amount.
+ *
+ * A projection over every cell's observations describes the BOOK, not any
+ * bank at any amount. Giving it a real bank's name would let a market-wide
+ * finding be read as specific to that cell - the exact confusion the
+ * borrowedFrom label exists to prevent - so it carries a name that is not a
+ * bank and cannot be mistaken for one.
+ */
+export const GENERAL_MARKET_KEY = 'MERCADO_GENERAL';
+
 function points(series: readonly HistoricalObservation[], which: TrendSeries) {
   const out: { t: number; price: number }[] = [];
   for (const observation of series) {

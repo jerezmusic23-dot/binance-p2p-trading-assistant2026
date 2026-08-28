@@ -7,8 +7,6 @@
 import {
   MarketSnapshot,
   HistoryRecord,
-  MarketAnalysis,
-  MarketProjections,
   BankAmountExecutability,
   Opportunity,
   OpportunityEngineResult,
@@ -16,8 +14,6 @@ import {
   NormalizedAd,
   AlertRule,
   AlertTriggerLog,
-  BacktestMetrics,
-  WalkForwardBacktestResult,
   ExecutableMatrix,
   MarketReference,
 } from './types.js';
@@ -42,7 +38,11 @@ import {
   HistoricalMarketStore,
   type HistoricalObservation,
 } from './historicalMarketStore.js';
-import { projectCell, type CellProjection } from './makerProjectionEngine.js';
+import {
+  GENERAL_MARKET_KEY,
+  projectCell,
+  type CellProjection,
+} from './makerProjectionEngine.js';
 import {
   EMPTY_SIGNAL_MEMORY,
   evaluateSignals,
@@ -52,7 +52,6 @@ import {
 import type { CapturedListings } from './makerRecommendation.js';
 import { readMakerConfig, type MakerConfig } from './makerStrategy.js';
 import { runOpportunityEngine } from './opportunityEngine.js';
-import { BacktestEngine } from './backtestEngine.js';
 
 /**
  * How far back the hourly session chart reads.
@@ -71,7 +70,7 @@ import {
 import { mapBinanceAdToArbitrageLeg } from './arbitrageSides.js';
 import { assessPayTypeMapping, describeMappingForLog } from './payTypeMappingStatus.js';
 import { StorageEngine } from './storage.js';
-import { ProjectionEngine } from './projectionEngine.js';
+import { venezuelaHour } from './patternEngine.js';
 import { TelegramNotifier } from './telegramNotifier.js';
 
 export class CentralMarketStore {
@@ -200,6 +199,24 @@ export class CentralMarketStore {
 
   /** Projections and signals from the latest sweep. Recomputed, never stored. */
   private lastProjections: CellProjection[] = [];
+  /** The same reading over the whole book. Recomputed with the rest. */
+  private lastMarketProjection: CellProjection | null = null;
+  /**
+   * The tail of the general series, for the chart that draws it.
+   *
+   * Bounded so a long-running process cannot hand a growing array to every
+   * HTTP reader. Raw observations, in order, exactly as stored - a gap in
+   * capture stays a gap. It bounds the CHART and the replay only: the
+   * projection itself is computed over the whole series before this slice.
+   */
+  private lastGeneralSeries: HistoricalObservation[] = [];
+  /**
+   * 42 cells observed every six sweeps is about 42 observations per cycle, so
+   * this is a few hours of book - enough to draw and to replay, bounded enough
+   * that a process running for a week does not serialise a week of ticks on
+   * every request.
+   */
+  private static readonly GENERAL_SERIES_TAIL = 1_200;
   private lastSignals: MarketSignal[] = [];
   /**
    * The trend each cell was last seen in, so a CHANGE can be detected.
@@ -251,13 +268,19 @@ export class CentralMarketStore {
   private lastCaptureState: 'LIVE' | 'STALE' | 'OFFLINE' | null = null;
   private lastStorageError: string | null = null;
   private matrixPollingInProgress = false;
+  /*
+   * ONLY THE SNAPSHOT IS CACHED NOW.
+   *
+   * This map used to carry an `analysis` and a `projections` computed by the
+   * old engine on every filtered query, which meant a screen asking for
+   * "Banesco 20K" also triggered a heuristic forecast nobody had asked for.
+   * The observed snapshot is what a filter is actually for.
+   */
   private filteredCache = new Map<
     string,
     {
       timestamp: number;
       snapshot: MarketSnapshot;
-      analysis: MarketAnalysis | null;
-      projections: MarketProjections | null;
     }
   >();
 
@@ -417,7 +440,7 @@ export class CentralMarketStore {
           id: `tick-${snapshot.timestamp}`,
           timestamp: snapshot.timestamp,
           dateStr: new Date(snapshot.timestamp).toISOString(),
-          hour: ProjectionEngine.getVenezuelaHour(snapshot.timestamp),
+          hour: venezuelaHour(snapshot.timestamp),
           buyPrice: bestBuyPrice,
           sellPrice: bestSellPrice,
           spreadPct: spreadPercentage,
@@ -751,16 +774,7 @@ export class CentralMarketStore {
         filterAmount: normalizedAmount > 0 ? normalizedAmount : null,
       };
 
-      const history = StorageEngine.getHistory(100);
-      const analysis = ProjectionEngine.analyzeMarket(snapshot, history);
-      const projections = ProjectionEngine.generateProjections(snapshot, history, analysis);
-
-      this.filteredCache.set(cacheKey, {
-        timestamp: Date.now(),
-        snapshot,
-        analysis,
-        projections,
-      });
+      this.filteredCache.set(cacheKey, { timestamp: Date.now(), snapshot });
 
       return {
         snapshot,
@@ -786,49 +800,15 @@ export class CentralMarketStore {
     }
   }
 
-  /**
-   * Gets Market Analysis computed by Projection Engine with Multi-Filter support
+  /*
+   * getFilteredAnalysis and getFilteredProjections USED TO LIVE HERE.
+   *
+   * They served /market/analysis and /market/projections, both of which were
+   * the old engine, and both endpoints are gone. The filtered SNAPSHOT stays -
+   * it is an observed price for a bank and an amount, which is a different and
+   * legitimate question - and the analysis of a cell now comes from
+   * /market/projections/cell, which reads that cell's own stored series.
    */
-  public async getFilteredAnalysis(bank?: string, amount?: number): Promise<MarketAnalysis | null> {
-    const normalizedBank = !bank || bank === 'ALL' ? 'ALL' : bank;
-    const normalizedAmount = !amount || isNaN(amount) || amount <= 0 ? 0 : amount;
-
-    if (normalizedBank === 'ALL' && normalizedAmount === 0) {
-      return this.getMarketAnalysis();
-    }
-
-    const cacheKey = `${normalizedBank}_${normalizedAmount}`;
-    const cached = this.filteredCache.get(cacheKey);
-
-    if (cached && Date.now() - cached.timestamp < 10000 && cached.analysis) {
-      return cached.analysis;
-    }
-
-    await this.getFilteredSnapshot(bank, amount);
-    return this.filteredCache.get(cacheKey)?.analysis || this.getMarketAnalysis();
-  }
-
-  /**
-   * Gets Market Projections computed by Projection Engine with Multi-Filter support
-   */
-  public async getFilteredProjections(bank?: string, amount?: number): Promise<MarketProjections | null> {
-    const normalizedBank = !bank || bank === 'ALL' ? 'ALL' : bank;
-    const normalizedAmount = !amount || isNaN(amount) || amount <= 0 ? 0 : amount;
-
-    if (normalizedBank === 'ALL' && normalizedAmount === 0) {
-      return this.getMarketProjections();
-    }
-
-    const cacheKey = `${normalizedBank}_${normalizedAmount}`;
-    const cached = this.filteredCache.get(cacheKey);
-
-    if (cached && Date.now() - cached.timestamp < 10000 && cached.projections) {
-      return cached.projections;
-    }
-
-    await this.getFilteredSnapshot(bank, amount);
-    return this.filteredCache.get(cacheKey)?.projections || this.getMarketProjections();
-  }
 
   /**
    * Refreshes a multi-filter snapshot immediately
@@ -854,72 +834,22 @@ export class CentralMarketStore {
     return this.getFilteredSnapshot(bank, amount);
   }
 
-  /**
-   * Gets Market Analysis computed by Projection Engine
-   */
-  public getMarketAnalysis(): MarketAnalysis | null {
-    const { snapshot } = this.getCurrentSnapshot();
-    if (!snapshot) return null;
-
-    const history = StorageEngine.getHistory(100);
-    return ProjectionEngine.analyzeMarket(snapshot, history);
-  }
-
-  /**
-   * Gets Market Projections computed by Projection Engine
-   */
-  public getMarketProjections(): MarketProjections | null {
-    const { snapshot } = this.getCurrentSnapshot();
-    if (!snapshot) return null;
-
-    /*
-     * TWO WINDOWS, because two consumers need different things.
-     *
-     * `history` is the statistical window: 100 records, unchanged, and the
-     * basis of every projection figure. `timelineHistory` is the session day
-     * the hourly chart draws, which needs every tick of the last 24 hours -
-     * asking it to render thirteen hour-buckets out of 99 minutes of data is
-     * what produced "11 of the 13 past hours have no tick" while those ticks
-     * sat on disk.
-     *
-     * Bounded by TIME, not by count, and read from the same in-memory array,
-     * so it costs a filter rather than a disk read.
-     */
-    const history = StorageEngine.getHistory(100);
-    const timelineHistory = StorageEngine.getHistory(
-      undefined,
-      Date.now() - TIMELINE_WINDOW_MS
-    );
-    const analysis = ProjectionEngine.analyzeMarket(snapshot, history);
-    return ProjectionEngine.generateProjections(
-      snapshot,
-      history,
-      analysis,
-      undefined,
-      timelineHistory
-    );
-  }
-
-  /**
-   * Gets Backtest Metrics from real historical dataset
-   */
-  public getBacktestMetrics(): BacktestMetrics {
-    const history = StorageEngine.getHistory();
-    return ProjectionEngine.runBacktest(history);
-  }
-
-  /**
-   * Walk-forward backtest of the production projection engine.
+  /*
+   * getMarketAnalysis, getMarketProjections, getBacktestMetrics and
+   * getWalkForwardBacktest USED TO LIVE HERE, and all four are gone with the
+   * engine behind them.
    *
-   * source is REAL_HISTORY because StorageEngine is the persisted store this
-   * process actually writes to - the file under DATA_DIR, not a fixture. A
-   * test calling BacktestEngine.run directly passes SYNTHETIC_FIXTURE and its
-   * output can never be mistaken for market evidence.
+   * ProjectionEngine answered "where is the market going" with hand-picked
+   * constants - a 1.6-sigma band, a per-hour session curve, a 0.0035 seasonal
+   * coefficient, a point-scored probability distribution - while
+   * makerProjectionEngine answered the same question from the stored series.
+   * Two engines, two answers, and nothing in the interface said which was
+   * speaking.
+   *
+   * There is one now. getMarketProjection() reads the whole book with the same
+   * engine every cell uses, and /market/projections/backtest replays THAT
+   * engine rather than scoring the heuristic.
    */
-  public getWalkForwardBacktest(): WalkForwardBacktestResult {
-    const history = StorageEngine.getHistory();
-    return BacktestEngine.run(history, 'REAL_HISTORY');
-  }
 
   /**
    * Bank Multi-Filter Matrix Aggregator
@@ -1361,6 +1291,33 @@ export class CentralMarketStore {
       }
     }
 
+    /*
+     * THE MARKET AS A WHOLE, READ BY THE SAME ENGINE AS EVERY CELL.
+     *
+     * The old ProjectionEngine used to answer this question with a different
+     * method - a 1.6-sigma band, a hand-picked session curve, a seasonal
+     * coefficient - and the two answers could disagree about the same market
+     * with nobody able to tell which was speaking. There is one engine now.
+     *
+     * Labelled MERCADO_GENERAL because it describes the BOOK and is not a
+     * statement about any bank at any amount: bank and amountKey carry that
+     * name rather than a real cell's, so nothing downstream can mistake it.
+     */
+    this.lastGeneralSeries = generalSeries.slice(-CentralMarketStore.GENERAL_SERIES_TAIL);
+    this.lastMarketProjection =
+      generalSeries.length === 0
+        ? null
+        : projectCell({
+            bank: GENERAL_MARKET_KEY,
+            bankDisplayName: 'Mercado general',
+            amountKey: GENERAL_MARKET_KEY,
+            amountVes: 0,
+            series: generalSeries,
+            currentBuyPrice: this.currentSnapshot?.strategicBuyPrice ?? null,
+            currentSellPrice: this.currentSnapshot?.strategicSellPrice ?? null,
+            includeDayPatterns: true,
+          });
+
     const evaluated = evaluateSignals({ projections, memory: this.signalMemory });
     this.signalMemory = evaluated.memory;
     this.lastProjections = projections;
@@ -1381,6 +1338,20 @@ export class CentralMarketStore {
   /** The latest projection per cell, or an empty list before the first sweep. */
   public getProjections(): { projections: CellProjection[]; signals: MarketSignal[] } {
     return { projections: this.lastProjections, signals: this.lastSignals };
+  }
+
+  /**
+   * The whole book read as one series, by the same engine as every cell.
+   *
+   * null until the first sweep has written observations. Never a placeholder:
+   * a market nobody has observed yet has no reading, and saying so is the
+   * answer.
+   */
+  public getMarketProjection(): {
+    projection: CellProjection | null;
+    series: HistoricalObservation[];
+  } {
+    return { projection: this.lastMarketProjection, series: this.lastGeneralSeries };
   }
 
   /** The captured books, keyed by the tradeType each was requested with. */

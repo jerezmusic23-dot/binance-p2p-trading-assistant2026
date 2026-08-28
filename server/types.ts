@@ -359,197 +359,22 @@ export interface StorageDiagnostics {
   lastArchiveFile: string | null;
 }
 
-export interface HourlyChartPoint {
-  hour: number;
-  label: string; // e.g. "8 AM", "9 AM", "4 PM"
-  fullTimestamp?: number;
-  sellPrice: number | null; // Tasa de venta real
-  buyPrice: number | null; // Tasa de recompra real
-  spreadPct: number | null;
-  projectedSell?: number | null;
-  projectedBuy?: number | null;
-  floor?: number | null;
-  ceiling?: number | null;
-  isPeak?: boolean;
-  isTrough?: boolean;
-  isCoincide?: boolean;
-  isProjected: boolean;
-  notes?: string;
-  /**
-   * REAL      - a stored tick was found for this hour.
-   * PROJECTED - a future hour extrapolated forward.
-   * HEURISTIC - no tick existed and the value was synthesised from the
-   *             hardcoded session curve. C1 labels it; C2 makes it null.
-   */
-  provenance: DataProvenance;
-  provenanceReason?: string;
-}
+
 
 export type MarketTrend = 'ALCISTA' | 'BAJISTA' | 'LATERAL';
 export type MomentumLevel = 'ALTO' | 'MODERADO' | 'NEUTRO' | 'NEGATIVO';
 export type VolatilityLevel = 'ALTA' | 'MEDIA' | 'BAJA';
 export type RiskLevel = 'BAJO' | 'MEDIO' | 'ALTO';
 
-export interface MarketAnalysis {
-  /** null when there is no price series to classify. */
-  trend: MarketTrend | null;
-  /**
-   * 0 to 100. 0 means a genuinely flat slope. null means the slope could not
-   * be computed at all. There is no artificial floor.
-   */
-  trendStrength: number | null;
-  momentum: MomentumLevel | null;
-  volatility: VolatilityLevel | null;
-  volatilityPct: number | null;
-  priceVsSmaPct: number | null;
-  /** null when the series has no movement at all - RSI is undefined there. */
-  rsi: number | null;
-  supportLevel: number | null;
-  resistanceLevel: number | null;
-  summaryText: string;
-  reasons: string[];
 
-  provenance: {
-    /** trend, momentum, volatility, rsi, priceVsSmaPct: derived from stored ticks. */
-    overall: DataProvenance;
-    /** |slope%| * 600 + 35 - the constants have no empirical basis. */
-    trendStrength: DataProvenance;
-    /** min/max +/- 1.6 standard deviations - the multiplier is hand-picked. */
-    supportResistance: DataProvenance;
-  };
-  /** The stored observations `overall` was computed from. */
-  dataWindow: DataWindow;
-}
 
-export interface HourlyProjectionItem {
-  horizon: string; // "+1H", "+2H", "+4H", "+6H", "+12H", "+24H"
-  targetTime: string;
-  projectedBuy: number | null;
-  projectedSell: number | null;
-  rangeMin: number | null;
-  rangeMax: number | null;
-  /** null until the backtest measures real error - never a sample-count proxy. */
-  confidence: number | null;
-}
 
-export interface MerchantDecisionAdvice {
-  action: 'VENDER_AHORA' | 'MANTENER_INVENTARIO' | 'RECOMPRAR_AHORA' | 'ESPERAR_RETROCESO' | 'ARBITRAJE_RAPIDO';
-  actionTitle: string;
-  actionExplanation: string;
-  /** null - these windows are not computed from anything yet. */
-  optimalSellTimeWindow: string | null;
-  optimalBuyTimeWindow: string | null;
-  projectedPeakRate: number | null;
-  projectedTroughRate: number | null;
-  /**
-   * null. The former value was (ceiling - floor) * 1000, which assumes
-   * capturing both extremes and ignores fees, slippage and liquidity. A real
-   * figure requires the cost model of project rule 7.
-   */
-  estimatedNetProfitPer1000UsdtVes: number | null;
-  orderBookPressure: {
-    buyVolumeUsdt: number | null;
-    sellVolumeUsdt: number | null;
-    buyPressurePct: number | null;
-    sellPressurePct: number | null;
-    dominantSide: 'COMPRA' | 'VENTA' | 'EQUILIBRADO' | null;
-    /**
-     * Provenance mirrors of the two volumes. AGGREGATED when summed from real
-     * ads, HEURISTIC when the order book was empty and a placeholder was used.
-     */
-    buyVolume: Valued<number | null>;
-    sellVolume: Valued<number | null>;
-  };
-}
 
-export interface MarketProjections {
-  /**
-   * True only when there is a valid live price AND at least
-   * ProjectionEngine.MIN_SAMPLES_FOR_PROJECTION stored observations.
-   */
-  hasSufficientData: boolean;
-  /** Populated whenever hasSufficientData is false. */
-  insufficientDataReason?: string;
-  currentBuyPrice: number | null;
-  currentSellPrice: number | null;
 
-  /** Provenance mirrors of currentBuyPrice / currentSellPrice. */
-  currentBuy: Valued<number | null>;
-  currentSell: Valued<number | null>;
-  /** The stored observations these projections were computed from. */
-  dataWindow: DataWindow;
-  provenance: {
-    /** floor / ceiling: extrapolations about the rest of the session. */
-    daily: DataProvenance;
-    /** Point-scoring rules, not a calibrated distribution. */
-    probabilities: DataProvenance;
-    /** 62 + min(25, n * 0.35) - a function of sample count, not of error. */
-    confidence: DataProvenance;
-    /** Fixed hourly coefficients and constant trade windows. */
-    seasonality: DataProvenance;
-    /** if/else over trend, pressure and clock time. */
-    merchantAdvice: DataProvenance;
-    /** Fixed thresholds (volatility ALTA, spread > 1.8%, pressure > 70%). */
-    risk: DataProvenance;
-  };
-  
-  daily: {
-    floor: number | null; // Piso del día
-    ceiling: number | null; // Techo del día
-    /** null when there is no range to describe. */
-    rangeText: string | null;
-    direction: MarketTrend | null;
-    /**
-     * null until Phase 8 derives it from measured projection error. It is NOT
-     * replaced by another arbitrary number.
-     */
-    confidencePct: number | null;
-    /** The real expected spread, with no artificial floor. */
-    spreadMaxExpected: number | null;
-    reasons: string[];
-  };
-  
-  intradayHorizons: HourlyProjectionItem[];
-  
-  probabilities: {
-    up: number | null; // Probabilidad subir %
-    neutral: number | null; // Probabilidad mantener %
-    down: number | null; // Probabilidad bajar %
-  };
-  
-  hourlyTimeline: HourlyChartPoint[];
-  
-  merchantAdvice: MerchantDecisionAdvice;
-  
-  risk: {
-    level: RiskLevel | null;
-    factors: string[];
-  };
-}
 
-export interface BacktestMetrics {
-  /**
-   * FALSE, always, today.
-   *
-   * runBacktest fits a 5-point linear slope over history.buyPrice and predicts
-   * the NEXT stored record - one polling step, about 6 seconds ahead.
-   * generateProjections uses a different model entirely (volatility bands,
-   * session curves, seasonal factors, heuristic probabilities) over horizons
-   * of 1 to 4 hours. The two are not comparable, so these metrics do not
-   * validate the projections the dashboard shows.
-   */
-  validatesProductionModel: boolean;
-  /** What was actually measured, so the number cannot be read as more. */
-  modelDescription: string;
-  hasSufficientData: boolean;
-  sampleSize: number;
-  samplePeriodDays: number;
-  mae: number; // Mean Absolute Error
-  rmse: number; // Root Mean Square Error
-  mape: number; // Mean Absolute Percentage Error (%)
-  directionalAccuracyPct: number; // % of times predicted trend matched actual
-  lastEvaluatedAt: string;
-}
+
+
+
 
 /* ------------------------------------------------------------------------ *
  * WALK-FORWARD BACKTEST
@@ -644,45 +469,7 @@ export interface HorizonBacktestResult {
   bandSamples: number;
 }
 
-export interface WalkForwardBacktestResult {
-  status: 'ok' | 'insufficient_data';
-  /**
-   * True only when this run actually scored the production engine on at least
-   * one horizon. An implemented backtest with nothing to measure validates
-   * nothing, and says so.
-   */
-  validatesProductionModel: boolean;
-  method: 'WALK_FORWARD_PRODUCTION_MODEL';
-  modelDescription: string;
-  source: BacktestSource;
-  baseline: 'PERSISTENCE';
 
-  /** Basis of the last anchor evaluated, and the tally across all of them. */
-  basis: SeriesBasis | null;
-  basisCounts: { strategic: number; raw: number };
-
-  totalRecords: number;
-  strategicRecords: number;
-  spanMinutes: number | null;
-  medianIntervalSeconds: number | null;
-  minSamplesForProjection: number;
-  projectionWindowSize: number;
-  anchorsConsidered: number;
-
-  horizons: HorizonBacktestResult[];
-
-  /**
-   * Everything production computes that this backtest cannot reproduce from
-   * stored history, named explicitly. An empty list would mean exact
-   * reproduction; it is not empty, and pretending otherwise would be the
-   * dishonest part.
-   */
-  reproductionGaps: string[];
-
-  /** Always false here. Metrics are reported; confidence is not published. */
-  confidencePublished: false;
-  evaluatedAt: string;
-}
 
 /* ------------------------------------------------------------------------ *
  * TELEGRAM - SYSTEM ALERTS AND OPPORTUNITY LIFECYCLE

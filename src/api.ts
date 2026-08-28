@@ -1,15 +1,14 @@
 import {
   LatestApiResponse,
-  MarketAnalysis,
-  MarketProjections,
   ExecutableMatrixResponse,
   MakerMatrixResponse,
   MakerProjectionsResponse,
+  GeneralProjectionResponse,
   CellSeriesResponse,
   OpportunitiesResponse,
   HistoryRecord,
   HistorySummary,
-  BacktestMetrics,
+  ProjectionBacktestResponse,
   AlertRule,
   AlertTriggerLog,
 } from './types';
@@ -53,23 +52,15 @@ export class ApiService {
     return requestJson<LatestApiResponse>(`/api/market/latest${qs}`);
   }
 
-  public static async getMarketAnalysis(bank?: string, amount?: number): Promise<{ analysis: MarketAnalysis | null }> {
-    const qs = buildQuery(bank, amount);
-    return requestJson<{ analysis: MarketAnalysis | null }>(`/api/market/analysis${qs}`);
-  }
-
-  public static async getMarketProjections(bank?: string, amount?: number): Promise<{ projections: MarketProjections | null }> {
-    const qs = buildQuery(bank, amount);
-    return requestJson<{ projections: MarketProjections | null }>(`/api/market/projections${qs}`);
-  }
-
-  /**
-   * The executable matrix and the global reference, in one response.
+  /*
+   * getMarketAnalysis and getMarketProjections USED TO LIVE HERE.
    *
-   * Deliberately returns both together and named apart: a consumer has to
-   * choose `executableMatrix` or `marketReference` explicitly, and cannot pick
-   * up a global price by reaching for a field that merely sounds like a rate.
+   * They fetched /api/market/analysis and /api/market/projections, both served
+   * by the old ProjectionEngine, and both endpoints are gone. What replaces
+   * them: getGeneralProjection() for the book as a whole, getMakerProjections()
+   * for every cell, and getCellSeries() for the raw observations behind either.
    */
+
   public static async getExecutableMatrix(
     refresh = false
   ): Promise<ExecutableMatrixResponse> {
@@ -97,6 +88,19 @@ export class ApiService {
    */
   public static async getMakerProjections(): Promise<MakerProjectionsResponse> {
     return requestJson<MakerProjectionsResponse>('/api/market/projections/maker');
+  }
+
+  /**
+   * The whole book, read by the SAME engine as every cell.
+   *
+   * This replaced getMarketProjections(), which was served by the old
+   * ProjectionEngine and returned a 1.6-sigma band, a hand-picked session
+   * curve and a point-scored probability distribution. What comes back here
+   * is empirical: percentiles of moves the book actually made, zones it
+   * actually turned in, and a horizon measured from the observed cadence.
+   */
+  public static async getGeneralProjection(): Promise<GeneralProjectionResponse> {
+    return requestJson<GeneralProjectionResponse>('/api/market/projections/general');
   }
 
   /**
@@ -131,8 +135,29 @@ export class ApiService {
     );
   }
 
-  public static async getBacktestMetrics(): Promise<{ backtest: BacktestMetrics }> {
-    return requestJson<{ backtest: BacktestMetrics }>('/api/market/backtest');
+  /**
+   * How the projection engine ACTUALLY did, replayed prefix by prefix.
+   *
+   * This replaced getBacktestMetrics(), which measured the old
+   * ProjectionEngine and reported MAE / MAPE / directional accuracy for a
+   * forecast built from hand-picked multipliers. Measuring a heuristic
+   * precisely does not make it evidence.
+   *
+   * The report that comes back is a walk-forward over the stored series: every
+   * anchor is computed from a PREFIX, so nothing it reports could have seen
+   * the future it is scored against, and it carries a persistence baseline -
+   * "the price will not move" - so a directional accuracy can be read against
+   * something rather than admired on its own.
+   */
+  public static async getProjectionBacktest(
+    bank = 'MERCADO_GENERAL',
+    amountKey = 'MERCADO_GENERAL',
+    side: 'BUY' | 'SELL' = 'BUY'
+  ): Promise<ProjectionBacktestResponse> {
+    return requestJson<ProjectionBacktestResponse>(
+      `/api/market/projections/backtest?bank=${encodeURIComponent(bank)}` +
+        `&amount=${encodeURIComponent(amountKey)}&side=${side}`
+    );
   }
 
   public static async refreshMarket(bank?: string, amount?: number): Promise<LatestApiResponse> {

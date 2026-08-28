@@ -7,7 +7,7 @@ import { Router } from 'express';
 import { selectBestMakerCell } from './makerMatrix.js';
 import { HistoricalMarketStore } from './historicalMarketStore.js';
 import { runProjectionBacktest } from './projectionBacktest.js';
-import { projectCell } from './makerProjectionEngine.js';
+import { GENERAL_MARKET_KEY, projectCell } from './makerProjectionEngine.js';
 import { CentralMarketStore } from './centralStore.js';
 import { StorageEngine } from './storage.js';
 import { AlertRule } from './types.js';
@@ -28,29 +28,6 @@ apiRouter.get('/market/latest', async (req, res) => {
 });
 
 // 2. Technical & Statistical Market Analysis (supports bank and amount filter)
-apiRouter.get('/market/analysis', async (req, res) => {
-  try {
-    const bank = (req.query.bank as string) || 'ALL';
-    const amount = req.query.amount ? parseFloat(req.query.amount as string) : undefined;
-    const analysis = await centralStore.getFilteredAnalysis(bank, amount);
-    res.json({ analysis });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message || 'Error computing analysis' });
-  }
-});
-
-// 3. Projections & Probabilities (supports bank and amount filter)
-apiRouter.get('/market/projections', async (req, res) => {
-  try {
-    const bank = (req.query.bank as string) || 'ALL';
-    const amount = req.query.amount ? parseFloat(req.query.amount as string) : undefined;
-    const projections = await centralStore.getFilteredProjections(bank, amount);
-    res.json({ projections });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message || 'Error computing projections' });
-  }
-});
-
 // 4. Multi-Filter Bank Matrix
 /*
  * Two structures, named so they cannot be confused.
@@ -114,6 +91,32 @@ apiRouter.get('/market/projections/maker', (_req, res) => {
     res.json({ projections, signals });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Error building maker projections' });
+  }
+});
+
+/*
+ * THE WHOLE BOOK, READ BY THE SAME ENGINE AS EVERY CELL.
+ *
+ * This replaces /market/projections, which was served by the old
+ * ProjectionEngine: a 1.6-sigma band around a rolling min/max, a hand-picked
+ * intraday session curve, a 0.0035 seasonal coefficient and a point-scored
+ * probability distribution. None of those coefficients was measured, and the
+ * screen presented all of them as a forecast.
+ *
+ * What comes back instead is a projection over the general series - every
+ * cell's observations in one chronological list - computed by
+ * makerProjectionEngine: three trend horizons with their real spans, an
+ * empirical band that is the 10th and 90th percentiles of the moves this book
+ * actually made, zones the price genuinely turned in, and a horizon in minutes
+ * measured from the observed cadence. Empty until the first sweep has written
+ * observations: a market nobody has observed has no reading.
+ */
+apiRouter.get('/market/projections/general', (_req, res) => {
+  try {
+    const { projection, series } = centralStore.getMarketProjection();
+    res.json({ projection, series });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Error building market projection' });
   }
 });
 
@@ -205,14 +208,32 @@ apiRouter.get('/market/projections/backtest', (req, res) => {
       return;
     }
 
-    const series = HistoricalMarketStore.load(bank, amountKey);
+    /*
+     * MERCADO_GENERAL replays the whole book rather than one cell.
+     *
+     * The general series is not a file on disk - it is every cell's
+     * observations in one chronological list, built by the sweep - so it is
+     * read from the store instead of from HistoricalMarketStore. Everything
+     * else about the replay is identical, prefix by prefix.
+     */
+    const general = bank === GENERAL_MARKET_KEY;
+    const series = general
+      ? centralStore.getMarketProjection().series
+      : HistoricalMarketStore.load(bank, amountKey);
+
     res.json({
-      series: HistoricalMarketStore.describe(bank, amountKey),
+      series: general
+        ? {
+            observations: series.length,
+            firstTimestamp: series[0]?.timestamp ?? null,
+            lastTimestamp: series[series.length - 1]?.timestamp ?? null,
+          }
+        : HistoricalMarketStore.describe(bank, amountKey),
       report: runProjectionBacktest({
         bank,
-        bankDisplayName: bank,
+        bankDisplayName: general ? 'Mercado general' : bank,
         amountKey,
-        amountVes: series[0]?.amountVes ?? 0,
+        amountVes: general ? 0 : (series[0]?.amountVes ?? 0),
         series,
         side,
       }),
@@ -290,43 +311,19 @@ apiRouter.get('/market/history', (req, res) => {
   }
 });
 
-// 6. Backtest Metrics
-apiRouter.get('/market/backtest', (req, res) => {
-  try {
-    /*
-     * Two measurements, both reported.
-     *
-     * backtest      - the legacy one-step linear fit over RAW buyPrice. It
-     *                 still says validatesProductionModel: false, because it
-     *                 still does not measure the engine that publishes.
-     * walkForward   - the production engine itself, replayed at every past
-     *                 record. This is the one that can validate the model, and
-     *                 it does so only when it actually scored samples.
-     *
-     * The old one is kept rather than replaced: it is the record of what was
-     * being measured before, and deleting it would erase the comparison.
-     */
-    const backtest = centralStore.getBacktestMetrics();
-    const walkForward = centralStore.getWalkForwardBacktest();
-    res.json({ backtest, walkForward });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message || 'Error computing backtest' });
-  }
-});
+/*
+ * /market/backtest USED TO LIVE HERE, and it is gone with the engine it scored.
+ *
+ * It reported two things about ProjectionEngine: a legacy one-step linear fit,
+ * and a walk-forward replay of the same heuristic. Measuring a hand-picked
+ * 1.6-sigma band precisely does not turn it into evidence, and the engine that
+ * produced it is no longer in the production chain at all.
+ *
+ * /market/projections/backtest replaces it. It replays the engine that is
+ * actually running, prefix by prefix, and reports a persistence baseline
+ * alongside the accuracy - so a number can be read against something.
+ */
 
-// 7. On-demand Refresh (supports bank and amount filter)
-apiRouter.post('/market/refresh', async (req, res) => {
-  try {
-    const bank = (req.query.bank as string) || (req.body?.bank as string) || 'ALL';
-    const amount = req.query.amount ? parseFloat(req.query.amount as string) : req.body?.amount ? parseFloat(req.body.amount) : undefined;
-    const data = await centralStore.refreshFilteredMarket(bank, amount);
-    res.json({ success: true, ...data });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message || 'Refresh failed' });
-  }
-});
-
-// 8. Alerts & Rules Management
 apiRouter.get('/alerts', (req, res) => {
   try {
     const alerts = StorageEngine.getAlerts();

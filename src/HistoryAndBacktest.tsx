@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { HistoryRecord, HistorySummary, BacktestMetrics } from './types';
+import { HistoryRecord, HistorySummary, BacktestReport } from './types';
 import { ApiService } from './api';
 import {
   History,
@@ -21,7 +21,7 @@ export const HistoryAndBacktest: React.FC = () => {
   const [range, setRange] = useState<string>('24h');
   const [records, setRecords] = useState<HistoryRecord[]>([]);
   const [summary, setSummary] = useState<HistorySummary | null>(null);
-  const [backtest, setBacktest] = useState<BacktestMetrics | null>(null);
+  const [backtest, setBacktest] = useState<BacktestReport | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
 
   const loadData = async (selectedRange: string) => {
@@ -29,11 +29,11 @@ export const HistoryAndBacktest: React.FC = () => {
       setIsLoading(true);
       const [histRes, backRes] = await Promise.all([
         ApiService.getHistory(selectedRange),
-        ApiService.getBacktestMetrics(),
+        ApiService.getProjectionBacktest(),
       ]);
       setRecords(histRes.records || []);
       setSummary(histRes.summary || null);
-      setBacktest(backRes.backtest || null);
+      setBacktest(backRes.report ?? null);
     } catch (err) {
       console.error('Error loading history and backtest:', err);
     } finally {
@@ -170,47 +170,80 @@ export const HistoryAndBacktest: React.FC = () => {
           <div>
             <h3 className="text-xs font-bold text-[#848e9c] uppercase tracking-wider flex items-center gap-2">
               <Sparkles className="w-4 h-4 text-[#FCD535]" />
-              MÉTRICAS DE PRECISIÓN HISTÓRICA DEL MODELO (BACKTESTING)
+              BACKTEST DEL MOTOR DE PROYECCIÓN (MERCADO GENERAL)
             </h3>
             <p className="text-[11px] text-[#848e9c]">
-              Evaluación de predicciones pasadas vs precios reales que ocurrieron.
+              Reproducción hacia adelante sobre el histórico real: cada ancla se calcula con un
+              prefijo de la serie, así que nada de lo que mide pudo ver el futuro que puntúa.
             </p>
           </div>
         </div>
 
-        {backtest?.hasSufficientData ? (
+        {backtest !== null && backtest.reason === null ? (
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            {/*
+              DIRECTIONAL ACCURACY IS ONLY MEANINGFUL NEXT TO A BASELINE.
+
+              This card used to show a bare percentage for the old engine,
+              alongside MAE and MAPE. Measuring a heuristic to two decimals does
+              not make it evidence, and 55% sounds like skill until you learn
+              that "the price will not move" scored 58% on the same series. Both
+              are shown, side by side, and neither is a probability of being
+              right next time.
+            */}
             <div className="p-3.5 rounded bg-[#111417] border border-[#2b2f36]">
-              <span className="text-[10px] text-[#848e9c] uppercase font-mono block">Precisión Direccional</span>
-              <span className="text-xl font-bold font-mono text-[#02c076]">{backtest.directionalAccuracyPct}%</span>
-              <span className="text-[10px] text-[#848e9c] block mt-1">Acierto de tendencia</span>
+              <span className="text-[10px] text-[#848e9c] uppercase font-mono block">Acierto direccional</span>
+              <span className="text-xl font-bold font-mono text-[#02c076]">
+                {backtest.directionalAccuracy === null
+                  ? '--'
+                  : `${(backtest.directionalAccuracy * 100).toFixed(1)}%`}
+              </span>
+              <span className="text-[10px] text-[#848e9c] block mt-1">
+                {backtest.directionalCorrect} de {backtest.directionalCalls} llamadas
+              </span>
             </div>
 
             <div className="p-3.5 rounded bg-[#111417] border border-[#2b2f36]">
-              <span className="text-[10px] text-[#848e9c] uppercase font-mono block">Error Absoluto (MAE)</span>
-              <span className="text-xl font-bold font-mono text-[#FCD535]">{backtest.mae} <span className="text-xs text-[#848e9c]">VES</span></span>
-              <span className="text-[10px] text-[#848e9c] block mt-1">Mean Absolute Error</span>
+              <span className="text-[10px] text-[#848e9c] uppercase font-mono block">Base "no se mueve"</span>
+              <span className="text-xl font-bold font-mono text-[#FCD535]">
+                {backtest.baselineAccuracy === null
+                  ? '--'
+                  : `${(backtest.baselineAccuracy * 100).toFixed(1)}%`}
+              </span>
+              <span className="text-[10px] text-[#848e9c] block mt-1">
+                Referencia: sin esto, el acierto no significa nada
+              </span>
             </div>
 
             <div className="p-3.5 rounded bg-[#111417] border border-[#2b2f36]">
-              <span className="text-[10px] text-[#848e9c] uppercase font-mono block">Error Porcentual (MAPE)</span>
-              <span className="text-xl font-bold font-mono text-[#e0e0e0]">{backtest.mape}%</span>
-              <span className="text-[10px] text-[#848e9c] block mt-1">Desviación % promedio</span>
+              <span className="text-[10px] text-[#848e9c] uppercase font-mono block">Cobertura de la banda</span>
+              <span className="text-xl font-bold font-mono text-[#e0e0e0]">
+                {backtest.bandCoverage === null
+                  ? '--'
+                  : `${(backtest.bandCoverage * 100).toFixed(1)}%`}
+              </span>
+              <span className="text-[10px] text-[#848e9c] block mt-1">
+                {backtest.bandHits} de {backtest.bandedCalls} dentro del rango
+              </span>
             </div>
 
             <div className="p-3.5 rounded bg-[#111417] border border-[#2b2f36]">
-              <span className="text-[10px] text-[#848e9c] uppercase font-mono block">Muestras Evaluadas</span>
-              <span className="text-xl font-bold font-mono text-[#e0e0e0]">{backtest.sampleSize}</span>
-              <span className="text-[10px] text-[#848e9c] block mt-1">Ventanas históricas</span>
+              <span className="text-[10px] text-[#848e9c] uppercase font-mono block">Anclas evaluadas</span>
+              <span className="text-xl font-bold font-mono text-[#e0e0e0]">{backtest.anchorsEvaluated}</span>
+              <span className="text-[10px] text-[#848e9c] block mt-1">
+                {backtest.anchorsSkipped} omitidas por falta de datos
+              </span>
             </div>
           </div>
         ) : (
           <div className="p-4 rounded bg-[#111417] border border-[#FCD535]/30 text-xs text-[#FCD535] flex items-start gap-2.5">
             <AlertCircle className="w-4 h-4 text-[#FCD535] shrink-0 mt-0.5" />
             <div>
-              <p className="font-bold">DATOS INSUFICIENTES PARA BACKTESTING</p>
+              <p className="font-bold">HISTÓRICO INSUFICIENTE PARA EL BACKTEST</p>
               <p className="mt-0.5 text-[#848e9c]">
-                Se requieren al menos 10 registros históricos acumulados en el Central Market Store para realizar la validación retrospectiva. El sistema está acumulando datos automáticamente con cada sondeo a Binance P2P.
+                El backtest reproduce la proyección prefijo a prefijo sobre el histórico real del
+                libro, así que no existe hasta que haya observaciones suficientes. No se muestra
+                una métrica estimada en su lugar.
               </p>
             </div>
           </div>

@@ -74,10 +74,15 @@ describe('getCurrentSnapshot before any poll', () => {
     });
   });
 
-  it('returns null analysis and null projections without a snapshot', async () => {
+  it('returns no market projection before the first sweep has observed anything', async () => {
+    /*
+     * This used to assert null from getMarketAnalysis and getMarketProjections,
+     * the old engine's two entry points. Both are gone; the question survives,
+     * and the answer is stronger: a market nobody has observed has no reading,
+     * and the store says so rather than returning a shape full of nulls.
+     */
     const { store } = await freshStore();
-    expect(store.getMarketAnalysis()).toBeNull();
-    expect(store.getMarketProjections()).toBeNull();
+    expect(store.getMarketProjection()).toEqual({ projection: null, series: [] });
   });
 });
 
@@ -492,27 +497,31 @@ describe('evaluateAlerts', () => {
 });
 
 describe('analysis / projections window', () => {
-  it('BUG: reads only the newest 100 history records (10 minutes at 6s)', async () => {
-    // Audit B7: daily floor/ceiling and +24H horizons are derived from a
-    // 10-minute window.
+  /*
+   * TWO TESTS USED TO LIVE HERE, and both described the old engine's window.
+   *
+   *   "reads only the newest 100 history records" pinned audit B7: the daily
+   *   floor/ceiling and the +24H horizons were derived from ten minutes of
+   *   data. That engine is gone, and so is the ten-minute window.
+   *
+   *   "runs the backtest over the UNBOUNDED history" pinned the scope of
+   *   BacktestEngine, which scored the heuristic.
+   *
+   * The window question still matters, and the answer is now structural rather
+   * than a record count: projections read the PER-CELL series from
+   * HistoricalMarketStore, and the market-wide reading is every cell's
+   * observations in one chronological list. Neither is bounded by a magic 100.
+   */
+  it('projections read the per-cell series, never a fixed slice of global history', async () => {
     stubBinance([makeAdItem({ price: '918.00' })], [makeAdItem({ price: '921.00' })]);
     const { store, StorageEngine } = await freshStore();
     const spy = vi.spyOn(StorageEngine, 'getHistory');
 
     await store.pollMarket();
-    store.getMarketProjections();
+    store.getMarketProjection();
 
-    expect(spy).toHaveBeenCalledWith(100);
-  });
-
-  it('runs the backtest over the UNBOUNDED history', async () => {
-    stubBinance([makeAdItem({ price: '918.00' })], [makeAdItem({ price: '921.00' })]);
-    const { store, StorageEngine } = await freshStore();
-    const spy = vi.spyOn(StorageEngine, 'getHistory');
-
-    const metrics = store.getBacktestMetrics();
-    expect(spy).toHaveBeenCalledWith();
-    expect(metrics.hasSufficientData).toBe(false); // empty store
+    // The projection path does not consult the global history at all.
+    expect(spy).not.toHaveBeenCalled();
   });
 });
 
