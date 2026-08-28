@@ -194,7 +194,7 @@ describe('histórico -> tendencia -> proyección -> señal', () => {
     store.stop();
   });
 
-  it('refuses to project before there is a series to project from', async () => {
+  it('borrows the general market when the cell has almost no history, and says so', async () => {
     vi.useFakeTimers();
     stubWorld(() => ({ buyListing: '945.25', sellListing: '940.75' }));
 
@@ -205,9 +205,38 @@ describe('histórico -> tendencia -> proyección -> señal', () => {
     const { projections } = store.getProjections();
     const cell = projections.find((p) => p.bank === 'BANESCO' && p.amountKey === '10K');
 
-    expect(cell!.reason).toBe('INSUFFICIENT_HISTORY');
-    expect(cell!.buy.trend.trend).toBe('UNKNOWN');
+    /*
+     * One observation of its own is not a series. Rather than staying silent
+     * the cell reads the general market - which is better informed and worse
+     * matched - and labels the fact, so nobody mistakes a market-wide reading
+     * for this bank at this amount.
+     */
+    expect(cell!.observations).toBe(1);
+    expect(cell!.borrowedFrom).toBe('MERCADO GENERAL');
+    expect(cell!.buy.borrowedFrom).toBe('MERCADO GENERAL');
+    // And it still refuses to invent a band it has no moves to derive.
     expect(cell!.buy.projectedRange.low).toBeNull();
+
+    store.stop();
+  });
+
+  it('reads a cell on its own terms once it has enough history', async () => {
+    vi.useFakeTimers();
+    stubWorld((sweep) => ({
+      buyListing: (945.25 + sweep * 0.01).toFixed(2),
+      sellListing: (940.75 + sweep * 0.01).toFixed(2),
+    }));
+
+    const { store } = await freshStore();
+    store.start();
+    await vi.advanceTimersByTimeAsync(3_000);
+    await vi.advanceTimersByTimeAsync(45_000 * 130);
+
+    const { projections } = store.getProjections();
+    const cell = projections.find((p) => p.bank === 'BANESCO' && p.amountKey === '10K');
+
+    expect(cell!.observations).toBeGreaterThanOrEqual(20);
+    expect(cell!.borrowedFrom).toBeNull();
 
     store.stop();
   });

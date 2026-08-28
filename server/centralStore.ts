@@ -1227,6 +1227,22 @@ export class CentralMarketStore {
   private refreshProjections(matrix: MakerMatrix): void {
     const projections: CellProjection[] = [];
 
+    /*
+     * THE GENERAL MARKET, for cells too thin to be read on their own.
+     *
+     * Every cell's observations in one chronological list. It is NEVER merged
+     * into a cell's own series - projectCell uses one or the other and labels
+     * which - because a Banesco 10K trend built partly from Mercantil 100K
+     * would describe neither.
+     */
+    const generalSeries: HistoricalObservation[] = [];
+    for (const bank of matrix.bankOrder) {
+      for (const amountKey of matrix.amountKeys) {
+        generalSeries.push(...HistoricalMarketStore.load(bank, amountKey));
+      }
+    }
+    generalSeries.sort((a, b) => a.timestamp - b.timestamp);
+
     for (const bank of matrix.bankOrder) {
       for (const amountKey of matrix.amountKeys) {
         const cell = matrix.cells[bank]?.[amountKey];
@@ -1242,6 +1258,7 @@ export class CentralMarketStore {
             series: HistoricalMarketStore.load(bank, amountKey),
             currentBuyPrice: pair?.buy.price ?? null,
             currentSellPrice: pair?.sell.price ?? null,
+            generalSeries,
           })
         );
       }

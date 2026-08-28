@@ -350,6 +350,161 @@ export function hourlyActivity(
   return out;
 }
 
+/* ------------------------------------------------------------------------ *
+ * WHAT HAPPENED NEXT: outcome distributions, counted
+ * ------------------------------------------------------------------------ */
+
+/** Venezuela day of week, 0 = Sunday. UTC-4 year round, no DST to model. */
+export function venezuelaDay(timestamp: number): number {
+  return new Date(timestamp - 4 * 3_600_000).getUTCDay();
+}
+
+export const DAY_NAMES = [
+  'domingo',
+  'lunes',
+  'martes',
+  'miércoles',
+  'jueves',
+  'viernes',
+  'sábado',
+] as const;
+
+/**
+ * How a stretch of series ended, relative to where it started.
+ *
+ * Three buckets and nothing else. A finer classification would suggest a
+ * precision the counting cannot support.
+ */
+export type Outcome = 'UP' | 'FLAT' | 'DOWN';
+
+export interface OutcomeDistribution {
+  sampleSize: number;
+  up: number;
+  flat: number;
+  down: number;
+  /** Shares of the total, or null below the sample floor. */
+  upRate: number | null;
+  flatRate: number | null;
+  downRate: number | null;
+  confidence: Confidence;
+  reason: 'INSUFFICIENT_HISTORY' | 'NO_DATA' | null;
+  description: string;
+}
+
+function classify(from: number, to: number, step: number): Outcome {
+  const move = to - from;
+  // "Flat" is one typical step of this cell, not a percentage somebody chose.
+  if (Math.abs(move) <= step) return 'FLAT';
+  return move > 0 ? 'UP' : 'DOWN';
+}
+
+function distribution(
+  counts: { up: number; flat: number; down: number },
+  description: string
+): OutcomeDistribution {
+  const sampleSize = counts.up + counts.flat + counts.down;
+  if (sampleSize < MIN_SAMPLES_FOR_PROBABILITY) {
+    return {
+      sampleSize,
+      ...counts,
+      upRate: null,
+      flatRate: null,
+      downRate: null,
+      confidence: sampleSize === 0 ? 'NO_DATA' : 'LOW',
+      reason: sampleSize === 0 ? 'NO_DATA' : 'INSUFFICIENT_HISTORY',
+      description,
+    };
+  }
+  return {
+    sampleSize,
+    ...counts,
+    upRate: counts.up / sampleSize,
+    flatRate: counts.flat / sampleSize,
+    downRate: counts.down / sampleSize,
+    confidence: sampleSize >= MIN_SAMPLES_FOR_PROBABILITY * 4 ? 'HIGH' : 'MEDIUM',
+    reason: null,
+    description,
+  };
+}
+
+/**
+ * What historically followed, from moments matching a time window.
+ *
+ * The counting is the whole method: of every observation that fell in this
+ * window and had a full horizon of real data after it, how many ended higher,
+ * flat, or lower. No model, no fitted curve, and the sample size travels with
+ * the answer so "68% continuó alcista" can never appear next to n=3.
+ */
+export function outcomesInWindow(
+  series: readonly HistoricalObservation[],
+  which: TrendSeries,
+  params: {
+    horizon: number;
+    /** Restrict to these Venezuela hours. Empty means every hour. */
+    hours?: readonly number[];
+    /** Restrict to these Venezuela days. Empty means every day. */
+    days?: readonly number[];
+    description: string;
+  }
+): OutcomeDistribution {
+  const points: { t: number; price: number }[] = [];
+  for (const observation of series) {
+    const price =
+      which === 'BUY' ? observation.buyRecommendedPrice : observation.sellRecommendedPrice;
+    if (price === null) continue;
+    points.push({ t: observation.timestamp, price });
+  }
+
+  const step = typicalStep(points);
+  if (step === null || points.length === 0) {
+    return distribution({ up: 0, flat: 0, down: 0 }, params.description);
+  }
+
+  const hours = params.hours ?? [];
+  const days = params.days ?? [];
+  const counts = { up: 0, flat: 0, down: 0 };
+
+  /*
+   * Stops a full horizon short of the end. An observation whose outcome has
+   * not happened yet cannot be counted, and counting it would bias the rates
+   * towards whatever the series was doing when capture stopped.
+   */
+  for (let i = 0; i + params.horizon < points.length; i += 1) {
+    if (hours.length > 0 && !hours.includes(venezuelaHour(points[i].t))) continue;
+    if (days.length > 0 && !days.includes(venezuelaDay(points[i].t))) continue;
+
+    const outcome = classify(points[i].price, points[i + params.horizon].price, step);
+    if (outcome === 'UP') counts.up += 1;
+    else if (outcome === 'DOWN') counts.down += 1;
+    else counts.flat += 1;
+  }
+
+  return distribution(counts, params.description);
+}
+
+/**
+ * The same counting, per day of week.
+ *
+ * Returns every day, including the ones with no evidence - a caller that only
+ * saw the days that happened to clear the floor would have no way to know how
+ * much of the week is simply unmeasured.
+ */
+export function outcomesByDay(
+  series: readonly HistoricalObservation[],
+  which: TrendSeries,
+  horizon: number
+): { day: number; dayName: string; outcomes: OutcomeDistribution }[] {
+  return DAY_NAMES.map((dayName, day) => ({
+    day,
+    dayName,
+    outcomes: outcomesInWindow(series, which, {
+      horizon,
+      days: [day],
+      description: `Observaciones de ${dayName}`,
+    }),
+  }));
+}
+
 /**
  * The hours worth watching, or none.
  *

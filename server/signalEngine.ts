@@ -20,11 +20,22 @@
 import type { CellProjection, SideProjection } from './makerProjectionEngine.js';
 import type { Confidence, TrendDirection } from './trendEngine.js';
 
+/**
+ * A TOP is not a prediction that the price will fall.
+ *
+ * It means: the series has turned around at this price before, and it is here
+ * again showing the same loss of force. POSSIBLE while the trend is still
+ * pushing into it; CONFIRMED once the push has actually reversed at the level.
+ * Neither is an instruction, and CONFIRMED does not mean "it will now fall" -
+ * it means the turn has already been observed.
+ */
 export type SignalKind =
   | 'TREND_CHANGE'
   | 'EXHAUSTION'
-  | 'CEILING_APPROACH'
-  | 'FLOOR_APPROACH'
+  | 'POSSIBLE_TOP'
+  | 'CONFIRMED_TOP'
+  | 'POSSIBLE_BOTTOM'
+  | 'CONFIRMED_BOTTOM'
   | 'BREAKOUT_UP'
   | 'BREAKOUT_DOWN'
   | 'ACCUMULATION'
@@ -136,6 +147,30 @@ function evaluateSide(
   const common = base(projection, sideProjection);
   const step = trend.typicalStepVes;
 
+  /*
+   * A borrowed reading is worth less, and says so.
+   *
+   * When a cell is too thin to be read on its own the general market supplies
+   * the trend - which is better than silence, and worse than the cell's own
+   * data. Every signal built from it is downgraded one level and carries the
+   * fact in its evidence, so nobody reads a market-wide trend as this bank at
+   * this amount.
+   */
+  const borrowed = sideProjection.borrowedFrom;
+  const downgrade = (confidence: Confidence): Confidence => {
+    if (borrowed === null) return confidence;
+    if (confidence === 'HIGH') return 'MEDIUM';
+    if (confidence === 'MEDIUM') return 'LOW';
+    return confidence;
+  };
+  const borrowedNote = (lines: string[]): string[] =>
+    borrowed === null
+      ? lines
+      : [
+          ...lines,
+          `Esta celda tiene poco histórico propio: lectura tomada del ${borrowed}. Confianza reducida.`,
+        ];
+
   /* ---- TREND CHANGE ---------------------------------------------------- */
   if (
     (trend.trend === 'BULLISH' || trend.trend === 'BEARISH') &&
@@ -148,12 +183,12 @@ function evaluateSide(
       kind: 'TREND_CHANGE',
       status: trend.trendConfidence === 'HIGH' ? 'CONFIRMED' : 'EARLY_WARNING',
       headline: `${sideProjection.label}: ${lastTrend} → ${trend.trend}`,
-      evidence: [
+      evidence: borrowedNote([
         `Tendencia anterior registrada: ${lastTrend}.`,
         ...trend.basis,
         `Confianza por tamaño de muestra: ${trend.trendConfidence} (${trend.sampleSize} obs.).`,
-      ],
-      confidence: trend.trendConfidence,
+      ]),
+      confidence: downgrade(trend.trendConfidence),
       identity: identityOf(
         'TREND_CHANGE',
         projection.bank,
@@ -181,11 +216,10 @@ function evaluateSide(
       // Always early: a slowing trend has not turned, and saying so would lie.
       status: 'EARLY_WARNING',
       headline: `${sideProjection.label}: posible agotamiento ${trend.trend === 'BULLISH' ? 'alcista' : 'bajista'}`,
-      evidence: [
-        sideProjection.exhaustion.reason ?? '',
-        ...trend.basis,
-      ].filter((line) => line !== ''),
-      confidence: trend.trendConfidence,
+      evidence: borrowedNote(
+        [sideProjection.exhaustion.reason ?? '', ...trend.basis].filter((line) => line !== '')
+      ),
+      confidence: downgrade(trend.trendConfidence),
       identity: identityOf(
         'EXHAUSTION',
         projection.bank,
@@ -196,49 +230,114 @@ function evaluateSide(
     });
   }
 
-  /* ---- APPROACHING A ZONE ---------------------------------------------- */
-  const ceiling = sideProjection.nextCeiling;
-  if (ceiling !== null && withinOneStep(sideProjection.currentPrice, ceiling.low, ceiling.high, step)) {
-    signals.push({
-      ...common,
-      kind: 'CEILING_APPROACH',
-      status: ceiling.confidence === 'HIGH' ? 'CONFIRMED' : 'EARLY_WARNING',
-      headline: `${sideProjection.label}: cerca de un techo observado`,
-      evidence: [
-        `Zona ${ceiling.low.toFixed(2)} – ${ceiling.high.toFixed(2)} VES.`,
-        `La serie giró ahí ${ceiling.touches} vez(ces).`,
-      ],
-      confidence: ceiling.confidence,
-      identity: identityOf(
-        'CEILING_APPROACH',
-        projection.bank,
-        projection.amountKey,
-        sideProjection.side,
-        ceiling.high.toFixed(2)
-      ),
-    });
+  /* ---- TOPS AND BOTTOMS ------------------------------------------------- */
+  /*
+   * Being at a level is not a top. A top is being at a level the series has
+   * turned at before, WITH evidence that the push into it is failing. The
+   * distinction between POSSIBLE and CONFIRMED is whether the turn has been
+   * observed yet or is merely being anticipated.
+   */
+  // The zone the price is AT - `next` is the one still ahead, and a price
+  // sitting on a ceiling has none ahead of it.
+  /*
+   * At the zone, OR having just been there. The second case is what a
+   * confirmed top actually looks like: the price reached the level and turned
+   * away from it, so by the time the turn is visible it has already left.
+   */
+  const ceiling = sideProjection.atCeiling ?? sideProjection.reachedCeiling;
+  if (ceiling !== null) {
+    /*
+     * THE ZONE ITSELF IS THE EVIDENCE.
+     *
+     * An earlier version required the medium term to be climbing before a top
+     * could be reported, and that made tops undetectable in exactly the
+     * oscillating market where they are most reliable: a price sitting on a
+     * level it has turned at three times reads SIDEWAYS, so the gate closed.
+     * Repeated turns at a price ARE the structural signal; the trend only
+     * decides whether the turn has already happened.
+     */
+    const pushingUp = trend.mediumDirection === 'BULLISH';
+    // Confirmed against the BACKGROUND, which is the medium window before the
+    // turn - the turn itself would otherwise cancel the very climb it reverses.
+    const turned =
+      trend.shortDirection === 'BEARISH' &&
+      (trend.backgroundDirection === 'BULLISH' || pushingUp);
+    const fading =
+      sideProjection.exhaustion.exhausted && sideProjection.exhaustion.direction === 'BULLISH';
+
+    {
+      const confirmed = turned;
+      signals.push({
+        ...common,
+        kind: confirmed ? 'CONFIRMED_TOP' : 'POSSIBLE_TOP',
+        status: confirmed ? 'CONFIRMED' : 'EARLY_WARNING',
+        headline: confirmed
+          ? `${sideProjection.label}: techo confirmado en zona observada`
+          : `${sideProjection.label}: posible techo`,
+        evidence: borrowedNote([
+          `Zona ${ceiling.low.toFixed(2)} – ${ceiling.high.toFixed(2)} VES.`,
+          `La serie giró ahí ${ceiling.touches} vez(ces).`,
+          confirmed
+            ? 'El corto plazo ya giró a la baja dentro de la zona.'
+            : fading
+            ? 'La subida sigue, pero perdiendo fuerza al llegar.'
+            : pushingUp
+            ? 'El fondo sigue empujando hacia la zona.'
+            : 'El precio está en la zona sin una tendencia de fondo definida.',
+          'Un techo no significa que el precio vaya a bajar obligatoriamente.',
+        ]),
+        confidence: downgrade(ceiling.confidence),
+        identity: identityOf(
+          confirmed ? 'CONFIRMED_TOP' : 'POSSIBLE_TOP',
+          projection.bank,
+          projection.amountKey,
+          sideProjection.side,
+          ceiling.high.toFixed(2)
+        ),
+      });
+    }
   }
 
-  const floor = sideProjection.nextFloor;
-  if (floor !== null && withinOneStep(sideProjection.currentPrice, floor.low, floor.high, step)) {
-    signals.push({
-      ...common,
-      kind: 'FLOOR_APPROACH',
-      status: floor.confidence === 'HIGH' ? 'CONFIRMED' : 'EARLY_WARNING',
-      headline: `${sideProjection.label}: cerca de un piso observado`,
-      evidence: [
-        `Zona ${floor.low.toFixed(2)} – ${floor.high.toFixed(2)} VES.`,
-        `La serie giró ahí ${floor.touches} vez(ces).`,
-      ],
-      confidence: floor.confidence,
-      identity: identityOf(
-        'FLOOR_APPROACH',
-        projection.bank,
-        projection.amountKey,
-        sideProjection.side,
-        floor.low.toFixed(2)
-      ),
-    });
+  const floor = sideProjection.atFloor ?? sideProjection.reachedFloor;
+  if (floor !== null) {
+    const pushingDown = trend.mediumDirection === 'BEARISH';
+    const turned =
+      trend.shortDirection === 'BULLISH' &&
+      (trend.backgroundDirection === 'BEARISH' || pushingDown);
+    const fading =
+      sideProjection.exhaustion.exhausted && sideProjection.exhaustion.direction === 'BEARISH';
+
+    {
+      const confirmed = turned;
+      signals.push({
+        ...common,
+        kind: confirmed ? 'CONFIRMED_BOTTOM' : 'POSSIBLE_BOTTOM',
+        status: confirmed ? 'CONFIRMED' : 'EARLY_WARNING',
+        headline: confirmed
+          ? `${sideProjection.label}: piso confirmado en zona observada`
+          : `${sideProjection.label}: posible piso`,
+        evidence: borrowedNote([
+          `Zona ${floor.low.toFixed(2)} – ${floor.high.toFixed(2)} VES.`,
+          `La serie giró ahí ${floor.touches} vez(ces).`,
+          confirmed
+            ? 'El corto plazo ya giró al alza dentro de la zona.'
+            : fading
+            ? 'La bajada sigue, pero perdiendo fuerza al llegar.'
+            : pushingDown
+            ? 'El fondo sigue empujando hacia la zona.'
+            : 'El precio está en la zona sin una tendencia de fondo definida.',
+          'Un piso no significa que el precio vaya a subir obligatoriamente.',
+        ]),
+        confidence: downgrade(floor.confidence),
+        identity: identityOf(
+          confirmed ? 'CONFIRMED_BOTTOM' : 'POSSIBLE_BOTTOM',
+          projection.bank,
+          projection.amountKey,
+          sideProjection.side,
+          floor.low.toFixed(2)
+        ),
+      });
+    }
   }
 
   /* ---- BREAKOUT -------------------------------------------------------- */
@@ -249,15 +348,15 @@ function evaluateSide(
       kind: breakout.direction === 'UP' ? 'BREAKOUT_UP' : 'BREAKOUT_DOWN',
       status: breakout.status,
       headline: `${sideProjection.label}: ruptura ${breakout.direction === 'UP' ? 'al alza' : 'a la baja'}`,
-      evidence: [
+      evidence: borrowedNote([
         `Nivel roto: ${breakout.level.toFixed(2)} VES.`,
         `Actual: ${breakout.currentPrice.toFixed(2)} VES (${breakout.distanceVes >= 0 ? '+' : ''}${breakout.distanceVes.toFixed(2)}).`,
         breakout.distanceInSteps !== null
           ? `Distancia: ${breakout.distanceInSteps} pasos típicos de esta celda.`
           : '',
         `Fuerza: ${breakout.strength}.`,
-      ].filter((line) => line !== ''),
-      confidence: trend.trendConfidence,
+      ].filter((line) => line !== '')),
+      confidence: downgrade(trend.trendConfidence),
       identity: identityOf(
         breakout.direction === 'UP' ? 'BREAKOUT_UP' : 'BREAKOUT_DOWN',
         projection.bank,
@@ -275,44 +374,55 @@ function evaluateSide(
    * flat series with no observed turning points is just flat, and is reported
    * as SIDEWAYS by the trend and as nothing at all here.
    */
+  /*
+   * Accumulation and distribution are about a level the price is drifting
+   * TOWARDS while going nowhere - distinct from standing on one, which is the
+   * tops-and-bottoms case above. Using the same zone for both produced two
+   * signals about the same fact.
+   */
+  const floorAhead = sideProjection.nextFloor;
+  const ceilingAhead = sideProjection.nextCeiling;
   if (trend.trend === 'SIDEWAYS' && trend.reason === null) {
-    if (floor !== null && withinOneStep(sideProjection.currentPrice, floor.low, floor.high, step)) {
+    if (floorAhead !== null && withinOneStep(sideProjection.currentPrice, floorAhead.low, floorAhead.high, step)) {
       signals.push({
         ...common,
         kind: 'ACCUMULATION',
         status: 'EARLY_WARNING',
         headline: `${sideProjection.label}: lateral sobre un piso observado`,
-        evidence: [
+        evidence: borrowedNote([
           `Lateralización con ${trend.sampleSize} observaciones.`,
-          `Piso ${floor.low.toFixed(2)} – ${floor.high.toFixed(2)} VES, ${floor.touches} giro(s).`,
-        ],
-        confidence: floor.confidence,
+          `Piso ${floorAhead.low.toFixed(2)} – ${floorAhead.high.toFixed(2)} VES, ${floorAhead.touches} giro(s).`,
+        ]),
+        confidence: downgrade(floorAhead.confidence),
         identity: identityOf(
           'ACCUMULATION',
           projection.bank,
           projection.amountKey,
           sideProjection.side,
-          floor.low.toFixed(2)
+          floorAhead.low.toFixed(2)
         ),
       });
     }
-    if (ceiling !== null && withinOneStep(sideProjection.currentPrice, ceiling.low, ceiling.high, step)) {
+    if (
+      ceilingAhead !== null &&
+      withinOneStep(sideProjection.currentPrice, ceilingAhead.low, ceilingAhead.high, step)
+    ) {
       signals.push({
         ...common,
         kind: 'DISTRIBUTION',
         status: 'EARLY_WARNING',
         headline: `${sideProjection.label}: lateral bajo un techo observado`,
-        evidence: [
+        evidence: borrowedNote([
           `Lateralización con ${trend.sampleSize} observaciones.`,
-          `Techo ${ceiling.low.toFixed(2)} – ${ceiling.high.toFixed(2)} VES, ${ceiling.touches} giro(s).`,
-        ],
-        confidence: ceiling.confidence,
+          `Techo ${ceilingAhead.low.toFixed(2)} – ${ceilingAhead.high.toFixed(2)} VES, ${ceilingAhead.touches} giro(s).`,
+        ]),
+        confidence: downgrade(ceilingAhead.confidence),
         identity: identityOf(
           'DISTRIBUTION',
           projection.bank,
           projection.amountKey,
           sideProjection.side,
-          ceiling.high.toFixed(2)
+          ceilingAhead.high.toFixed(2)
         ),
       });
     }

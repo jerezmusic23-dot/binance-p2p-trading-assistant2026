@@ -32,6 +32,81 @@
 import type { HistoricalObservation } from './historicalMarketStore.js';
 
 export type TrendDirection = 'BULLISH' | 'BEARISH' | 'SIDEWAYS' | 'TRANSITION' | 'UNKNOWN';
+
+/**
+ * The seven-level reading the operator asked for.
+ *
+ * GRADED BY SIZE, AND THE YARDSTICK IS THE CELL'S OWN.
+ *
+ * The move over the window is divided by the drift a random walk of the same
+ * length would produce at this cell's typical step. Below 1 the move is inside
+ * its own noise - LATERAL. Between 1 and 2 it has cleared it but not by much.
+ * Past 3 it is several times what this cell normally manages, which is what
+ * "strong" can mean without inventing a VES threshold that would be wrong for
+ * every other cell.
+ *
+ * The two boundaries (2 and 3 multiples of the noise) are DECLARED
+ * ASSUMPTIONS. They are not tuned, they are not measured, and they only decide
+ * the adjective - never whether a move happened, which is decided at 1 by the
+ * random-walk comparison.
+ */
+export type TrendGrade =
+  | 'STRONG_UP'
+  | 'UP'
+  | 'WEAK_UP'
+  | 'LATERAL'
+  | 'WEAK_DOWN'
+  | 'DOWN'
+  | 'STRONG_DOWN'
+  | 'UNKNOWN';
+
+/** Multiples of the cell's own noise at which the adjective changes. */
+export const GRADE_MODERATE_MULTIPLE = 2;
+export const GRADE_STRONG_MULTIPLE = 3;
+
+/**
+ * How far the move travelled, measured in this cell's own noise.
+ *
+ * Returns null when there is nothing to measure against, which is not the same
+ * as zero and must not be rendered as LATERAL by accident.
+ */
+export function noiseMultiple(
+  points: readonly { t: number; price: number }[],
+  step: number | null
+): number | null {
+  if (points.length < 2 || step === null || step <= 0) return null;
+  const move = points[points.length - 1].price - points[0].price;
+  const noise = step * Math.sqrt(points.length - 1);
+  if (noise === 0) return null;
+  return move / noise;
+}
+
+export function gradeOf(multiple: number | null): TrendGrade {
+  if (multiple === null) return 'UNKNOWN';
+  const size = Math.abs(multiple);
+  if (size <= 1) return 'LATERAL';
+
+  const up = multiple > 0;
+  if (size >= GRADE_STRONG_MULTIPLE) return up ? 'STRONG_UP' : 'STRONG_DOWN';
+  if (size >= GRADE_MODERATE_MULTIPLE) return up ? 'UP' : 'DOWN';
+  return up ? 'WEAK_UP' : 'WEAK_DOWN';
+}
+
+/**
+ * One horizon's reading. Three of them are produced, and they are allowed to
+ * disagree - a disagreement is the most useful thing this engine can report.
+ */
+export interface HorizonReading {
+  name: 'VERY_SHORT' | 'SHORT' | 'MEDIUM';
+  /** Observations in this horizon's window. */
+  observations: number;
+  /** Real elapsed time the window covers, so the reader can judge it. */
+  spanMs: number | null;
+  direction: TrendDirection;
+  grade: TrendGrade;
+  velocity: number | null;
+  noiseMultiple: number | null;
+}
 export type Confidence = 'HIGH' | 'MEDIUM' | 'LOW' | 'NO_DATA';
 
 /** Why an answer could not be produced. Always stated, never implied. */
@@ -43,6 +118,15 @@ export type InsufficiencyReason =
 
 export interface TrendState {
   trend: TrendDirection;
+  /** The seven-level reading of the SHORT horizon. */
+  grade: TrendGrade;
+  /** Three horizons, always present, allowed to disagree. */
+  horizons: HorizonReading[];
+  /**
+   * Set when the horizons disagree, in the operator's words - "impulso alcista
+   * de corto plazo" is more useful than flattening it to "alcista".
+   */
+  divergence: string | null;
   /** 0..1, how consistently the series moved in the trend's direction. */
   trendStrength: number | null;
   trendConfidence: Confidence;
@@ -53,6 +137,17 @@ export interface TrendState {
 
   shortDirection: TrendDirection;
   mediumDirection: TrendDirection;
+  /**
+   * The medium window EXCLUDING the recent short one: what the background was
+   * doing before the latest move.
+   *
+   * Needed to confirm a reversal at all. Confirming a top means "it was
+   * climbing and it has turned", but a fall large enough to turn the short
+   * window also erodes the medium window's net move - so measured live, the
+   * two conditions cancel and a confirmation could never fire. Measured before
+   * the turn, the background keeps saying what it was doing.
+   */
+  backgroundDirection: TrendDirection;
 
   /** The cell's own typical step, which is what "small" is measured against. */
   typicalStepVes: number | null;
@@ -215,12 +310,16 @@ export function analyseTrend(
 
   const empty = (reason: InsufficiencyReason, sampleSize: number, basis: string[]): TrendState => ({
     trend: 'UNKNOWN',
+    grade: 'UNKNOWN',
+    horizons: [],
+    divergence: null,
     trendStrength: null,
     trendConfidence: 'NO_DATA',
     velocity: null,
     acceleration: null,
     shortDirection: 'UNKNOWN',
     mediumDirection: 'UNKNOWN',
+    backgroundDirection: 'UNKNOWN',
     typicalStepVes: null,
     sampleSize,
     reason,
@@ -255,6 +354,7 @@ export function analyseTrend(
       typicalStepVes: 0,
       shortDirection: 'SIDEWAYS',
       mediumDirection: 'SIDEWAYS',
+      backgroundDirection: 'SIDEWAYS',
     };
   }
 
@@ -263,6 +363,10 @@ export function analyseTrend(
 
   const shortDirection = directionOf(shortPoints, step);
   const mediumDirection = directionOf(mediumPoints, step);
+  /* The medium window with the recent move cut off the end. */
+  const backgroundPoints = mediumPoints.slice(0, Math.max(0, mediumPoints.length - shortWindow));
+  const backgroundDirection =
+    backgroundPoints.length >= 2 ? directionOf(backgroundPoints, step) : mediumDirection;
   const velocity = slopeVesPerHour(shortPoints);
 
   /*
@@ -298,6 +402,61 @@ export function analyseTrend(
   const strength = consistency(shortPoints);
 
   /*
+   * THREE HORIZONS, and the disagreement between them is the finding.
+   *
+   * The windows are counted in OBSERVATIONS, not minutes, and each reading
+   * reports the real time it actually covers. The capture cadence is a
+   * consequence of the tier rotation rather than a guarantee, so a window
+   * defined in minutes would silently change meaning the day the schedule
+   * changes; a window of n observations always means the same thing, and
+   * spanMs tells the reader how long that turned out to be.
+   */
+  const veryShortPoints = points.slice(-Math.max(3, Math.floor(shortWindow / 2)));
+  const horizonOf = (
+    name: HorizonReading['name'],
+    window: readonly { t: number; price: number }[]
+  ): HorizonReading => {
+    const multiple = noiseMultiple(window, step);
+    return {
+      name,
+      observations: window.length,
+      spanMs: window.length < 2 ? null : window[window.length - 1].t - window[0].t,
+      direction: directionOf(window, step),
+      grade: gradeOf(multiple),
+      velocity: slopeVesPerHour(window),
+      noiseMultiple: multiple === null ? null : Number(multiple.toFixed(4)),
+    };
+  };
+
+  const horizons: HorizonReading[] = [
+    horizonOf('VERY_SHORT', veryShortPoints),
+    horizonOf('SHORT', shortPoints),
+    horizonOf('MEDIUM', mediumPoints),
+  ];
+
+  /*
+   * Named in the operator's words when the horizons disagree. Flattening a
+   * short-term push inside a flat medium term into "alcista" would be the
+   * least useful true statement available.
+   */
+  let divergence: string | null = null;
+  if (shortDirection !== mediumDirection) {
+    const readable: Record<TrendDirection, string> = {
+      BULLISH: 'alcista',
+      BEARISH: 'bajista',
+      SIDEWAYS: 'lateral',
+      TRANSITION: 'en transición',
+      UNKNOWN: 'sin datos',
+    };
+    divergence =
+      mediumDirection === 'SIDEWAYS'
+        ? `Impulso ${readable[shortDirection]} de corto plazo dentro de un mercado lateral.`
+        : shortDirection === 'SIDEWAYS'
+        ? `Tendencia ${readable[mediumDirection]} de fondo, plana en el corto plazo.`
+        : `Corto plazo ${readable[shortDirection]} contra un fondo ${readable[mediumDirection]}.`;
+  }
+
+  /*
    * Confidence is about how much evidence there is, never about how much the
    * engine likes the answer. Sample size and agreement, nothing else.
    */
@@ -311,10 +470,11 @@ export function analyseTrend(
   }
 
   const basis = [
-    `Ventana corta (${shortPoints.length} obs.): ${shortDirection}.`,
-    `Ventana media (${mediumPoints.length} obs.): ${mediumDirection}.`,
+    `Ventana corta (${shortPoints.length} obs.): ${shortDirection} · ${horizons[1].grade}.`,
+    `Ventana media (${mediumPoints.length} obs.): ${mediumDirection} · ${horizons[2].grade}.`,
     `Paso típico de esta celda: ${step.toFixed(4)} VES.`,
   ];
+  if (divergence !== null) basis.push(divergence);
   if (velocity !== null) basis.push(`Velocidad: ${velocity.toFixed(4)} VES/hora.`);
   if (acceleration !== null) {
     basis.push(
@@ -328,12 +488,16 @@ export function analyseTrend(
 
   return {
     trend,
+    grade: horizons[1].grade,
+    horizons,
+    divergence,
     trendStrength: strength,
     trendConfidence,
     velocity,
     acceleration,
     shortDirection,
     mediumDirection,
+    backgroundDirection,
     typicalStepVes: step,
     sampleSize: points.length,
     reason: null,
