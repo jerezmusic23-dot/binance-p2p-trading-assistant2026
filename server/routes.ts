@@ -174,7 +174,18 @@ apiRouter.get('/market/projections/series', (req, res) => {
       return;
     }
 
-    const limit = Math.min(2000, Math.max(1, Number(req.query.limit ?? 300)));
+    /*
+     * PRE-DEPLOY: Number('abc') is NaN, and NaN survives Math.min/Math.max.
+     *
+     * `slice(-NaN)` is `slice(0)`, so ?limit=abc returned the WHOLE series
+     * instead of the last 300 - a query parameter that removed the bound it
+     * exists to impose. On a process that has been capturing for days that is
+     * an unbounded response.
+     */
+    const requested = Number(req.query.limit ?? 300);
+    const limit = Number.isFinite(requested)
+      ? Math.min(2000, Math.max(1, Math.trunc(requested)))
+      : 300;
     const series = HistoricalMarketStore.load(bank, amountKey);
 
     res.json({
@@ -342,11 +353,23 @@ apiRouter.post('/alerts', (req, res) => {
       return;
     }
 
+    /*
+     * PRE-DEPLOY: a rule whose threshold is NaN can never fire and never says
+     * so. parseFloat('abc') was written straight to disk, where JSON turns it
+     * into null; the rule then sat in the operator's panel looking configured
+     * while every comparison against it was false. Refused at the door.
+     */
+    const threshold = parseFloat(targetValue);
+    if (!Number.isFinite(threshold)) {
+      res.status(400).json({ error: 'targetValue debe ser un numero' });
+      return;
+    }
+
     const newRule: AlertRule = {
       id: `alert-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
       name,
       condition,
-      targetValue: parseFloat(targetValue),
+      targetValue: threshold,
       targetSide: targetSide === 'BUY' ? 'BUY' : 'SELL',
       enabled: enabled !== false,
       createdAt: Date.now(),
@@ -450,5 +473,26 @@ apiRouter.get('/diagnostics/paytypes', (_req, res) => {
       banksVerified: mapping.banksVerified,
       banksNotObserved: mapping.banksNotObserved,
     },
+  });
+});
+
+/*
+ * PRE-DEPLOY: UNA RUTA /api DESCONOCIDA DEVOLVÍA LA APLICACIÓN ENTERA.
+ *
+ * server.ts registra el router y DESPUÉS el fallback SPA `app.get('*')`, así
+ * que una ruta de API que no exista - una que se retiró, o un error de
+ * tecleo en el frontend - caía en el fallback y contestaba index.html con un
+ * HTTP 200. El consumidor recibía HTML donde esperaba JSON y fallaba con
+ * "Unexpected token '<'", que no dice nada sobre lo que pasó.
+ *
+ * Esto ya no es hipotético: /api/market/analysis, /api/market/projections y
+ * /api/market/backtest existieron y fueron retirados con el motor viejo.
+ *
+ * Un 404 con cuerpo JSON dice la verdad. Va al final, después de todas las
+ * rutas reales, y sólo captura lo que ninguna de ellas atendió.
+ */
+apiRouter.use((req, res) => {
+  res.status(404).json({
+    error: `Ruta de API no encontrada: ${req.method} ${req.originalUrl}`,
   });
 });

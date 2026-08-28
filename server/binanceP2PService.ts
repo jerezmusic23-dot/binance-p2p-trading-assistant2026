@@ -147,11 +147,41 @@ export class BinanceP2PService {
     for (const item of rawAds) {
       if (!item || !item.adv || !item.advertiser) continue;
 
+      /*
+       * PRE-DEPLOY: Number.isFinite, not isNaN.
+       *
+       * parseFloat('1e309') is Infinity, which is neither NaN nor <= 0, so an
+       * absurd price walked straight through this guard and reached the ad
+       * list the order book renders. evaluateAd rejects it downstream - the
+       * defence in depth held - but a price that cannot exist has no business
+       * being carried at all.
+       */
       const price = parseFloat(item.adv.price);
-      if (isNaN(price) || price <= 0) continue;
+      if (!Number.isFinite(price) || price <= 0) continue;
 
-      const minAmountVes = parseFloat(item.adv.minSingleTransAmount) || 0;
-      const maxAmountVes = parseFloat(item.adv.maxSingleTransAmount) || 0;
+      /*
+       * PRE-DEPLOY: AN UNREADABLE LIMIT IS NOT A PERMISSIVE LIMIT.
+       *
+       * These were `parseFloat(...) || 0`, and both zeros are permissive: a
+       * minimum of 0 accepts any amount, and a maximum of 0 is Binance's "no
+       * upper limit". So an ad whose limits could not be read became an ad
+       * that accepts EVERY tier - the exact inversion of this project's rule
+       * that a condition which could not be established is never treated as
+       * satisfied. A 100.000 VES operation could be recommended against an ad
+       * whose real ceiling was 5.000.
+       *
+       * The ad is discarded, exactly as an ad with an unreadable price already
+       * was. A published 0 is still kept: for the minimum it means "no floor",
+       * for the maximum "no ceiling", and both are real answers.
+       *
+       * A NEGATIVE limit is discarded too. It is not a looser bound, it is a
+       * malformed field, and `amountVes < -5` is false for every amount.
+       */
+      const minAmountVes = parseFloat(item.adv.minSingleTransAmount);
+      const maxAmountVes = parseFloat(item.adv.maxSingleTransAmount);
+      if (!Number.isFinite(minAmountVes) || minAmountVes < 0) continue;
+      if (!Number.isFinite(maxAmountVes) || maxAmountVes < 0) continue;
+
       /*
        * FASE 4: liquidity absence must survive normalization.
        *
@@ -160,9 +190,16 @@ export class BinanceP2PService {
        * liquidity is simply unknown looked like an ad with none. The
        * executability layer has to tell those apart: one is a fact, the other
        * is a missing fact, and neither may be invented.
+       *
+       * PRE-DEPLOY: a NEGATIVE volume is a third case, and it is the missing
+       * one. It is not a quantity, so it is reported as unknown rather than
+       * carried: executability already refused it, but weightedAverage and the
+       * maker queue sum would have taken it as a number and let it subtract
+       * from a total.
        */
       const reportedAvailable = parseFloat(item.adv.tradableQuantity || item.adv.surplusAmount);
-      const availableUsdtReported = Number.isFinite(reportedAvailable) ? reportedAvailable : null;
+      const availableUsdtReported =
+        Number.isFinite(reportedAvailable) && reportedAvailable >= 0 ? reportedAvailable : null;
       // UNCHANGED for existing consumers (liquidity-weighted average).
       const availableUsdt = availableUsdtReported ?? 0;
 
