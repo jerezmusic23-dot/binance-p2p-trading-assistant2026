@@ -630,6 +630,142 @@ export interface MakerMatrix {
   config: MakerConfig;
 }
 
+/* ==========================================================================
+ * FASE 2: TREND, PROJECTION AND SIGNALS.
+ *
+ * Mirrors server/trendEngine.ts, patternEngine.ts, makerProjectionEngine.ts
+ * and signalEngine.ts. The frontend computes NOTHING from these - no trend, no
+ * band, no probability. Every number was derived server-side from the per-cell
+ * series, and this file exists so a screen can render that decision without
+ * being able to reach a second one.
+ *
+ * ACTUAL, PROYECTADO and HISTÓRICO are separate fields with separate names on
+ * purpose: a projected ceiling rendered like a live price is how somebody ends
+ * up publishing an ad at a number Binance never quoted.
+ * ========================================================================== */
+
+export type TrendDirection = 'BULLISH' | 'BEARISH' | 'SIDEWAYS' | 'TRANSITION' | 'UNKNOWN';
+export type Confidence = 'HIGH' | 'MEDIUM' | 'LOW' | 'NO_DATA';
+
+export interface TrendState {
+  trend: TrendDirection;
+  trendStrength: number | null;
+  trendConfidence: Confidence;
+  velocity: number | null;
+  acceleration: number | null;
+  shortDirection: TrendDirection;
+  mediumDirection: TrendDirection;
+  typicalStepVes: number | null;
+  sampleSize: number;
+  reason: 'NO_DATA' | 'INSUFFICIENT_HISTORY' | 'NO_VARIATION_OBSERVED' | null;
+  basis: string[];
+}
+
+export interface PriceZone {
+  low: number;
+  high: number;
+  touches: number;
+  lastTouchedAt: number;
+  kind: 'FLOOR' | 'CEILING';
+  confidence: Confidence;
+}
+
+export interface ProjectedRange {
+  low: number | null;
+  high: number | null;
+  sampleSize: number;
+  confidence: Confidence;
+  stepsAhead: number;
+  reason: 'INSUFFICIENT_HISTORY' | 'NO_DATA' | null;
+  basis: string;
+}
+
+export interface Breakout {
+  direction: 'UP' | 'DOWN';
+  level: number;
+  currentPrice: number;
+  distanceVes: number;
+  distanceInSteps: number | null;
+  strength: 'ALTA' | 'MEDIA' | 'BAJA';
+  status: 'EARLY_WARNING' | 'CONFIRMED';
+}
+
+export interface WatchWindow {
+  startHour: number;
+  endHour: number;
+  sampleSize: number;
+  medianAbsMoveVes: number;
+  confidence: Confidence;
+}
+
+export interface SideProjection {
+  side: 'BUY' | 'SELL';
+  label: 'MI COMPRA DE USDT' | 'MI VENTA DE USDT';
+  /** The Binance listing this side's competitors live in. Never re-derived here. */
+  listingTradeType: 'BUY' | 'SELL';
+  /** ACTUAL. The live price to publish. */
+  currentPrice: number | null;
+  trend: TrendState;
+  exhaustion: { exhausted: boolean; direction: 'BULLISH' | 'BEARISH' | null; reason: string | null };
+  /** PROYECTADO. Always a band, never a single number. */
+  projectedRange: ProjectedRange;
+  floors: PriceZone[];
+  ceilings: PriceZone[];
+  nextCeiling: PriceZone | null;
+  nextFloor: PriceZone | null;
+  breakout: Breakout | null;
+  watchWindows: WatchWindow[];
+}
+
+export interface CellProjection {
+  bank: string;
+  bankDisplayName: string;
+  amountKey: string;
+  amountVes: number;
+  buy: SideProjection;
+  sell: SideProjection;
+  observations: number;
+  firstObservedAt: number | null;
+  lastObservedAt: number | null;
+  reason: 'NO_DATA' | 'INSUFFICIENT_HISTORY' | null;
+}
+
+export type SignalKind =
+  | 'TREND_CHANGE'
+  | 'EXHAUSTION'
+  | 'CEILING_APPROACH'
+  | 'FLOOR_APPROACH'
+  | 'BREAKOUT_UP'
+  | 'BREAKOUT_DOWN'
+  | 'ACCUMULATION'
+  | 'DISTRIBUTION';
+
+export interface MarketSignal {
+  kind: SignalKind;
+  status: 'EARLY_WARNING' | 'CONFIRMED';
+  bank: string;
+  bankDisplayName: string;
+  amountKey: string;
+  amountVes: number;
+  side: 'BUY' | 'SELL';
+  sideLabel: string;
+  headline: string;
+  evidence: string[];
+  confidence: Confidence;
+  sampleSize: number;
+  currentPrice: number | null;
+  projectedLow: number | null;
+  projectedHigh: number | null;
+  watchStartHour: number | null;
+  watchEndHour: number | null;
+  identity: string;
+}
+
+export interface MakerProjectionsResponse {
+  projections: CellProjection[];
+  signals: MarketSignal[];
+}
+
 export interface MakerMatrixResponse {
   makerMatrix: MakerMatrix;
   /**

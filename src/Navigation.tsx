@@ -7,11 +7,13 @@ import {
   History,
   Bell,
   Tag,
+  Activity,
 } from 'lucide-react';
 
 export type TabType =
   | 'overview'
   | 'publish'
+  | 'analysis'
   | 'projections'
   | 'matrix'
   | 'orderbook'
@@ -41,6 +43,13 @@ export const Navigation: React.FC<NavigationProps> = ({
       id: 'publish',
       label: 'Mis Precios para Publicar',
       icon: <Tag className="w-4 h-4" />,
+    },
+    {
+      /* Trend, ceilings, floors and signals per BANCO x MONTO - the analyst
+         view, distinct from the older global session projection below. */
+      id: 'analysis',
+      label: 'Análisis del Mercado',
+      icon: <Activity className="w-4 h-4" />,
     },
     {
       id: 'projections',

@@ -30,6 +30,17 @@ import {
   type MakerAlertState,
 } from './makerAlerts.js';
 import { buildMakerMatrix, type MakerMatrix } from './makerMatrix.js';
+import {
+  HistoricalMarketStore,
+  type HistoricalObservation,
+} from './historicalMarketStore.js';
+import { projectCell, type CellProjection } from './makerProjectionEngine.js';
+import {
+  EMPTY_SIGNAL_MEMORY,
+  evaluateSignals,
+  type MarketSignal,
+  type SignalMemory,
+} from './signalEngine.js';
 import type { CapturedListings } from './makerRecommendation.js';
 import { readMakerConfig, type MakerConfig } from './makerStrategy.js';
 import { runOpportunityEngine } from './opportunityEngine.js';
@@ -127,6 +138,16 @@ export class CentralMarketStore {
    * direction: it can repeat itself, never invent a change that did not happen.
    */
   private makerAlertState: MakerAlertState = EMPTY_MAKER_ALERT_STATE;
+
+  /** Projections and signals from the latest sweep. Recomputed, never stored. */
+  private lastProjections: CellProjection[] = [];
+  private lastSignals: MarketSignal[] = [];
+  /**
+   * The trend each cell was last seen in, so a CHANGE can be detected.
+   * In memory only: a restart re-learns it silently rather than announcing a
+   * change that did not happen.
+   */
+  private signalMemory: SignalMemory = EMPTY_SIGNAL_MEMORY;
 
   private bankMatrixCache: {
     /** Last time ANY tier was refreshed. */
@@ -1060,9 +1081,144 @@ export class CentralMarketStore {
       if (alerts.length > 0) {
         void TelegramNotifier.getInstance().notifyMakerAlerts(alerts, now);
       }
+
+      /*
+       * PERSISTENCE, then ANALYSIS - in that order, and both over the matrix
+       * already in hand. Zero additional requests to Binance: the book was
+       * captured by the sweep that just finished.
+       */
+      this.persistObservations(matrix);
+      this.refreshProjections(matrix);
     } catch (err) {
       console.warn('[CentralStore] Maker alert evaluation failed:', err);
     }
+  }
+
+  /**
+   * Writes one observation per cell whose book actually moved.
+   *
+   * The sweep rotates one amount tier per tick, so on a normal tick only 7 of
+   * the 42 cells carry a new capture. HistoricalMarketStore refuses the other
+   * 35 by capturedAt, because storing them again would fill the series with
+   * copies of one capture and make every velocity read as zero.
+   */
+  private persistObservations(matrix: MakerMatrix): void {
+    for (const bank of matrix.bankOrder) {
+      for (const amountKey of matrix.amountKeys) {
+        const cell = matrix.cells[bank]?.[amountKey];
+        if (cell === undefined || cell.capturedAt === 0) continue;
+
+        const rec = cell.recommendation;
+        const pair = rec?.recommended ?? null;
+
+        const observation: HistoricalObservation = {
+          timestamp: cell.capturedAt,
+          bank,
+          amountKey,
+          amountVes: cell.amountVes,
+
+          buyLeaderPrice: rec?.buyAnalysis.leaderPrice ?? null,
+          buyRecommendedPrice: pair?.buy.price ?? null,
+          sellLeaderPrice: rec?.sellAnalysis.leaderPrice ?? null,
+          sellRecommendedPrice: pair?.sell.price ?? null,
+
+          // Filled in by the store against the previous observation.
+          buySpreadVsPrevious: null,
+          sellSpreadVsPrevious: null,
+
+          grossSpreadVes: pair?.grossMarginVes ?? null,
+          grossSpreadPct: pair?.grossMarginPct ?? null,
+
+          buyPosition: pair?.buy.position ?? null,
+          sellPosition: pair?.sell.position ?? null,
+
+          buyAvailableUsdt: pair?.buy.queueAheadUsdt ?? null,
+          sellAvailableUsdt: pair?.sell.queueAheadUsdt ?? null,
+
+          buyCompetitorCount: rec?.buyAnalysis.competitors ?? 0,
+          sellCompetitorCount: rec?.sellAnalysis.competitors ?? 0,
+
+          marketStatus: cell.status,
+
+          tick: rec?.buyAnalysis.tick ?? null,
+          tickProvenance: rec?.buyAnalysis.tickProvenance ?? 'NOT_VERIFIABLE',
+
+          provenance:
+            pair === null
+              ? null
+              : {
+                  buy: {
+                    advNo: pair.buy.beatsAdvNo,
+                    merchant: pair.buy.beatsMerchant,
+                    price: pair.buy.beatsPrice,
+                    // Restated from the maker model: my buy competes in SELL.
+                    tradeType: 'SELL',
+                  },
+                  sell: {
+                    advNo: pair.sell.beatsAdvNo,
+                    merchant: pair.sell.beatsMerchant,
+                    price: pair.sell.beatsPrice,
+                    tradeType: 'BUY',
+                  },
+                  capturedAt: cell.capturedAt,
+                },
+        };
+
+        HistoricalMarketStore.record(observation, cell.capturedAt);
+      }
+    }
+  }
+
+  /**
+   * Recomputes every cell's projection from its own series, and evaluates the
+   * signals that follow.
+   *
+   * Pure computation over data already on disk and in memory. The signal
+   * memory walks forward exactly as the backtest replays it, so what the
+   * operator is told now is what the backtest would have said then.
+   */
+  private refreshProjections(matrix: MakerMatrix): void {
+    const projections: CellProjection[] = [];
+
+    for (const bank of matrix.bankOrder) {
+      for (const amountKey of matrix.amountKeys) {
+        const cell = matrix.cells[bank]?.[amountKey];
+        if (cell === undefined) continue;
+
+        const pair = cell.recommendation?.recommended ?? null;
+        projections.push(
+          projectCell({
+            bank,
+            bankDisplayName: cell.bankDisplayName,
+            amountKey,
+            amountVes: cell.amountVes,
+            series: HistoricalMarketStore.load(bank, amountKey),
+            currentBuyPrice: pair?.buy.price ?? null,
+            currentSellPrice: pair?.sell.price ?? null,
+          })
+        );
+      }
+    }
+
+    const evaluated = evaluateSignals({ projections, memory: this.signalMemory });
+    this.signalMemory = evaluated.memory;
+    this.lastProjections = projections;
+    this.lastSignals = evaluated.signals;
+
+    /*
+     * Signals reach Telegram through the SAME notifier as the maker summary,
+     * so the one-voice rule from the maker phase still holds: nothing here
+     * introduces a second emitter, and the notifier deduplicates by what a
+     * signal says rather than by when it was derived.
+     */
+    if (evaluated.signals.length > 0) {
+      void TelegramNotifier.getInstance().notifyMarketSignals(evaluated.signals, Date.now());
+    }
+  }
+
+  /** The latest projection per cell, or an empty list before the first sweep. */
+  public getProjections(): { projections: CellProjection[]; signals: MarketSignal[] } {
+    return { projections: this.lastProjections, signals: this.lastSignals };
   }
 
   /** The captured books, keyed by the tradeType each was requested with. */

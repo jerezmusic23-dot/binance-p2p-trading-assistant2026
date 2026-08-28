@@ -32,7 +32,9 @@ interface MainOverviewProps {
   /** True when analysis/projections could not be refreshed and are the last known good values. */
   derivedStale?: boolean;
   derivedAgeSeconds?: number;
-  onNavigateTab: (tab: 'publish' | 'projections' | 'matrix' | 'orderbook' | 'history') => void;
+  onNavigateTab: (
+    tab: 'publish' | 'analysis' | 'projections' | 'matrix' | 'orderbook' | 'history'
+  ) => void;
 }
 
 export const MainOverview: React.FC<MainOverviewProps> = ({

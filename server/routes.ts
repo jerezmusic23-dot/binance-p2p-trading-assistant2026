@@ -5,6 +5,8 @@
 
 import { Router } from 'express';
 import { selectBestMakerCell } from './makerMatrix.js';
+import { HistoricalMarketStore } from './historicalMarketStore.js';
+import { runProjectionBacktest } from './projectionBacktest.js';
 import { CentralMarketStore } from './centralStore.js';
 import { StorageEngine } from './storage.js';
 import { AlertRule } from './types.js';
@@ -95,6 +97,55 @@ apiRouter.get('/market/maker-matrix', async (req, res) => {
     res.json({ makerMatrix, best: selectBestMakerCell(makerMatrix) });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Error building maker matrix' });
+  }
+});
+
+/*
+ * PROJECTIONS AND SIGNALS, per BANCO x MONTO.
+ *
+ * Reads what the last sweep already computed. Issues no query to Binance and
+ * performs no analysis of its own - the numbers a screen renders are the same
+ * objects Telegram was handed, so the two cannot disagree.
+ */
+apiRouter.get('/market/projections/maker', (_req, res) => {
+  try {
+    const { projections, signals } = centralStore.getProjections();
+    res.json({ projections, signals });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Error building maker projections' });
+  }
+});
+
+/*
+ * BACKTEST of one cell's projection, replayed over its own stored series.
+ *
+ * Every anchor is computed from a PREFIX of the series, so nothing it reports
+ * could have used information from after the moment it describes.
+ */
+apiRouter.get('/market/projections/backtest', (req, res) => {
+  try {
+    const bank = String(req.query.bank ?? '');
+    const amountKey = String(req.query.amount ?? '');
+    const side = req.query.side === 'SELL' ? 'SELL' : 'BUY';
+    if (bank === '' || amountKey === '') {
+      res.status(400).json({ error: 'bank y amount son obligatorios' });
+      return;
+    }
+
+    const series = HistoricalMarketStore.load(bank, amountKey);
+    res.json({
+      series: HistoricalMarketStore.describe(bank, amountKey),
+      report: runProjectionBacktest({
+        bank,
+        bankDisplayName: bank,
+        amountKey,
+        amountVes: series[0]?.amountVes ?? 0,
+        series,
+        side,
+      }),
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Error running projection backtest' });
   }
 });
 

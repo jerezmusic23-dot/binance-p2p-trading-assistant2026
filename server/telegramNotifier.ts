@@ -23,6 +23,7 @@ import {
   TelegramSystemAlert,
 } from './types.js';
 import type { MakerAlert } from './makerAlerts.js';
+import type { MarketSignal } from './signalEngine.js';
 import type { MakerMatrix, MakerMatrixCell } from './makerMatrix.js';
 import type { MakerPairing } from './makerRecommendation.js';
 
@@ -516,6 +517,82 @@ export function formatMakerPriceChangeMessage(
  * the operator can act on: the number changed.
  */
 
+/**
+ * 📈 PROYECCIÓN DE MERCADO / 🚨 CAMBIO DE TENDENCIA.
+ *
+ * A signal explains itself or it does not go out. Every message carries the
+ * evidence that produced it, the number of observations behind that evidence,
+ * and - loudly - the difference between what the price IS and what the series
+ * suggests it might do.
+ *
+ * NOT AN INSTRUCTION. There is no "publica a", no "compra ahora" and no target.
+ * The operator is told what the data shows and decides for themselves.
+ */
+export function formatMarketSignalMessage(signal: MarketSignal, timestamp: number): string {
+  const n = (value: number | null): string =>
+    value === null ? 'no verificable' : escapeHtml(value.toFixed(2));
+
+  const heading =
+    signal.kind === 'TREND_CHANGE'
+      ? signal.status === 'CONFIRMED'
+        ? '🚨 <b>CAMBIO DE TENDENCIA</b>'
+        : '⚠️ <b>POSIBLE CAMBIO DE TENDENCIA</b>'
+      : signal.kind === 'BREAKOUT_UP' || signal.kind === 'BREAKOUT_DOWN'
+      ? '🚀 <b>RUPTURA</b>'
+      : '📈 <b>PROYECCIÓN DE MERCADO</b>';
+
+  const statusLine =
+    signal.status === 'CONFIRMED'
+      ? 'Estado: <b>CONFIRMADA</b>'
+      : 'Estado: <b>SEÑAL PARCIAL · AVISO TEMPRANO</b>';
+
+  const lines = [
+    heading,
+    '',
+    `🏦 ${escapeHtml(signal.bankDisplayName)} · ${escapeHtml(signal.amountKey)}`,
+    `${signal.side === 'BUY' ? '🟢' : '🔵'} ${escapeHtml(signal.sideLabel)}`,
+    '',
+    escapeHtml(signal.headline),
+    '',
+    statusLine,
+    `Confianza: <b>${escapeHtml(signal.confidence)}</b> · Muestras: <b>${escapeHtml(
+      String(signal.sampleSize)
+    )}</b>`,
+    '',
+    /*
+     * ACTUAL first and labelled, then PROYECTADO labelled separately. A band
+     * rendered beside a live price with the same wording is how somebody ends
+     * up publishing an ad at a number Binance never quoted.
+     */
+    `ACTUAL (precio para publicar): <b>${n(signal.currentPrice)} VES</b>`,
+    signal.projectedLow !== null && signal.projectedHigh !== null
+      ? `PROYECTADO (rango observado): <b>${n(signal.projectedLow)} – ${n(signal.projectedHigh)} VES</b>`
+      : 'PROYECTADO: no verificable con el histórico disponible',
+  ];
+
+  if (signal.watchStartHour !== null && signal.watchEndHour !== null) {
+    lines.push(
+      '',
+      `MIRAR: <b>${escapeHtml(String(signal.watchStartHour).padStart(2, '0'))}:00 – ${escapeHtml(
+        String(signal.watchEndHour).padStart(2, '0')
+      )}:00</b> (hora de Venezuela)`
+    );
+  }
+
+  lines.push(
+    '',
+    '<b>Evidencia</b>',
+    ...signal.evidence.map((line) => `· ${escapeHtml(line)}`),
+    '',
+    'No es una orden automática ni una operación garantizada.',
+    'Una proyección no es un precio de Binance.',
+    '',
+    `Hora: ${formatVenezuelaClock(timestamp)}`
+  );
+
+  return lines.join('\n');
+}
+
 export function formatSystemAlertMessage(alert: TelegramSystemAlert): string {
   const heading: Record<TelegramSystemAlert['kind'], string> = {
     BINANCE_OFFLINE: '⛔ <b>BINANCE NO DISPONIBLE</b>',
@@ -637,6 +714,55 @@ export class TelegramNotifier {
       console.warn(`[Telegram] Unexpected notifier error: ${this.describe(err)}`);
       return { outcome: 'NETWORK_ERROR', detail: this.describe(err) };
     }
+  }
+
+  /**
+   * Puts market signals on the wire.
+   *
+   * DEDUPLICATED BY WHAT THEY SAY. A signal's identity is its kind, cell, side
+   * and level - not its timestamp - so the same finding re-derived on the next
+   * sweep sends nothing. That is what stops a stable market from producing a
+   * message every 45 seconds for as long as the condition holds.
+   *
+   * COOLDOWN PER CELL, so one cell in a volatile stretch cannot crowd out the
+   * other 41.
+   */
+  public async notifyMarketSignals(
+    signals: readonly MarketSignal[],
+    timestamp: number
+  ): Promise<TelegramResult[]> {
+    const results: TelegramResult[] = [];
+    if (!this.config) return signals.map(() => ({ outcome: 'DISABLED' as const }));
+
+    const now = timestamp || Date.now();
+
+    for (const signal of signals) {
+      try {
+        const dedupKey = `signal:${signal.identity}:${signal.status}`;
+        if (this.lastSentAt.has(dedupKey)) {
+          results.push({ outcome: 'UNCHANGED' });
+          continue;
+        }
+
+        const cellKey = `signal:cell:${signal.bank}:${signal.amountKey}`;
+        const previous = this.lastSentAt.get(cellKey);
+        if (previous !== undefined && now - previous < this.config.cooldownMs) {
+          results.push({ outcome: 'COOLDOWN' });
+          continue;
+        }
+
+        this.lastSentAt.set(dedupKey, now);
+        this.lastSentAt.set(cellKey, now);
+        this.prune(now);
+
+        results.push(await this.send(formatMarketSignalMessage(signal, now)));
+      } catch (err) {
+        console.warn(`[Telegram] Unexpected notifier error: ${this.describe(err)}`);
+        results.push({ outcome: 'NETWORK_ERROR', detail: this.describe(err) });
+      }
+    }
+
+    return results;
   }
 
   private async send(text: string): Promise<TelegramResult> {

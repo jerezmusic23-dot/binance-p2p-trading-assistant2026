@@ -284,12 +284,36 @@ describe('TEST 12 (backend) - no Math.abs on an economic spread', () => {
  */
 describe('TEST 13 - only the maker path may price against the leader', () => {
   it('no taker module builds a rate by undercutting the leader', () => {
-    for (const file of ['centralStore.ts', 'executableMatrix.ts', 'executability.ts']) {
+    for (const file of ['executableMatrix.ts', 'executability.ts']) {
       const src = code(SERVER, file);
       expect(src).not.toMatch(/leaderPrice/);
       expect(src).not.toMatch(/suggestedPrice/);
       expect(src).not.toMatch(/\+ 0\.01/);
     }
+  });
+
+  it('the store may RECORD a maker leader, but never construct a price from one', () => {
+    /*
+     * centralStore reads leaderPrice again, and legitimately: FASE 2 persists
+     * it as an observation so the trend engine has a series to work on.
+     * Recording what the leader was is not the defect. Deriving a rate from it
+     * is - that is what the old dashboard did with leader + 0.01, and it stays
+     * banned here.
+     */
+    const store = code(SERVER, 'centralStore.ts');
+
+    expect(store).not.toMatch(/suggestedPrice/);
+    expect(store).not.toMatch(/\+ 0\.01|- 0\.01/);
+
+    // Every mention lives inside the persistence method, as a stored field.
+    const persistence = store.slice(
+      store.indexOf('private persistObservations'),
+      store.indexOf('private refreshProjections')
+    );
+    const mentions = store.match(/leaderPrice/g) ?? [];
+    const inPersistence = persistence.match(/leaderPrice/g) ?? [];
+    expect(mentions.length).toBeGreaterThan(0);
+    expect(inPersistence.length).toBe(mentions.length);
   });
 
   it('no taker client module does either', () => {

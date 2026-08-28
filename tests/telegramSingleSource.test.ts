@@ -135,14 +135,38 @@ describe('two emitters can never speak at once', () => {
     expect(marketCalls).toEqual(['notifyMakerAlerts']);
   });
 
-  it('the remaining emitters are the maker one, user rules and system health', () => {
+  it('the remaining emitters are the maker layer, user rules and system health', () => {
     const notifier = code('telegramNotifier.ts');
     const publicEmitters = (notifier.match(/public async notify[A-Za-z]+/g) ?? []).sort();
+    /*
+     * notifyMarketSignals joined in FASE 2. It is not a second market voice:
+     * it is fed by signalEngine, which reads only the per-cell series the
+     * maker layer wrote, and it deduplicates through the same lastSentAt map.
+     * The rule was never "one method" - it was "one model", and both market
+     * emitters speak the maker one.
+     */
     expect(publicEmitters).toEqual([
       'public async notifyAlert',
       'public async notifyMakerAlerts',
+      'public async notifyMarketSignals',
       'public async notifySystemAlert',
     ]);
+  });
+
+  it('the projection emitter is fed by the maker layer and nothing else', () => {
+    const notifier = read('telegramNotifier.ts');
+    expect(notifier).toMatch(/import type \{ MarketSignal \} from '\.\/signalEngine\.js';/);
+
+    // signalEngine reads the per-cell series, never a listing or an opportunity.
+    const signals = code('signalEngine.ts');
+    expect(signals).not.toMatch(/tradeType\s*===|queryP2PAds|Opportunity|arbitrage/i);
+
+    // And the projection message never speaks the taker model.
+    const message = code('telegramNotifier.ts').slice(
+      code('telegramNotifier.ts').indexOf('export function formatMarketSignalMessage'),
+      code('telegramNotifier.ts').indexOf('export function formatSystemAlertMessage')
+    );
+    expect(message).not.toMatch(/ARBITRAJE|OPORTUNIDAD|EXECUTABLE|Binance ASK|Binance BID/i);
   });
 
   it('the maker emitter is driven from one place only', () => {

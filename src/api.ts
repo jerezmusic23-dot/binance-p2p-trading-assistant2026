@@ -4,6 +4,7 @@ import {
   MarketProjections,
   ExecutableMatrixResponse,
   MakerMatrixResponse,
+  MakerProjectionsResponse,
   OpportunitiesResponse,
   HistoryRecord,
   HistorySummary,
@@ -85,6 +86,16 @@ export class ApiService {
    */
   public static async getMakerMatrix(refresh = false): Promise<MakerMatrixResponse> {
     return requestJson<MakerMatrixResponse>(`/api/market/maker-matrix?refresh=${refresh}`);
+  }
+
+  /**
+   * Projections and signals per BANCO x MONTO.
+   *
+   * The SAME objects Telegram receives. The UI never derives a trend, a band
+   * or a probability of its own.
+   */
+  public static async getMakerProjections(): Promise<MakerProjectionsResponse> {
+    return requestJson<MakerProjectionsResponse>('/api/market/projections/maker');
   }
 
   /**
