@@ -456,6 +456,78 @@ describe('signal throttling, as measured', () => {
     vi.unstubAllGlobals();
   });
 
+  it('CRITICAL gets fifteen minutes, ordinary signals thirty', async () => {
+    /*
+     * THE TWO FLOORS, STATED AS NUMBERS.
+     *
+     * A confirmed break is worth interrupting for, so it waits half as long as
+     * anything else - but it is NOT exempt. Without a floor at all, a
+     * market-wide move breaking a level in twelve cells arrived as twelve
+     * notifications about one event, which is measured in the comment on
+     * notifyMarketSignals.
+     */
+    const fetchMock = vi.fn(async () => new Response('{"ok":true}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const n = notifier();
+    const HALF = DEFAULT_SIGNAL_INTERVAL_MS / 2;
+
+    const critical = (i: number) =>
+      signal({
+        bank: `C${i}`,
+        identity: `crit-${i}`,
+        kind: 'BREAKOUT_UP',
+        status: 'CONFIRMED',
+      });
+
+    expect((await n.notifyMarketSignals([critical(1)], T0))[0].outcome).toBe('SENT');
+    // One second short of the half-hour floor: still shut.
+    expect((await n.notifyMarketSignals([critical(2)], T0 + HALF - 1))[0].outcome).toBe(
+      'COOLDOWN'
+    );
+    // Exactly at it: open.
+    expect((await n.notifyMarketSignals([critical(3)], T0 + HALF))[0].outcome).toBe('SENT');
+
+    vi.unstubAllGlobals();
+  });
+
+  it('an ordinary signal waits the full interval, not the critical half', async () => {
+    const fetchMock = vi.fn(async () => new Response('{"ok":true}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const n = notifier();
+    const FULL = DEFAULT_SIGNAL_INTERVAL_MS;
+
+    const ordinary = (i: number) =>
+      signal({ bank: `O${i}`, identity: `warn-${i}`, kind: 'EXHAUSTION' });
+
+    expect((await n.notifyMarketSignals([ordinary(1)], T0))[0].outcome).toBe('SENT');
+    // At the CRITICAL floor an ordinary signal is still waiting.
+    expect((await n.notifyMarketSignals([ordinary(2)], T0 + FULL / 2))[0].outcome).toBe(
+      'COOLDOWN'
+    );
+    expect((await n.notifyMarketSignals([ordinary(3)], T0 + FULL))[0].outcome).toBe('SENT');
+
+    vi.unstubAllGlobals();
+  });
+
+  it('a CRITICAL is never silenced by an ordinary signal that just went out', async () => {
+    /*
+     * The two floors are separate keys on purpose. If they shared one, an
+     * exhaustion note would mute a confirmed break for half an hour.
+     */
+    const fetchMock = vi.fn(async () => new Response('{"ok":true}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const n = notifier();
+
+    await n.notifyMarketSignals([signal({ bank: 'O', identity: 'warn' })], T0);
+    const critical = await n.notifyMarketSignals(
+      [signal({ bank: 'C', identity: 'crit', kind: 'BREAKOUT_UP', status: 'CONFIRMED' })],
+      T0 + 60_000
+    );
+
+    expect(critical[0].outcome).toBe('SENT');
+    vi.unstubAllGlobals();
+  });
+
   it('says nothing at all when the signal has no live price', async () => {
     const fetchMock = vi.fn(async () => new Response('{"ok":true}', { status: 200 }));
     vi.stubGlobal('fetch', fetchMock);
