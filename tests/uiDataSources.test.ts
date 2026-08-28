@@ -250,19 +250,38 @@ describe('TEST 12 (backend) - no Math.abs on an economic spread', () => {
     expect(code(SERVER, 'opportunityEngine.ts')).not.toMatch(/Math\.abs/);
   });
 
-  it('the only Math.abs left in the capture layer is the RAW audit trail', () => {
+  it('the capture layer has no Math.abs on a spread either', () => {
     /*
-     * binanceP2PService still computes spreadAbsolute with Math.abs. It feeds
-     * HistoryRecord.spreadPct - the raw extreme spread kept as an audit trail -
-     * and NOTHING else. It reaches no opportunity, no cell and no screen.
+     * THIS TEST USED TO ALLOW ONE.
+     *
+     * binanceP2PService computed spreadAbsolute with Math.abs, and this block
+     * permitted it as "the RAW audit trail ... it reaches no opportunity, no
+     * cell and no screen". Two thirds of that was true and the last third was
+     * not: the number is persisted as HistoryRecord.spreadPct and drawn as the
+     * spread column of the history screen, so on a normal book - ask above bid
+     * - a loss was displayed as a gain. The exemption is gone with it.
      */
     const service = code(SERVER, 'binanceP2PService.ts');
-    const occurrences = service.match(/Math\.abs/g) ?? [];
-    expect(occurrences).toHaveLength(1);
-    expect(service).toMatch(/spreadAbsolute[\s\S]{0,200}Math\.abs/);
+    expect(service).not.toMatch(/Math\.abs/);
+    // And the sign now comes from the domain's single definition of it.
+    expect(service).toMatch(/signedSpreadPct\(bestSellPrice, bestBuyPrice\)/);
 
     for (const file of ['MainOverview.tsx', 'BankMatrix.tsx', 'MyOperationPanel.tsx', 'Header.tsx']) {
       expect(code(SRC, file)).not.toMatch(/Math\.abs/);
+    }
+  });
+
+  it('no module on the snapshot path flattens a spread with Math.abs', () => {
+    for (const file of [
+      'binanceP2PService.ts',
+      'executability.ts',
+      'executableMatrix.ts',
+      'opportunityEngine.ts',
+      'marketStatistics.ts',
+    ]) {
+      const src = code(SERVER, file);
+      expect(src, file).not.toMatch(/Math\.abs\([^)]*[Ss]pread/);
+      expect(src, file).not.toMatch(/[Ss]pread[^\n]{0,40}Math\.abs/);
     }
   });
 });

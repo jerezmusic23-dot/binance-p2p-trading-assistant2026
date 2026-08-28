@@ -356,14 +356,33 @@ describe('evaluateAlerts', () => {
   });
 
   it('FASE 2: a loss keeps its sign instead of being flattened by Math.abs', async () => {
-    // Venta BELOW recompra is a losing operation. The raw spread takes the
-    // absolute value, so a loss was indistinguishable from a gain.
+    /*
+     * Venta BELOW recompra is a losing operation.
+     *
+     * This test used to assert the DEFECT: the raw spread took the absolute
+     * value, so a loss read as a gain, and the line said so - "raw: sign
+     * destroyed". Only the strategic figure carried the truth. Both do now,
+     * which is what types.ts always specified: "Signed. Never absolute-valued:
+     * a loss must stay a loss."
+     */
     stubBinance([makeAdItem({ price: '941.00' })], [makeAdItem({ price: '918.00' })]);
     const { store } = await freshStore();
     const snapshot = await store.pollMarket();
 
-    expect(snapshot?.spreadPercentage).toBeGreaterThan(0); // raw: sign destroyed
+    expect(snapshot?.spreadPercentage).toBeLessThan(0); // raw: sign preserved
     expect(snapshot?.strategicSpreadPct).toBeLessThan(0); // strategic: it is a loss
+  });
+
+  it('persists the signed spread into the history, not an absolute one', async () => {
+    // Ask 941 above bid 918: a taker crossing this loses. The stored series
+    // has to say so, because a chart drawn from it is read as the market.
+    stubBinance([makeAdItem({ price: '941.00' })], [makeAdItem({ price: '918.00' })]);
+    const { store } = await freshStore();
+    await store.pollMarket();
+
+    const history = readData<{ spreadPct: number }[]>('market_history.json');
+    expect(history.length).toBeGreaterThan(0);
+    expect(history[history.length - 1].spreadPct).toBeLessThan(0);
   });
 
   it('FASE 2: an ABOVE rule decides on the strategic price, not on the extreme', async () => {

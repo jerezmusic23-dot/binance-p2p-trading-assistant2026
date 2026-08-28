@@ -271,8 +271,16 @@ describe('fetchFullMarketSnapshot', () => {
     expect(snap.bestSellPrice).toBe(921);  // highest sell
     expect(snap.averageBuyPrice).toBe(918.5);
     expect(snap.weightedBuyPrice).toBe(918.75); // (918*100 + 919*300) / 400
+    /*
+     * SIGNED, and the percentage is no longer rounded to two decimals.
+     *
+     * Ask 918 below bid 921 is a profitable crossing, so both stay positive
+     * here - the sign only becomes visible on a normal book, where the ask
+     * sits above the bid. The percentage divides by the ENTRY price (918),
+     * which is the money committed, not by whichever of the two is smaller.
+     */
     expect(snap.spreadAbsolute).toBe(3);
-    expect(snap.spreadPercentage).toBe(0.33);
+    expect(snap.spreadPercentage).toBeCloseTo(0.3268, 4);
     expect(snap.source).toBe('BINANCE_P2P');
     expect(snap.status).toBe('LIVE');
     expect(snap.lastError).toBeNull();
@@ -523,5 +531,115 @@ describe('FASE 4 - liquidity absence survives normalization', () => {
 
   it('falls back to surplusAmount when tradableQuantity is absent', () => {
     expect(normalizeOne({ tradable: '', surplus: '77' }).availableUsdtReported).toBe(77);
+  });
+});
+
+/**
+ * THE RAW SPREAD KEEPS ITS SIGN.
+ *
+ * `spreadAbsolute` and `spreadPercentage` are the only figures the capture
+ * layer publishes about the relationship between the two sides, and they are
+ * persisted as HistoryRecord.spreadPct and drawn on the history screen. They
+ * used to be absolute-valued, so on a normal book - ask above bid, which is
+ * what a functioning market looks like - a loss was displayed as a gain.
+ *
+ * types.ts had specified the opposite all along: "Signed. Never
+ * absolute-valued: a loss must stay a loss."
+ */
+describe('el spread crudo conserva el signo', () => {
+  const adAt = (price: number) => makeAdItem({ price: price.toFixed(2), tradable: '100' });
+
+  function stubBook(askSide: number, bidSide: number) {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init: RequestInit) => {
+        const body = JSON.parse(String(init.body));
+        // tradeType=BUY returns the ads I would buy FROM: the asks.
+        const price = body.tradeType === 'BUY' ? askSide : bidSide;
+        return {
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+          json: async () => makeBinanceResponse([adAt(price)]),
+        } as unknown as Response;
+      })
+    );
+  }
+
+  it('1 - libro rentable: entrada 940, salida 950 -> spread POSITIVO', async () => {
+    stubBook(940, 950);
+    const snap = await BinanceP2PService.fetchFullMarketSnapshot();
+
+    expect(snap.bestBuyPrice).toBe(940);
+    expect(snap.bestSellPrice).toBe(950);
+    expect(snap.spreadAbsolute).toBe(10);
+    // (950 - 940) / 940 * 100
+    expect(snap.spreadPercentage).toBeCloseTo(1.0638, 4);
+  });
+
+  it('2 - libro perdedor: entrada 950, salida 940 -> spread NEGATIVO', async () => {
+    stubBook(950, 940);
+    const snap = await BinanceP2PService.fetchFullMarketSnapshot();
+
+    expect(snap.spreadAbsolute).toBe(-10);
+    expect(snap.spreadPercentage).toBeCloseTo(-1.0526, 4);
+    expect(snap.spreadPercentage as number).toBeLessThan(0);
+  });
+
+  it('3 - libro plano: entrada 945, salida 945 -> spread CERO', async () => {
+    stubBook(945, 945);
+    const snap = await BinanceP2PService.fetchFullMarketSnapshot();
+
+    expect(snap.spreadAbsolute).toBe(0);
+    expect(snap.spreadPercentage).toBe(0);
+  });
+
+  it('4 - el libro real de producción ya no informa una pérdida como ganancia', async () => {
+    /*
+     * The medians observed in production: ask 945.75 above bid 944.75. Crossing
+     * that costs the taker 0.1057%. The absolute-valued version reported
+     * +0.1058% - the right magnitude with the wrong sign, which is the one
+     * failure mode this project cannot have.
+     */
+    stubBook(945.75, 944.75);
+    const snap = await BinanceP2PService.fetchFullMarketSnapshot();
+
+    expect(snap.spreadPercentage).toBeCloseTo(-0.1057, 4);
+    expect(snap.spreadPercentage).not.toBeCloseTo(0.1058, 4);
+    expect(snap.spreadAbsolute).toBe(-1);
+  });
+
+  it('divides by the ENTRY price, not by whichever of the two is lower', async () => {
+    /*
+     * The old base was Math.min(ask, bid). On a losing book that is the bid -
+     * money never committed. The denominator has to be what was actually put
+     * in, which is the ask.
+     */
+    stubBook(1000, 900);
+    const snap = await BinanceP2PService.fetchFullMarketSnapshot();
+
+    expect(snap.spreadPercentage).toBeCloseTo(-10, 6); // -100 / 1000
+    expect(snap.spreadPercentage).not.toBeCloseTo(-11.11, 2); // -100 / 900
+  });
+
+  it('reports no spread at all when one side of the book is empty', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init: RequestInit) => {
+        const body = JSON.parse(String(init.body));
+        return {
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+          json: async () =>
+            makeBinanceResponse(body.tradeType === 'BUY' ? [adAt(940)] : []),
+        } as unknown as Response;
+      })
+    );
+
+    const snap = await BinanceP2PService.fetchFullMarketSnapshot();
+    // An absent price is absent: never 0, and never derived from one side.
+    expect(snap.spreadAbsolute).toBeNull();
+    expect(snap.spreadPercentage).toBeNull();
   });
 });

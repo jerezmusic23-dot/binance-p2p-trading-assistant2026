@@ -266,21 +266,41 @@ export class BinanceP2PService {
     const weightedBuyPrice = liquidityWeightedPrice(topBuyAds);
     const weightedSellPrice = liquidityWeightedPrice(topSellAds);
 
-    // A spread needs two prices. With one side missing there is no spread.
-    // NOTE: still the RAW extreme spread. FASE 3 replaces this with the signed
-    // strategic spread computed from the medians.
+    /*
+     * THE RAW EXTREME SPREAD, SIGNED.
+     *
+     * A spread needs two prices; with one side missing there is no spread.
+     *
+     * IT USED TO BE ABSOLUTE-VALUED, and that contradicted this project's own
+     * contract - types.ts states "spreadAbsolute = arbitrageSellPrice -
+     * arbitrageBuyPrice ... Signed. Never absolute-valued: a loss must stay a
+     * loss." Two things did it:
+     *
+     *   Math.abs(bestBuyPrice - bestSellPrice)   erased the direction, and
+     *   Math.min(bestBuyPrice, bestSellPrice)    divided by whichever price
+     *                                            happened to be lower rather
+     *                                            than by the money committed.
+     *
+     * On the real production book - ask 945.75 above bid 944.75, which is what
+     * a functioning market looks like - the pair reported +0.1058%. The taker
+     * loses 0.1057% crossing that spread. The number had the wrong sign, and it
+     * is persisted as HistoryRecord.spreadPct and drawn on the history screen.
+     *
+     * The direction is the taker's, unchanged: bestBuyPrice is the ask I would
+     * pay (the entry) and bestSellPrice the bid I would receive (the exit). The
+     * formula is the domain's own signedSpreadPct, so there is one definition
+     * of this sign in the codebase rather than two.
+     *
+     * NOT ROUNDED, unlike the VES figure beside it. Real spreads in this market
+     * live in the third and fourth decimal: at two decimals -0.1057% and
+     * -0.1149% both become -0.11, and a 0.004% move becomes 0.00. That is the
+     * same reasoning opportunityEngine already applies to its own spreadPct.
+     */
     const spreadAbsolute =
       bestBuyPrice !== null && bestSellPrice !== null
-        ? round2(Math.abs(bestBuyPrice - bestSellPrice))
+        ? round2(bestSellPrice - bestBuyPrice)
         : null;
-    const basePrice =
-      bestBuyPrice !== null && bestSellPrice !== null
-        ? Math.min(bestBuyPrice, bestSellPrice)
-        : null;
-    const spreadPercentage =
-      spreadAbsolute !== null && basePrice !== null && basePrice > 0
-        ? round2((spreadAbsolute / basePrice) * 100)
-        : null;
+    const spreadPercentage = signedSpreadPct(bestSellPrice, bestBuyPrice);
 
     const missingSide = (side: 'BUY' | 'SELL') =>
       `El lado ${side} no devolvio anuncios. No hay precio: la ausencia es el dato.`;
