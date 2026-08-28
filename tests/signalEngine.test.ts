@@ -174,3 +174,96 @@ describe('ACTUAL and PROYECTADO never share a field', () => {
     expect(signal).toHaveProperty('projectedHigh');
   });
 });
+
+/**
+ * TWO REFUSALS THAT A LIVE RUN FOUND.
+ *
+ * Driving the real store for 150 simulated minutes produced 744 signal
+ * messages out of 759 sent. Neither cause is visible from a single cell, which
+ * is why unit tests over one projection had missed both.
+ */
+describe('BUG: a shared reading must not become 42 identical alerts', () => {
+  it('says nothing at all from a borrowed reading', () => {
+    const general = seriesFromBuyPrices(ramp(940, 960, 60));
+    const borrowed = projectCell({
+      ...CELL,
+      series: seriesFromBuyPrices([940, 940.5, 941]),
+      currentBuyPrice: 960,
+      currentSellPrice: null,
+      generalSeries: general,
+    });
+
+    expect(borrowed.buy.borrowedFrom).toBe('MERCADO GENERAL');
+    // The reading still exists and still renders; it is simply not news 42
+    // times over, once per cell that borrowed the same series.
+    expect(borrowed.buy.trend.trend).not.toBe('UNKNOWN');
+    expect(evaluateSignals({ projections: [borrowed], memory: EMPTY_SIGNAL_MEMORY }).signals)
+      .toEqual([]);
+  });
+
+  it('says nothing about a cell with no live price to publish', () => {
+    const projection = projectCell({
+      ...CELL,
+      series: seriesFromBuyPrices(ramp(940, 960, 60)),
+      // No recommendation right now: nothing to act on, so nothing to say.
+      currentBuyPrice: null,
+      currentSellPrice: null,
+    });
+
+    expect(evaluateSignals({ projections: [projection], memory: EMPTY_SIGNAL_MEMORY }).signals)
+      .toEqual([]);
+  });
+
+  it('still speaks when the cell has its own reading and a live price', () => {
+    const projection = projectCell({
+      ...CELL,
+      series: seriesFromBuyPrices(ramp(940, 960, 60)),
+      currentBuyPrice: 960,
+      currentSellPrice: null,
+    });
+
+    expect(projection.buy.borrowedFrom).toBeNull();
+    expect(
+      evaluateSignals({ projections: [projection], memory: EMPTY_SIGNAL_MEMORY }).signals.length
+    ).toBeGreaterThan(0);
+  });
+});
+
+describe('BUG: a breakout that continues is the same breakout', () => {
+  it('keeps one identity while the move is sustained', () => {
+    const wave = [940, 942, 944, 946, 944, 942, 940, 942, 944, 946, 944, 942, 940];
+
+    const first = evaluateSignals({
+      projections: [
+        projectCell({
+          ...CELL,
+          series: seriesFromBuyPrices([...wave, 952]),
+          currentBuyPrice: 952,
+          currentSellPrice: null,
+        }),
+      ],
+      memory: EMPTY_SIGNAL_MEMORY,
+    }).signals.find((s) => s.kind === 'BREAKOUT_UP');
+
+    const later = evaluateSignals({
+      projections: [
+        projectCell({
+          ...CELL,
+          series: seriesFromBuyPrices([...wave, 952, 954, 956]),
+          currentBuyPrice: 956,
+          currentSellPrice: null,
+        }),
+      ],
+      memory: EMPTY_SIGNAL_MEMORY,
+    }).signals.find((s) => s.kind === 'BREAKOUT_UP');
+
+    /*
+     * Keying the identity on the broken LEVEL made every sweep of a rising
+     * market a brand-new event, so deduplication never matched and one
+     * continuing move became a stream of messages.
+     */
+    expect(first).toBeDefined();
+    expect(later).toBeDefined();
+    expect(later!.identity).toBe(first!.identity);
+  });
+});

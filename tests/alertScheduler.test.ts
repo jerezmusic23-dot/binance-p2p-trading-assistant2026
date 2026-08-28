@@ -6,7 +6,7 @@
  * and a window of many changes becomes one message.
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_PRICE_CHANGE_INTERVAL_MS,
   EMPTY_DIGEST_STATE,
@@ -16,6 +16,8 @@ import {
   readPriceChangeInterval,
   releasePriceChangeDigest,
 } from '../server/alertScheduler.js';
+import { TelegramNotifier } from '../server/telegramNotifier.js';
+import type { MarketSignal } from '../server/signalEngine.js';
 import { buildMakerMatrix } from '../server/makerMatrix.js';
 import { DEFAULT_MAKER_CONFIG } from '../server/makerStrategy.js';
 import { makeNormalizedAd } from './helpers/fixtures.js';
@@ -196,5 +198,108 @@ describe('priorities', () => {
     expect(priorityOf({ kind: 'EXHAUSTION', status: 'EARLY_WARNING' })).toBe('WARNING');
     expect(priorityOf({ kind: 'ACCUMULATION', status: 'EARLY_WARNING' })).toBe('INFO');
     expect(priorityOf({ kind: 'DISTRIBUTION', status: 'EARLY_WARNING' })).toBe('INFO');
+  });
+});
+
+/**
+ * THE LIMITS A LIVE RUN FOUND.
+ *
+ * Every rule below exists because driving the real store for 150 simulated
+ * minutes produced 744 signal messages out of 759 sent. Unit tests over single
+ * cells could not have found any of them: each cause is about what happens
+ * when 42 cells behave correctly at the same time.
+ */
+describe('signal throttling, as measured', () => {
+  const notifier = () =>
+    new TelegramNotifier({
+      botToken: '1234567890:TEST-TOKEN-NOT-REAL',
+      chatId: '-1000000000000',
+      cooldownMs: 300_000,
+      timeoutMs: 1000,
+    });
+
+  const signal = (over: Partial<MarketSignal> = {}): MarketSignal => ({
+    kind: 'EXHAUSTION',
+    status: 'EARLY_WARNING' as const,
+    bank: 'BANESCO',
+    bankDisplayName: 'Banesco',
+    amountKey: '10K',
+    amountVes: 10_000,
+    side: 'BUY' as const,
+    sideLabel: 'MI COMPRA DE USDT',
+    headline: 'x',
+    evidence: ['y'],
+    confidence: 'MEDIUM' as const,
+    sampleSize: 20,
+    currentPrice: 940,
+    projectedLow: 939,
+    projectedHigh: 941,
+    watchStartHour: null,
+    watchEndHour: null,
+    identity: 'EXHAUSTION:BANESCO:10K:BUY:BULLISH',
+    ...over,
+  });
+
+  it('sends one non-critical signal per window across the WHOLE matrix', async () => {
+    const fetchMock = vi.fn(async () => new Response('{"ok":true}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const results = await notifier().notifyMarketSignals(
+      [
+        signal({ bank: 'A', identity: 'a' }),
+        signal({ bank: 'B', identity: 'b' }),
+        signal({ bank: 'C', identity: 'c' }),
+      ],
+      T0
+    );
+
+    // Per-cell cooldowns bound each cell and say nothing about the total.
+    expect(results.filter((r) => r.outcome === 'SENT')).toHaveLength(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    vi.unstubAllGlobals();
+  });
+
+  it('lets a CRITICAL through ahead of the queue', async () => {
+    const fetchMock = vi.fn(async () => new Response('{"ok":true}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const results = await notifier().notifyMarketSignals(
+      [
+        signal({ bank: 'A', identity: 'a' }),
+        signal({ bank: 'B', identity: 'b', kind: 'BREAKOUT_UP', status: 'CONFIRMED' }),
+      ],
+      T0
+    );
+
+    expect(results.filter((r) => r.outcome === 'SENT')).toHaveLength(2);
+    vi.unstubAllGlobals();
+  });
+
+  it('treats a market-wide break as one event, not one per cell', async () => {
+    const fetchMock = vi.fn(async () => new Response('{"ok":true}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const results = await notifier().notifyMarketSignals(
+      ['A', 'B', 'C', 'D'].map((bank) =>
+        signal({ bank, identity: `bk-${bank}`, kind: 'BREAKOUT_UP', status: 'CONFIRMED' })
+      ),
+      T0
+    );
+
+    // Four cells breaking at once is one market movement.
+    expect(results.filter((r) => r.outcome === 'SENT')).toHaveLength(1);
+    vi.unstubAllGlobals();
+  });
+
+  it('says nothing at all when the signal has no live price', async () => {
+    const fetchMock = vi.fn(async () => new Response('{"ok":true}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    // Guarded upstream in signalEngine; asserted there too. Here the notifier
+    // simply must not invent one.
+    await notifier().notifyMarketSignals([signal({ currentPrice: null })], T0);
+    const call = fetchMock.mock.calls[0] as unknown as [string, RequestInit] | undefined;
+    const body = call === undefined ? '' : (JSON.parse(String(call[1].body)).text as string);
+    expect(body).toContain('no verificable');
+    vi.unstubAllGlobals();
   });
 });

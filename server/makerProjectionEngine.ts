@@ -321,7 +321,8 @@ function projectSide(
   which: TrendSeries,
   currentPrice: number | null,
   stepsAhead: number,
-  borrowedFrom: string | null = null
+  borrowedFrom: string | null = null,
+  includeDayPatterns = false
 ): SideProjection {
   const observed = points(series, which);
   const trend = analyseTrend(series, which);
@@ -345,7 +346,16 @@ function projectSide(
               ),
               description: `Observaciones entre las ${windows[0].startHour}:00 y las ${windows[0].endHour}:00`,
             }),
-      byDay: outcomesByDay(series, which, stepsAhead),
+      /*
+       * DAY PATTERNS ARE OPT-IN, and that is a measured decision.
+       *
+       * Seven distributions per side per cell is 588 passes over the series on
+       * every 45-second sweep, and nothing on the alerting path reads them -
+       * only the screen showing one cell does. Computing them for all 42 cells
+       * made the sweep slow enough to time out a test, which is the cheapest
+       * possible way to find out.
+       */
+      byDay: includeDayPatterns ? outcomesByDay(series, which, stepsAhead) : [],
     },
     borrowedFrom,
     side: which,
@@ -398,6 +408,8 @@ export function projectCell(params: {
    * this bank at this amount.
    */
   generalSeries?: readonly HistoricalObservation[];
+  /** Day-of-week distributions. Off by default; see projectSide. */
+  includeDayPatterns?: boolean;
 }): CellProjection {
   const stepsAhead = params.stepsAhead ?? DEFAULT_HORIZON_STEPS;
   const series = params.series;
@@ -417,8 +429,22 @@ export function projectCell(params: {
     bankDisplayName: params.bankDisplayName,
     amountKey: params.amountKey,
     amountVes: params.amountVes,
-    buy: projectSide(readingSeries, 'BUY', params.currentBuyPrice, stepsAhead, borrowedFrom),
-    sell: projectSide(readingSeries, 'SELL', params.currentSellPrice, stepsAhead, borrowedFrom),
+    buy: projectSide(
+      readingSeries,
+      'BUY',
+      params.currentBuyPrice,
+      stepsAhead,
+      borrowedFrom,
+      params.includeDayPatterns
+    ),
+    sell: projectSide(
+      readingSeries,
+      'SELL',
+      params.currentSellPrice,
+      stepsAhead,
+      borrowedFrom,
+      params.includeDayPatterns
+    ),
     // The cell's OWN counts, always - never the borrowed series's.
     observations: series.length,
     firstObservedAt: series.length > 0 ? series[0].timestamp : null,

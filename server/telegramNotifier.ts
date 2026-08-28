@@ -770,21 +770,62 @@ export class TelegramNotifier {
         }
 
         /*
-         * CRITICAL skips the cooldown, and only CRITICAL: a confirmed break of
-         * a level the series itself built is the one thing worth interrupting
-         * for. It is still deduplicated by identity above, so a break that
-         * persists across sweeps is announced once, not once per sweep.
+         * CRITICAL JUMPS THE QUEUE BUT STILL HAS A FLOOR.
+         *
+         * A confirmed break is worth interrupting for, so it is not held back
+         * by a cell's ordinary cooldown. It is NOT exempt from all limits: a
+         * live run showed why. In a sustained rise every sweep breaks a new
+         * level, so the identity - which carries the level - is different each
+         * time and dedup never fires. Twelve cells doing that produced a
+         * message every couple of minutes.
+         *
+         * So CRITICAL has its own per-cell floor. The first break is
+         * immediate; the same cell breaking again waits out the cooldown, and
+         * the priority sort means the message a cell does get is the most
+         * urgent one it had.
          */
-        const cellKey = `signal:cell:${signal.bank}:${signal.amountKey}`;
+        const cellKey =
+          priority === 'CRITICAL'
+            ? `signal:critical:${signal.bank}:${signal.amountKey}`
+            : `signal:cell:${signal.bank}:${signal.amountKey}`;
         const previous = this.lastSentAt.get(cellKey);
-        if (
-          priority !== 'CRITICAL' &&
-          previous !== undefined &&
-          now - previous < this.config.cooldownMs
-        ) {
+        if (previous !== undefined && now - previous < this.config.cooldownMs) {
           results.push({ outcome: 'COOLDOWN' });
           continue;
         }
+
+        /*
+         * A GLOBAL FLOOR FOR EVERYTHING BELOW CRITICAL.
+         *
+         * Per-cell cooldowns bound each cell and say nothing about the total.
+         * Measured on a live run: twelve cells each respecting a five-minute
+         * floor still produced a message every couple of minutes, which is the
+         * noise this whole phase exists to remove.
+         *
+         * So non-critical signals share ONE window across the entire matrix.
+         * The priority sort above decides which one gets it, so what comes
+         * through is the most urgent thing the market had to say - not
+         * whichever cell happened to be evaluated first. CRITICAL is exempt
+         * from this floor, and only from this one.
+         */
+        const globalKey = priority === 'CRITICAL' ? 'signal:any:critical' : 'signal:any';
+        /*
+         * CRITICAL gets a shorter global floor, not none.
+         *
+         * A market-wide move breaks a level in many cells at once, and that is
+         * ONE event - not twelve. Without a global floor the same market
+         * movement arrived as a dozen notifications, each true and each
+         * redundant. Half the cooldown keeps a genuine break prompt while
+         * making a simultaneous sweep of them a single message.
+         */
+        const globalFloor =
+          priority === 'CRITICAL' ? this.config.cooldownMs / 2 : this.config.cooldownMs;
+        const globalPrevious = this.lastSentAt.get(globalKey);
+        if (globalPrevious !== undefined && now - globalPrevious < globalFloor) {
+          results.push({ outcome: 'COOLDOWN' });
+          continue;
+        }
+        this.lastSentAt.set(globalKey, now);
 
         this.lastSentAt.set(dedupKey, now);
         this.lastSentAt.set(cellKey, now);

@@ -20,6 +20,7 @@ import { MarketSnapshot, MarketAnalysis, MarketProjections } from './types';
 import { ProvenanceTag, InsufficientDataNotice, StaleTag } from './ProvenanceTag';
 import { MyOperationPanel } from './MyOperationPanel';
 import { PublishPanel } from './PublishPanel';
+import { MarketPulse } from './MarketPulse';
 import { fmt, fmtPct, fmtSignedPct, fmtInt, fmtText, NO_DATA } from './format';
 
 interface MainOverviewProps {
@@ -257,12 +258,22 @@ export const MainOverview: React.FC<MainOverviewProps> = ({
         bank and one amount. The cards below it are market context.
       */}
       {/*
-        WHAT TO PUBLISH, first. The operator is a maker: this is the question
-        they open the app to answer, and it comes before anything about taking
-        somebody else's ad.
+        THE ORDER IS THE ANSWER TO FOUR QUESTIONS, IN THIS SEQUENCE:
+
+          1. what do I do now      -> PublishPanel
+          2. what is the market doing / 3. what could happen / 4. what to watch
+                                   -> MarketPulse
+          ...and only then the market context cards below.
+
+        The operator is a maker: what to publish comes before anything about
+        taking somebody else's ad.
       */}
       <section aria-label="Precios a publicar">
         <PublishPanel onOpenMatrix={() => onNavigateTab('publish')} />
+      </section>
+
+      <section aria-label="Pulso del mercado">
+        <MarketPulse onOpenAnalysis={() => onNavigateTab('analysis')} />
       </section>
 
       <section aria-label="Oportunidades ejecutables">

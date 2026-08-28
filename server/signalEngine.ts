@@ -144,6 +144,28 @@ function evaluateSide(
     return { signals, memory: nextMemory };
   }
 
+  /*
+   * TWO REFUSALS THAT A LIVE RUN FOUND, AND THAT NO UNIT TEST WOULD HAVE.
+   *
+   * Driving the real store for 150 simulated minutes produced 744 signal
+   * messages out of 759 sent. Both causes are here:
+   *
+   * 1. A BORROWED READING MUST NOT ALERT. When a cell is too thin it reads the
+   *    general market - and so do the other 41, so one market-wide finding
+   *    became 42 identical alerts, each with a different bank in its identity
+   *    so nothing deduplicated them. The borrowed reading still informs the
+   *    SCREEN, labelled; it is simply not news 42 times.
+   *
+   * 2. NO LIVE PRICE, NO ALERT. A signal whose ACTUAL reads "no verificable"
+   *    cannot be acted on: there is no price to publish and nothing to compare
+   *    a projection against.
+   *
+   * Both are about alerting only. Every projection is still computed and still
+   * rendered; what changed is what is worth interrupting somebody for.
+   */
+  if (sideProjection.borrowedFrom !== null) return { signals, memory: nextMemory };
+  if (sideProjection.currentPrice === null) return { signals, memory: nextMemory };
+
   const common = base(projection, sideProjection);
   const step = trend.typicalStepVes;
 
@@ -357,12 +379,22 @@ function evaluateSide(
         `Fuerza: ${breakout.strength}.`,
       ].filter((line) => line !== '')),
       confidence: downgrade(trend.trendConfidence),
+      /*
+       * IDENTIFIED BY THE DIRECTION, NOT BY THE LEVEL.
+       *
+       * Keying on the broken level made a sustained breakout a new event on
+       * every sweep: in a rising market each sweep clears a new high, so the
+       * identity changed, dedup never matched, and one continuing move became
+       * a stream of messages. A breakout that is still going is the same
+       * breakout. It is announced once, and again only after it has ended and
+       * a new one begins.
+       */
       identity: identityOf(
         breakout.direction === 'UP' ? 'BREAKOUT_UP' : 'BREAKOUT_DOWN',
         projection.bank,
         projection.amountKey,
         sideProjection.side,
-        breakout.level.toFixed(2)
+        'sostenida'
       ),
     });
   }

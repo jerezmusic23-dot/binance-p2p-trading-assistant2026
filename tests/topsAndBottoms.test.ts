@@ -212,7 +212,30 @@ describe('continuation counted from the cell own history', () => {
     const overall = projection.buy.continuation.overall;
     expect(overall.sampleSize).toBeGreaterThan(0);
     expect(overall.upRate).toBe(1);
-    expect(projection.buy.continuation.byDay).toHaveLength(7);
+  });
+
+  it('leaves the day distributions out unless they are asked for', () => {
+    /*
+     * Seven passes per side per cell is 588 per sweep and nothing on the
+     * alerting path reads them. Off by default, computed for the one cell a
+     * screen is showing.
+     */
+    const lean = projectCell({
+      ...CELL,
+      series: seriesFromBuyPrices(ramp(940, 960, 60)),
+      currentBuyPrice: 960,
+      currentSellPrice: null,
+    });
+    const full = projectCell({
+      ...CELL,
+      series: seriesFromBuyPrices(ramp(940, 960, 60)),
+      currentBuyPrice: 960,
+      currentSellPrice: null,
+      includeDayPatterns: true,
+    });
+
+    expect(lean.buy.continuation.byDay).toEqual([]);
+    expect(full.buy.continuation.byDay).toHaveLength(7);
   });
 
   it('reports INSUFFICIENT_HISTORY instead of a rate from a short series', () => {

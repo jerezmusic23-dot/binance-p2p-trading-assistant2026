@@ -645,16 +645,56 @@ export interface MakerMatrix {
  * ========================================================================== */
 
 export type TrendDirection = 'BULLISH' | 'BEARISH' | 'SIDEWAYS' | 'TRANSITION' | 'UNKNOWN';
+
+/** Seven levels, graded against each cell's own observed noise. */
+export type TrendGrade =
+  | 'STRONG_UP'
+  | 'UP'
+  | 'WEAK_UP'
+  | 'LATERAL'
+  | 'WEAK_DOWN'
+  | 'DOWN'
+  | 'STRONG_DOWN'
+  | 'UNKNOWN';
+
+export interface HorizonReading {
+  name: 'VERY_SHORT' | 'SHORT' | 'MEDIUM';
+  observations: number;
+  spanMs: number | null;
+  direction: TrendDirection;
+  grade: TrendGrade;
+  velocity: number | null;
+  noiseMultiple: number | null;
+}
+
+export interface OutcomeDistribution {
+  sampleSize: number;
+  up: number;
+  flat: number;
+  down: number;
+  upRate: number | null;
+  flatRate: number | null;
+  downRate: number | null;
+  confidence: Confidence;
+  reason: 'INSUFFICIENT_HISTORY' | 'NO_DATA' | null;
+  description: string;
+}
 export type Confidence = 'HIGH' | 'MEDIUM' | 'LOW' | 'NO_DATA';
 
 export interface TrendState {
   trend: TrendDirection;
+  grade: TrendGrade;
+  horizons: HorizonReading[];
+  /** Set when the horizons disagree, in words. */
+  divergence: string | null;
   trendStrength: number | null;
   trendConfidence: Confidence;
   velocity: number | null;
   acceleration: number | null;
   shortDirection: TrendDirection;
   mediumDirection: TrendDirection;
+  /** The medium window before the recent move: what the background was doing. */
+  backgroundDirection: TrendDirection;
   typicalStepVes: number | null;
   sampleSize: number;
   reason: 'NO_DATA' | 'INSUFFICIENT_HISTORY' | 'NO_VARIATION_OBSERVED' | null;
@@ -706,15 +746,33 @@ export interface SideProjection {
   /** ACTUAL. The live price to publish. */
   currentPrice: number | null;
   trend: TrendState;
-  exhaustion: { exhausted: boolean; direction: 'BULLISH' | 'BEARISH' | null; reason: string | null };
+  exhaustion: {
+    exhausted: boolean;
+    direction: 'BULLISH' | 'BEARISH' | null;
+    reason: string | null;
+  };
   /** PROYECTADO. Always a band, never a single number. */
   projectedRange: ProjectedRange;
   floors: PriceZone[];
   ceilings: PriceZone[];
   nextCeiling: PriceZone | null;
   nextFloor: PriceZone | null;
+  /** The zone the price is standing in. */
+  atCeiling: PriceZone | null;
+  atFloor: PriceZone | null;
+  /** A zone reached in the recent window and since left. */
+  reachedCeiling: PriceZone | null;
+  reachedFloor: PriceZone | null;
   breakout: Breakout | null;
   watchWindows: WatchWindow[];
+  /** What historically followed, counted. Never a rate without its sample. */
+  continuation: {
+    overall: OutcomeDistribution;
+    inWatchWindow: OutcomeDistribution | null;
+    byDay: { day: number; dayName: string; outcomes: OutcomeDistribution }[];
+  };
+  /** 'MERCADO GENERAL' when this cell was too thin to be read on its own. */
+  borrowedFrom: string | null;
 }
 
 export interface CellProjection {
@@ -727,14 +785,17 @@ export interface CellProjection {
   observations: number;
   firstObservedAt: number | null;
   lastObservedAt: number | null;
+  borrowedFrom: string | null;
   reason: 'NO_DATA' | 'INSUFFICIENT_HISTORY' | null;
 }
 
 export type SignalKind =
   | 'TREND_CHANGE'
   | 'EXHAUSTION'
-  | 'CEILING_APPROACH'
-  | 'FLOOR_APPROACH'
+  | 'POSSIBLE_TOP'
+  | 'CONFIRMED_TOP'
+  | 'POSSIBLE_BOTTOM'
+  | 'CONFIRMED_BOTTOM'
   | 'BREAKOUT_UP'
   | 'BREAKOUT_DOWN'
   | 'ACCUMULATION'
@@ -759,6 +820,26 @@ export interface MarketSignal {
   watchStartHour: number | null;
   watchEndHour: number | null;
   identity: string;
+}
+
+/** One point of a cell's stored series, as the chart consumes it. */
+export interface SeriesPoint {
+  timestamp: number;
+  buyRecommendedPrice: number | null;
+  sellRecommendedPrice: number | null;
+  buyLeaderPrice: number | null;
+  sellLeaderPrice: number | null;
+}
+
+export interface CellSeriesResponse {
+  describe: {
+    observations: number;
+    firstTimestamp: number | null;
+    lastTimestamp: number | null;
+    medianIntervalMs: number | null;
+    usableObservations: number;
+  };
+  observations: SeriesPoint[];
 }
 
 export interface MakerProjectionsResponse {

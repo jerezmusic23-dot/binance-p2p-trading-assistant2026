@@ -5,6 +5,7 @@ import {
   ExecutableMatrixResponse,
   MakerMatrixResponse,
   MakerProjectionsResponse,
+  CellSeriesResponse,
   OpportunitiesResponse,
   HistoryRecord,
   HistorySummary,
@@ -96,6 +97,21 @@ export class ApiService {
    */
   public static async getMakerProjections(): Promise<MakerProjectionsResponse> {
     return requestJson<MakerProjectionsResponse>('/api/market/projections/maker');
+  }
+
+  /**
+   * One cell's stored series, raw. Gaps stay gaps - the chart must be able to
+   * show that capture missed a stretch rather than drawing through it.
+   */
+  public static async getCellSeries(
+    bank: string,
+    amountKey: string,
+    limit = 300
+  ): Promise<CellSeriesResponse> {
+    return requestJson<CellSeriesResponse>(
+      `/api/market/projections/series?bank=${encodeURIComponent(bank)}` +
+        `&amount=${encodeURIComponent(amountKey)}&limit=${limit}`
+    );
   }
 
   /**

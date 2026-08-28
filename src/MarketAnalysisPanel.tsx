@@ -18,12 +18,16 @@ import React, { useEffect, useState } from 'react';
 import {
   CellProjection,
   Confidence,
+  HorizonReading,
   MarketSignal,
+  SeriesPoint,
   SideProjection,
   SignalKind,
   TrendDirection,
+  TrendGrade,
 } from './types';
 import { ApiService } from './api';
+import { ProjectionChart } from './ProjectionChart';
 import {
   Activity,
   AlertTriangle,
@@ -50,12 +54,32 @@ const TREND_STYLE: Record<
 const SIGNAL_LABEL: Record<SignalKind, string> = {
   TREND_CHANGE: 'Cambio de tendencia',
   EXHAUSTION: 'Agotamiento',
-  CEILING_APPROACH: 'Cerca de un techo',
-  FLOOR_APPROACH: 'Cerca de un piso',
+  POSSIBLE_TOP: 'Posible techo',
+  CONFIRMED_TOP: 'Techo confirmado',
+  POSSIBLE_BOTTOM: 'Posible piso',
+  CONFIRMED_BOTTOM: 'Piso confirmado',
   BREAKOUT_UP: 'Ruptura al alza',
   BREAKOUT_DOWN: 'Ruptura a la baja',
   ACCUMULATION: 'Acumulación',
   DISTRIBUTION: 'Distribución',
+};
+
+/** The seven-level reading, in the operator's language. */
+const GRADE_LABEL: Record<TrendGrade, string> = {
+  STRONG_UP: 'ALCISTA FUERTE',
+  UP: 'ALCISTA',
+  WEAK_UP: 'ALCISTA DÉBIL',
+  LATERAL: 'LATERAL',
+  WEAK_DOWN: 'BAJISTA DÉBIL',
+  DOWN: 'BAJISTA',
+  STRONG_DOWN: 'BAJISTA FUERTE',
+  UNKNOWN: 'SIN DATOS',
+};
+
+const HORIZON_LABEL: Record<HorizonReading['name'], string> = {
+  VERY_SHORT: 'muy corto',
+  SHORT: 'corto',
+  MEDIUM: 'medio',
 };
 
 const CONFIDENCE_LABEL: Record<Confidence, string> = {
@@ -101,13 +125,40 @@ const SidePanel: React.FC<{ projection: SideProjection }> = ({ projection }) => 
 
       <div className={`flex items-center gap-1 text-[11px] font-bold ${trend.className}`}>
         <trend.Icon className="w-3.5 h-3.5" />
-        {trend.label}
+        {GRADE_LABEL[projection.trend.grade]}
         {projection.trend.trendStrength !== null && (
           <span className="text-[#848e9c] font-normal">
             · fuerza {(projection.trend.trendStrength * 100).toFixed(0)}%
           </span>
         )}
       </div>
+
+      {/* The horizons, and their disagreement when there is one. */}
+      <div className="flex flex-wrap gap-1 text-[9px]">
+        {projection.trend.horizons.map((horizon) => (
+          <span
+            key={horizon.name}
+            className="px-1.5 py-0.5 rounded border border-[#2b2f36] text-[#848e9c] font-mono"
+            title={`${horizon.observations} obs. · ${
+              horizon.spanMs === null ? 'n/v' : `${Math.round(horizon.spanMs / 60000)} min`
+            }`}
+          >
+            {HORIZON_LABEL[horizon.name]}: {GRADE_LABEL[horizon.grade]}
+          </span>
+        ))}
+      </div>
+      {projection.trend.divergence !== null && (
+        <div className="text-[10px] text-[#f0b90b] leading-tight">
+          {projection.trend.divergence}
+        </div>
+      )}
+
+      {projection.borrowedFrom !== null && (
+        <div className="text-[9px] text-[#f0b90b] border border-[#f0b90b]/30 rounded px-1.5 py-1 leading-tight">
+          Poco histórico propio en esta celda: lectura tomada del{' '}
+          {projection.borrowedFrom.toLowerCase()}. Confianza reducida.
+        </div>
+      )}
 
       {/* PROYECTADO — visually and verbally separated from ACTUAL. */}
       <div className="rounded border border-dashed border-[#2b2f36] px-2 py-1.5">
@@ -171,6 +222,32 @@ const SidePanel: React.FC<{ projection: SideProjection }> = ({ projection }) => 
           </span>
         </div>
       )}
+
+      {/* What historically followed, counted - or the refusal to say. */}
+      <div className="text-[10px] text-[#848e9c] leading-tight">
+        {projection.continuation.overall.reason !== null ? (
+          <span>Continuación histórica: datos insuficientes ({projection.continuation.overall.sampleSize} muestras).</span>
+        ) : (
+          <span>
+            Históricamente, a {projection.projectedRange.stepsAhead} observaciones vista:{' '}
+            <span className="text-[#02c076] font-mono">
+              {((projection.continuation.overall.upRate as number) * 100).toFixed(0)}% sube
+            </span>{' '}
+            ·{' '}
+            <span className="font-mono">
+              {((projection.continuation.overall.flatRate as number) * 100).toFixed(0)}% lateral
+            </span>{' '}
+            ·{' '}
+            <span className="text-[#f6465d] font-mono">
+              {((projection.continuation.overall.downRate as number) * 100).toFixed(0)}% baja
+            </span>
+            <span className="text-[#5e6673]">
+              {' '}
+              ({projection.continuation.overall.sampleSize} muestras)
+            </span>
+          </span>
+        )}
+      </div>
 
       <details className="text-[9px] text-[#5e6673]">
         <summary className="cursor-pointer">Por qué</summary>
@@ -254,6 +331,8 @@ export const MarketAnalysisPanel: React.FC = () => {
   const [projections, setProjections] = useState<CellProjection[]>([]);
   const [signals, setSignals] = useState<MarketSignal[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
+  const [series, setSeries] = useState<SeriesPoint[]>([]);
+  const [chartSide, setChartSide] = useState<'BUY' | 'SELL'>('BUY');
   const [loaded, setLoaded] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -279,6 +358,32 @@ export const MarketAnalysisPanel: React.FC = () => {
     const timer = setInterval(fetchAll, 45_000);
     return () => clearInterval(timer);
   }, []);
+
+  /* The chart's series is fetched separately: it is far larger than the
+     projection payload and only one cell's is ever on screen. */
+  useEffect(() => {
+    const target =
+      projections.find((p) => `${p.bank}:${p.amountKey}` === selected) ??
+      projections.find((p) => p.observations > 0) ??
+      null;
+    if (target === null) {
+      setSeries([]);
+      return;
+    }
+
+    let cancelled = false;
+    ApiService.getCellSeries(target.bank, target.amountKey)
+      .then((res) => {
+        if (!cancelled) setSeries(res.observations);
+      })
+      .catch((err) => {
+        console.error('Failed to load cell series:', err);
+        if (!cancelled) setSeries([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selected, projections]);
 
   if (error !== null) {
     return (
@@ -389,6 +494,39 @@ export const MarketAnalysisPanel: React.FC = () => {
                 : 'Histórico insuficiente: el motor no proyecta con esta cantidad de observaciones.'}
             </div>
           )}
+
+          {/*
+            THE CHART: real history to the left of "ahora", a widening band to
+            the right. The two are never drawn the same way.
+          */}
+          <div className="border border-[#2b2f36] rounded p-2 space-y-1">
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] uppercase tracking-wide text-[#848e9c]">
+                Histórico y proyección
+              </span>
+              <div className="flex gap-1">
+                {(['BUY', 'SELL'] as const).map((side) => (
+                  <button
+                    key={side}
+                    type="button"
+                    onClick={() => setChartSide(side)}
+                    className={`px-1.5 py-0.5 rounded border text-[9px] transition-colors ${
+                      chartSide === side
+                        ? 'border-[#FCD535] text-[#FCD535]'
+                        : 'border-[#2b2f36] text-[#848e9c] hover:border-[#FCD535]'
+                    }`}
+                  >
+                    {side === 'BUY' ? 'MI COMPRA' : 'MI VENTA'}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <ProjectionChart
+              observations={series}
+              projection={chartSide === 'BUY' ? current.buy : current.sell}
+              side={chartSide}
+            />
+          </div>
 
           <div className="flex flex-col lg:flex-row gap-2">
             <SidePanel projection={current.buy} />

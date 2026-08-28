@@ -7,6 +7,7 @@ import { Router } from 'express';
 import { selectBestMakerCell } from './makerMatrix.js';
 import { HistoricalMarketStore } from './historicalMarketStore.js';
 import { runProjectionBacktest } from './projectionBacktest.js';
+import { projectCell } from './makerProjectionEngine.js';
 import { CentralMarketStore } from './centralStore.js';
 import { StorageEngine } from './storage.js';
 import { AlertRule } from './types.js';
@@ -113,6 +114,78 @@ apiRouter.get('/market/projections/maker', (_req, res) => {
     res.json({ projections, signals });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Error building maker projections' });
+  }
+});
+
+/*
+ * ONE CELL'S FULL ANALYSIS, day-of-week patterns included.
+ *
+ * Separate from /projections/maker because the day distributions are seven
+ * passes over the series per side and nothing on the alerting path reads them.
+ * Computing them for all 42 cells on every sweep was measurably slow; computed
+ * for the one cell somebody is looking at, they are free.
+ */
+apiRouter.get('/market/projections/cell', (req, res) => {
+  try {
+    const bank = String(req.query.bank ?? '');
+    const amountKey = String(req.query.amount ?? '');
+    if (bank === '' || amountKey === '') {
+      res.status(400).json({ error: 'bank y amount son obligatorios' });
+      return;
+    }
+
+    const series = HistoricalMarketStore.load(bank, amountKey);
+    const live = centralStore
+      .getProjections()
+      .projections.find((p) => p.bank === bank && p.amountKey === amountKey);
+
+    res.json({
+      projection: projectCell({
+        bank,
+        bankDisplayName: live?.bankDisplayName ?? bank,
+        amountKey,
+        amountVes: live?.amountVes ?? series[0]?.amountVes ?? 0,
+        series,
+        currentBuyPrice: live?.buy.currentPrice ?? null,
+        currentSellPrice: live?.sell.currentPrice ?? null,
+        includeDayPatterns: true,
+      }),
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Error building cell projection' });
+  }
+});
+
+/*
+ * THE SERIES BEHIND ONE CELL, for the chart.
+ *
+ * Raw observations, exactly as stored. No smoothing, no gap filling and no
+ * resampling: a hole in the capture must be visible as a hole.
+ */
+apiRouter.get('/market/projections/series', (req, res) => {
+  try {
+    const bank = String(req.query.bank ?? '');
+    const amountKey = String(req.query.amount ?? '');
+    if (bank === '' || amountKey === '') {
+      res.status(400).json({ error: 'bank y amount son obligatorios' });
+      return;
+    }
+
+    const limit = Math.min(2000, Math.max(1, Number(req.query.limit ?? 300)));
+    const series = HistoricalMarketStore.load(bank, amountKey);
+
+    res.json({
+      describe: HistoricalMarketStore.describe(bank, amountKey),
+      observations: series.slice(-limit).map((o) => ({
+        timestamp: o.timestamp,
+        buyRecommendedPrice: o.buyRecommendedPrice,
+        sellRecommendedPrice: o.sellRecommendedPrice,
+        buyLeaderPrice: o.buyLeaderPrice,
+        sellLeaderPrice: o.sellLeaderPrice,
+      })),
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Error reading cell series' });
   }
 });
 
