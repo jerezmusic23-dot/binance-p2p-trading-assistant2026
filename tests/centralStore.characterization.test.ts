@@ -340,7 +340,14 @@ describe('evaluateAlerts', () => {
     expect(triggers[0].message).toContain('2.51%');
   });
 
-  it('applies the hardcoded 5-minute cooldown per rule', async () => {
+  it('applies a 30-minute cooldown per rule', async () => {
+    /*
+     * ESTE TEST FIJABA CINCO MINUTOS, y cinco minutos era el defecto.
+     *
+     * Una regla de precio se cumple de forma CONTINUA: en cuanto el mercado
+     * cruza el umbral se queda cruzado, así que a cinco minutos el mismo hecho
+     * se registraba doce veces por hora en el historial que el panel muestra.
+     */
     vi.useFakeTimers();
     vi.setSystemTime(Date.parse('2026-08-23T16:00:00Z'));
     const { store } = await pollWithSpread('918.00', '941.00');
@@ -349,7 +356,18 @@ describe('evaluateAlerts', () => {
     await store.pollMarket();
     expect(readData<AlertTriggerLog[]>('alert_triggers.json')).toHaveLength(1);
 
+    // A los cinco minutos y un segundo - donde antes se disparaba - sigue callada.
     vi.setSystemTime(Date.parse('2026-08-23T16:05:01Z'));
+    await store.pollMarket();
+    expect(readData<AlertTriggerLog[]>('alert_triggers.json')).toHaveLength(1);
+
+    // Un segundo antes de la media hora, tampoco.
+    vi.setSystemTime(Date.parse('2026-08-23T16:29:59Z'));
+    await store.pollMarket();
+    expect(readData<AlertTriggerLog[]>('alert_triggers.json')).toHaveLength(1);
+
+    // Y en la media hora exacta, sí.
+    vi.setSystemTime(Date.parse('2026-08-23T16:30:00Z'));
     await store.pollMarket();
     expect(readData<AlertTriggerLog[]>('alert_triggers.json')).toHaveLength(2);
   });

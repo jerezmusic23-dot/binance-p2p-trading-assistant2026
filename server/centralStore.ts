@@ -73,6 +73,21 @@ import { StorageEngine } from './storage.js';
 import { venezuelaHour } from './patternEngine.js';
 import { TelegramNotifier } from './telegramNotifier.js';
 
+/**
+ * Ventana mínima entre dos disparos de LA MISMA regla de alerta.
+ *
+ * Estas reglas ya no tienen camino a Telegram - notifyAlert y
+ * formatAlertMessage no existen - así que lo que este intervalo gobierna es el
+ * historial que /api/alerts sirve y que AlertsManager muestra. Aun así importa:
+ * a cinco minutos, una regla de precio cumplida de forma continua llenaba ese
+ * panel con doce entradas por hora del mismo hecho, y un historial que repite
+ * no es un historial.
+ *
+ * Es la misma media hora que el resumen maker, el digest y las señales
+ * ordinarias, para que el bot tenga un solo ritmo en vez de cuatro.
+ */
+export const ALERT_RULE_COOLDOWN_MS = 30 * 60 * 1000;
+
 export class CentralMarketStore {
   private static instance: CentralMarketStore;
 
@@ -1594,8 +1609,26 @@ export class CentralMarketStore {
     const now = Date.now();
 
     for (const rule of rules) {
-      // Prevent rapid spam triggers (minimum 5 minutes between triggers for same rule)
-      if (rule.lastTriggeredAt && now - rule.lastTriggeredAt < 300000) {
+      /*
+       * TREINTA MINUTOS, POR REGLA, Y PERSISTIDO.
+       *
+       * Eran cinco, escritos como un 300000 suelto. Cinco minutos permite
+       * doce disparos por hora de la MISMA regla, y una regla de precio se
+       * cumple de forma continua: en cuanto el mercado cruza el umbral, se
+       * queda cruzado. Lo que el operador leía como "doce eventos" era un
+       * único hecho remuestreado doce veces.
+       *
+       * POR REGLA, no global, y eso no cambia: `lastTriggeredAt` vive en el
+       * objeto de la regla, se comprueba y se escribe dentro de este bucle, y
+       * se persiste con saveAlert. Dos reglas distintas tienen dos relojes
+       * distintos y ninguna puede silenciar a la otra - que es justo lo que
+       * un umbral de precio y uno de spread necesitan.
+       *
+       * Y SOBREVIVE AL REINICIO, porque saveAlert lo escribe a disco: un
+       * proceso que se reinicia a los diez minutos no vuelve a disparar la
+       * misma regla, cosa que un contador en memoria sí habría hecho.
+       */
+      if (rule.lastTriggeredAt && now - rule.lastTriggeredAt < ALERT_RULE_COOLDOWN_MS) {
         continue;
       }
 
