@@ -20,7 +20,7 @@ import {
 
 import { MainOverview } from './MainOverview';
 import { MarketProjectionPanel } from './MarketProjectionPanel';
-import { AnalogProjectionPanel } from './AnalogProjectionPanel';
+import { ProbabilisticProjectionPanel } from './ProbabilisticProjectionPanel';
 import { BankMatrix } from './BankMatrix';
 import { MakerMatrix } from './MakerMatrix';
 import { MarketAnalysisPanel } from './MarketAnalysisPanel';
@@ -432,7 +432,7 @@ export default function App() {
         {/*
           DOS LECTURAS DISTINTAS, UNA DEBAJO DE OTRA, Y NO SE MEZCLAN.
 
-          AnalogProjectionPanel responde "¿qué pasó históricamente en las
+          ProbabilisticProjectionPanel responde "¿qué pasó históricamente en las
           situaciones parecidas a la de ahora?" sobre market_history.json, con
           los casos concretos detrás de cada porcentaje y un contraste contra
           la persistencia que decide si puede presentarse como utilizable.
@@ -445,7 +445,7 @@ export default function App() {
         */}
         {activeTab === 'projections' && (
           <div className="space-y-6">
-            <AnalogProjectionPanel />
+            <ProbabilisticProjectionPanel />
             <MarketProjectionPanel />
           </div>
         )}

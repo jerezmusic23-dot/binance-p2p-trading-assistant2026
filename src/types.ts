@@ -953,30 +953,62 @@ export interface AlertTriggerLog {
 /* ==========================================================================
  * PROYECCIÓN POR ANALOGÍA
  *
- * Espejo de server/analogProjection.ts y server/marketAnalogProjection.ts.
- * Se mantiene a mano, como el resto de este fichero: el servidor no publica
- * sus tipos y una divergencia aquí es un fallo de compilación allí, no un
- * número equivocado en pantalla.
+ * Espejo de server/projection/* y server/marketProjection.ts. Se mantiene a
+ * mano, como el resto de este fichero: el servidor no publica sus tipos, y una
+ * divergencia aquí es un fallo de compilación allí, no un número equivocado en
+ * pantalla.
  * ========================================================================== */
 
-export type AnalogOutcome = 'UP' | 'FLAT' | 'DOWN';
-export type AnalogDirection = 'ALCISTA' | 'LATERAL' | 'BAJISTA';
-export type AnalogStrength = 'DEBIL' | 'MODERADA' | 'FUERTE';
+export type ProjectionOutcome = 'UP' | 'FLAT' | 'DOWN';
 
-export interface AnalogPoint {
+/**
+ * INDETERMINADA no es un fallo: es lo que se publica cuando los casos
+ * históricos se contradicen entre sí. Preferible a inventar una dirección.
+ */
+export type ProjectionDirection = 'ALCISTA' | 'BAJISTA' | 'LATERAL' | 'INDETERMINADA';
+
+export type ProjectionStrength =
+  | 'MUY_DEBIL'
+  | 'DEBIL'
+  | 'MODERADA'
+  | 'FUERTE'
+  | 'MUY_FUERTE';
+
+/** Sólo READY significa "esto puede usarse". */
+export type ProjectionStatus =
+  | 'READY'
+  | 'INSUFFICIENT_DATA'
+  | 'INSUFFICIENT_ANALOGIES'
+  | 'LOW_CONFIDENCE'
+  | 'NO_EDGE';
+
+export interface ProjectionPoint {
   t: number;
   price: number;
 }
 
-export interface AnalogSample {
+export interface AnalogueSample {
   t: number;
   price: number;
   delta: number;
-  outcome: AnalogOutcome;
+  outcome: ProjectionOutcome;
   distance: number;
 }
 
-export interface AnalogAudit {
+export interface ProjectionScenario {
+  kind: 'BAJISTA' | 'CENTRAL' | 'ALCISTA';
+  outcome: ProjectionOutcome;
+  cases: number;
+  probability: number;
+  probabilityLow: number | null;
+  probabilityHigh: number | null;
+  low: number | null;
+  high: number | null;
+  median: number | null;
+  hasRange: boolean;
+}
+
+export interface ProjectionAudit {
   observations: number;
   firstTimestamp: number | null;
   lastTimestamp: number | null;
@@ -989,7 +1021,7 @@ export interface AnalogAudit {
   analoguesUsed: number;
   independentAnalogues: number;
   maxDistanceUsed: number | null;
-  featureScales: Record<string, number>;
+  stateScales: Record<string, number>;
   upCount: number;
   flatCount: number;
   downCount: number;
@@ -998,15 +1030,16 @@ export interface AnalogAudit {
   p10: number | null;
   p50: number | null;
   p90: number | null;
-  samples: AnalogSample[];
+  samples: AnalogueSample[];
 }
 
-export interface AnalogHorizonProjection {
+export interface HorizonProjection {
   requestedHorizonMs: number;
   label: string;
+  estimatedAt: number | null;
+  status: ProjectionStatus;
+  statusText: string;
   available: boolean;
-  reason: string | null;
-  reasonText: string | null;
   currentPrice: number | null;
   central: number | null;
   low: number | null;
@@ -1016,20 +1049,43 @@ export interface AnalogHorizonProjection {
   probabilityDown: number | null;
   probabilityUpLow: number | null;
   probabilityUpHigh: number | null;
-  direction: AnalogDirection | null;
-  strength: AnalogStrength | null;
+  direction: ProjectionDirection | null;
+  strength: ProjectionStrength | null;
+  scenarios: ProjectionScenario[];
   evidence: string | null;
-  audit: AnalogAudit | null;
+  audit: ProjectionAudit | null;
 }
 
-export interface AnalogBaselineReport {
+export interface CalibrationBucket {
+  from: number;
+  to: number;
+  predictions: number;
+  meanPredicted: number | null;
+  observedFrequency: number | null;
+  margin: number | null;
+  overconfident: boolean;
+}
+
+export interface CalibrationReport {
+  buckets: CalibrationBucket[];
+  brier: number | null;
+  brierBaseline: number | null;
+  worstOverconfidence: number | null;
+  overconfident: boolean;
+  predictions: number;
+}
+
+export interface BaselineReport {
   requestedHorizonMs: number;
   label: string;
   anchors: number;
   skipped: number;
+  anchorStride: number;
   directionalAccuracy: number | null;
   persistenceDirectionalAccuracy: number | null;
   bandCoverage: number | null;
+  coverageTarget: number;
+  medianBandWidth: number | null;
   modelMedianAbsError: number | null;
   persistenceMedianAbsError: number | null;
   modelBetterCount: number;
@@ -1039,10 +1095,11 @@ export interface AnalogBaselineReport {
   alpha: number | null;
   familySize: number | null;
   beatsPersistence: boolean | null;
+  calibration: CalibrationReport;
   reason: 'INSUFFICIENT_ANCHORS' | null;
 }
 
-export interface AnalogSideProjection {
+export interface MarketSideProjection {
   side: 'BUY' | 'SELL';
   seriesId: string;
   label: string;
@@ -1053,9 +1110,9 @@ export interface AnalogSideProjection {
   medianIntervalMs: number | null;
   typicalStep: number | null;
   currentPrice: number | null;
-  history: AnalogPoint[];
-  horizons: AnalogHorizonProjection[];
-  baselines: AnalogBaselineReport[];
+  history: ProjectionPoint[];
+  horizons: HorizonProjection[];
+  baselines: BaselineReport[];
   usable: boolean;
   notice: string | null;
   extraction: {
@@ -1065,9 +1122,9 @@ export interface AnalogSideProjection {
   };
 }
 
-export interface AnalogProjectionResponse {
+export interface MarketProjectionResponse {
   generatedAt: number;
   source: 'market_history.json';
-  sides: AnalogSideProjection[];
+  sides: MarketSideProjection[];
   usable: boolean;
 }

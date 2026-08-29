@@ -191,6 +191,31 @@ describe('every percentage on the screen is a frequency or a price ratio', () =>
     'probabilityDown',
     'probabilityUpLow',
     'probabilityUpHigh',
+    /*
+     * Escenarios: la probabilidad de cada uno es su recuento de casos partido
+     * por el total de análogos, y los dos términos se enseñan al lado. Low y
+     * High son los extremos del intervalo de Wilson de esa misma frecuencia.
+     */
+    'probabilityLow',
+    'probabilityHigh',
+    'probability',
+    /*
+     * Calibración. `meanPredicted` es la media de probabilidades anunciadas y
+     * `observedFrequency` la fracción de veces que ocurrieron: exactamente las
+     * dos cifras que hay que comparar para saber si el modelo se pasa de
+     * confiado. `from`/`to` son los bordes de un bucket, es decir puntos de la
+     * propia escala de probabilidad, no una magnitud convertida a porcentaje.
+     */
+    'meanPredicted',
+    'observedFrequency',
+    'b.from',
+    'b.to',
+    /*
+     * `coverageTarget` es la cobertura que la banda promete por construcción
+     * (percentiles 10 y 90 = 80%). Se publica junto a `bandCoverage`, que es la
+     * medida: sin el objetivo al lado, la medida no se puede juzgar.
+     */
+    'coverageTarget',
     'upRate',
     'flatRate',
     'downRate',

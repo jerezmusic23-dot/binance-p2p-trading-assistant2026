@@ -11,9 +11,9 @@ import { GENERAL_MARKET_KEY, projectCell } from './makerProjectionEngine.js';
 import { CentralMarketStore } from './centralStore.js';
 import { StorageEngine } from './storage.js';
 import {
-  buildMarketAnalogProjection,
-  type MarketAnalogReport,
-} from './marketAnalogProjection.js';
+  buildMarketProjectionAsync,
+  type MarketProjectionReport,
+} from './marketProjection.js';
 import { AlertRule } from './types.js';
 
 export const apiRouter = Router();
@@ -125,40 +125,64 @@ apiRouter.get('/market/projections/general', (_req, res) => {
 });
 
 /*
- * PROYECCIÓN PROBABILÍSTICA POR ANALOGÍA SOBRE LA SERIE PRINCIPAL.
+ * PROYECCIÓN PROBABILÍSTICA DEL MERCADO, POR ANALOGÍA HISTÓRICA.
  *
  * Distinta de /projections/general, y no la sustituye: aquélla lee la serie de
  * celdas y da tendencia y banda empírica del libro maker. Ésta lee
- * market_history.json - la serie global de un registro por minuto - y responde
- * a "qué pasó históricamente en las situaciones parecidas a la de ahora".
+ * market_history.json —la serie global de un registro por minuto— y responde a
+ * "qué pasó históricamente en las situaciones parecidas a la de ahora".
  *
  * Todo número que sale de aquí llega con su procedencia: cuántos casos lo
- * sostienen, cuáles son (con fecha), contra qué deriva de régimen se juzgaron,
- * y si el backtest contra la persistencia lo valida o no. Un horizonte sin
- * histórico suficiente devuelve INSUFICIENTE HISTÓRICO, no un número.
+ * sostienen, cuáles son con su fecha, contra qué deriva de régimen se
+ * juzgaron, en qué estado está el horizonte (READY / INSUFFICIENT_DATA /
+ * INSUFFICIENT_ANALOGIES / LOW_CONFIDENCE / NO_EDGE) y si el backtest contra
+ * la persistencia lo respalda.
  *
- * CACHÉ. Recorrer 3.000 registros con backtest incluido cuesta ~3 s, y el
- * histórico sólo cambia una vez por minuto. Se cachea contra el estado real de
- * la serie - cuántos registros hay y cuál es el último - así que un registro
- * nuevo invalida la caché al instante y nunca se sirve una proyección que no
- * corresponda a los datos actuales. No es un TTL: un TTL podría servir datos
- * viejos o recalcular sin motivo.
+ * LA CAPTURA ES PRIORITARIA.
+ *
+ * El backtest recorre el histórico una vez por ancla y tarda segundos. Dos
+ * defensas, porque una sola no basta:
+ *
+ *   1. Se usa la variante ASÍNCRONA, que cede el hilo cada pocas anclas. El
+ *      trabajo total es el mismo pero ningún bloque bloquea el poll de
+ *      Binance.
+ *   2. Se cachea contra el ESTADO REAL de la serie —cuántos registros hay y
+ *      cuál es el último—, no contra el reloj. Un TTL podría servir datos
+ *      viejos o recalcular sin que hubiera cambiado nada; así un registro
+ *      nuevo invalida la caché al instante y nunca se sirve una proyección que
+ *      no corresponda a los datos actuales.
+ *
+ * Y un cerrojo: si llegan dos peticiones mientras se calcula, la segunda
+ * espera al mismo cálculo en vez de lanzar otro.
  */
-let analogCache: { key: string; report: MarketAnalogReport } | null = null;
+let analogCache: { key: string; report: MarketProjectionReport } | null = null;
+let analogInFlight: { key: string; promise: Promise<MarketProjectionReport> } | null = null;
 
-apiRouter.get('/market/projections/analog', (_req, res) => {
+apiRouter.get('/market/projections/analog', async (_req, res) => {
   try {
     const records = StorageEngine.getHistory();
     const newest = records.length > 0 ? records[records.length - 1].timestamp : 0;
     const key = `${records.length}:${newest}`;
 
-    if (analogCache === null || analogCache.key !== key) {
-      analogCache = { key, report: buildMarketAnalogProjection({ readRecords: () => records }) };
+    if (analogCache !== null && analogCache.key === key) {
+      res.json(analogCache.report);
+      return;
     }
 
-    res.json(analogCache.report);
+    if (analogInFlight === null || analogInFlight.key !== key) {
+      analogInFlight = {
+        key,
+        promise: buildMarketProjectionAsync({ readRecords: () => records }),
+      };
+    }
+
+    const report = await analogInFlight.promise;
+    analogCache = { key, report };
+    analogInFlight = null;
+    res.json(report);
   } catch (err: any) {
-    res.status(500).json({ error: err.message || 'Error building analog projection' });
+    analogInFlight = null;
+    res.status(500).json({ error: err.message || 'Error building market projection' });
   }
 });
 
