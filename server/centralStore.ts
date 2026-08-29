@@ -18,6 +18,8 @@ import {
   MarketReference,
 } from './types.js';
 import { BinanceP2PService, BANK_CODE_MAP } from './binanceP2PService.js';
+import { validateHistoryRecord } from './recordValidation.js';
+import { buildMarketContext } from './marketContext.js';
 import { countVerifications } from './bankMatching.js';
 import { AMOUNT_TIERS, evaluateBankAmount } from './executability.js';
 import {
@@ -134,6 +136,21 @@ export class CentralMarketStore {
     bothSidesEmpty: 0,
     /** Both prices present, spread absent. */
     spreadMissing: 0,
+    lastAt: null as number | null,
+  };
+
+  /**
+   * Capturas completas que aun así no se pudieron guardar por no pasar la
+   * validación del registro.
+   *
+   * Se cuentan aparte de `incompleteSnapshots` porque son un problema
+   * distinto: allí faltaba un precio, aquí el precio existía pero era
+   * imposible. Confundirlos haría que un defecto de cálculo pareciera un
+   * mercado tranquilo.
+   */
+  private rejectedRecords = {
+    total: 0,
+    lastReason: null as string | null,
     lastAt: null as number | null,
   };
   private isPolling = false;
@@ -465,6 +482,21 @@ export class CentralMarketStore {
           activeSellAds: snapshot.topSellAds.length,
           source: 'BINANCE_P2P',
           /*
+           * ADDITIVE v3: el contexto de mercado que esta misma captura YA
+           * calculó y que antes se descartaba.
+           *
+           * Una proyección que sólo mira el precio no distingue un movimiento
+           * sostenido por volumen de otro que ocurre sobre un libro vacío, y
+           * ésos no son el mismo mercado. La liquidez suma SÓLO los anuncios
+           * que publicaron volumen, y se guarda aparte cuántos fueron: sin ese
+           * recuento, una suma baja no distingue "poca liquidez" de "casi
+           * nadie la publicó".
+           *
+           * Nada se deriva ni se rellena: un campo ausente en la captura queda
+           * ausente en el registro.
+           */
+          ...buildMarketContext(snapshot),
+          /*
            * ADDITIVE. The raw extremes above are untouched; these carry the
            * strategic level of the same observation, which is what a market
            * projection needs. Written only when both sides produced one -
@@ -500,10 +532,36 @@ export class CentralMarketStore {
            * later for no visible reason.
            */
           try {
-            StorageEngine.appendRecord(record);
-            this.lastPersistedAt = snapshot.timestamp;
-            this.pendingRecord = null;
-            this.reportStorageState(snapshot.timestamp, null);
+            /*
+             * Se valida ANTES de llamar al almacenamiento, no sólo dentro.
+             *
+             * StorageEngine vuelve a comprobarlo como última línea de defensa,
+             * pero rechazar aquí permite contar el registro malo como lo que
+             * es —una captura defectuosa— en lugar de como un fallo de disco,
+             * que es un problema completamente distinto y se diagnostica en
+             * otro sitio.
+             */
+            const validation = validateHistoryRecord(record, snapshot.timestamp);
+            if (!validation.ok) {
+              /*
+               * Se descarta el registro y NO se avanza `lastPersistedAt`: el
+               * hueco queda en la serie, que es el relato honesto de lo que
+               * ocurrió. Rellenarlo sería justo lo que la Regla 5 prohíbe.
+               * La captura sigue: un registro malo no puede parar el polling.
+               */
+              this.rejectedRecords.total += 1;
+              this.rejectedRecords.lastReason = validation.reasons.join('; ');
+              this.rejectedRecords.lastAt = snapshot.timestamp;
+              this.pendingRecord = null;
+              console.warn(
+                `[CentralStore] Registro descartado por validación: ${this.rejectedRecords.lastReason}`
+              );
+            } else {
+              StorageEngine.appendRecord(record);
+              this.lastPersistedAt = snapshot.timestamp;
+              this.pendingRecord = null;
+              this.reportStorageState(snapshot.timestamp, null);
+            }
           } catch (storageErr: any) {
             const detail = String(storageErr?.message ?? storageErr);
             console.error(`[CentralStore] CRITICAL STORAGE ERROR: ${detail}`);
@@ -985,6 +1043,10 @@ export class CentralMarketStore {
     bothSidesEmpty: number;
     spreadMissing: number;
     lastIncompleteAt: string | null;
+    /** Capturas completas descartadas por validación del registro. */
+    rejectedRecords: number;
+    rejectedReason: string | null;
+    lastRejectedAt: string | null;
   } {
     const total = this.completeSnapshots + this.incompleteSnapshots.total;
     return {
@@ -999,6 +1061,12 @@ export class CentralMarketStore {
       bidSideEmpty: this.incompleteSnapshots.bidSideEmpty,
       bothSidesEmpty: this.incompleteSnapshots.bothSidesEmpty,
       spreadMissing: this.incompleteSnapshots.spreadMissing,
+      rejectedRecords: this.rejectedRecords.total,
+      rejectedReason: this.rejectedRecords.lastReason,
+      lastRejectedAt:
+        this.rejectedRecords.lastAt === null
+          ? null
+          : new Date(this.rejectedRecords.lastAt).toISOString(),
       lastIncompleteAt:
         this.incompleteSnapshots.lastAt === null
           ? null

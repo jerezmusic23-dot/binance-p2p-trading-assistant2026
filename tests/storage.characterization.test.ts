@@ -273,15 +273,22 @@ describe('getHistorySummary', () => {
     expect(summary.availableDays).toBe(0.04);
   });
 
+  /*
+   * Los timestamps son fechas PLAUSIBLES, no marcadores sintéticos.
+   * appendRecord rechaza ahora un registro fechado en el futuro o antes del
+   * proyecto, así que un fixture en 2033 ya no representa "un registro
+   * cualquiera": representa un reloj roto. Lo que este test necesita es el
+   * ORDEN (se escribe el nuevo antes que el viejo), y eso se conserva.
+   */
   it('BUG: an out-of-order append yields a nonsensical span (clamped to 0)', async () => {
     const StorageEngine = await freshStorage();
-    const [newer] = makeHistory(1, { startTs: 2_000_000_000_000 });
-    const [older] = makeHistory(1, { startTs: 1_000_000_000_000 });
+    const [newer] = makeHistory(1, { startTs: 1_780_000_000_000 });
+    const [older] = makeHistory(1, { startTs: 1_760_000_000_000 });
     StorageEngine.appendRecord(newer);
     StorageEngine.appendRecord(older);
 
     const summary = StorageEngine.getHistorySummary();
-    expect(summary.oldestTimestamp).toBe(2_000_000_000_000); // actually the newest
+    expect(summary.oldestTimestamp).toBe(1_780_000_000_000); // actually the newest
     expect(summary.availableHours).toBe(0);
   });
 });

@@ -7,6 +7,7 @@ import fs from 'fs';
 import path from 'path';
 import {
   StorageDiagnostics, HistoryRecord, AlertRule, AlertTriggerLog } from './types.js';
+import { validateHistoryRecord } from './recordValidation.js';
 
 export class StorageEngine {
   /**
@@ -116,6 +117,30 @@ export class StorageEngine {
    * removed. Throws; callers keep their existing try/catch so the public
    * contract (these methods never throw) is unchanged.
    */
+  /**
+   * Ruta dentro del directorio de datos, para módulos que persisten aparte.
+   *
+   * Existe para que nadie vuelva a resolver DATA_DIR por su cuenta: el
+   * despliegue puede apuntarlo a un volumen montado, y dos módulos calculando
+   * esa ruta de formas distintas acabarían escribiendo en sitios distintos.
+   */
+  public static dataFile(name: string): string {
+    this.initialize();
+    return path.join(this.DATA_DIR, name);
+  }
+
+  /**
+   * Escritura atómica reutilizable: temporal, fsync, rename.
+   *
+   * Se expone en lugar de duplicarla porque esta rutina es la que sobrevive a
+   * un corte a mitad de escritura, y tiene detrás toda la suite de
+   * storage.atomicWrite. Una segunda copia en otro módulo sería una copia sin
+   * esas pruebas.
+   */
+  public static writeJsonAtomic(targetFile: string, data: unknown): void {
+    this.writeFileAtomicSync(targetFile, JSON.stringify(data));
+  }
+
   private static writeFileAtomicSync(targetFile: string, contents: string): void {
     const dir = path.dirname(targetFile);
     if (!fs.existsSync(dir)) {
@@ -279,7 +304,40 @@ export class StorageEngine {
     }
   }
 
+  /**
+   * Registros rechazados por no pasar la validación, desde el arranque.
+   *
+   * Se cuentan en lugar de tirarse en silencio: un rechazo aislado es una
+   * captura mala, y un rechazo por minuto es un defecto. Desde fuera del
+   * proceso esos dos casos eran indistinguibles.
+   */
+  private static rejectedRecords = { total: 0, lastReason: null as string | null };
+
+  public static getRejectedRecords(): { total: number; lastReason: string | null } {
+    return { ...this.rejectedRecords };
+  }
+
+  /**
+   * ÚLTIMA LÍNEA DE DEFENSA DEL HISTÓRICO.
+   *
+   * Quien llama ya valida antes, pero esta comprobación no sobra: es el único
+   * punto por el que pasa TODO lo que acaba en disco, y un registro corrupto
+   * no se detecta el día que se escribe sino semanas después, cuando una
+   * mediana sale absurda y ya no se puede saber cuál de cuarenta mil
+   * observaciones la envenenó.
+   *
+   * Lanza en lugar de guardar lo que no se puede afirmar. El hueco resultante
+   * en la serie es el relato honesto de lo que ocurrió.
+   */
   public static appendRecord(record: HistoryRecord): void {
+    const validation = validateHistoryRecord(record);
+    if (!validation.ok) {
+      const reason = validation.reasons.join('; ');
+      this.rejectedRecords.total += 1;
+      this.rejectedRecords.lastReason = reason;
+      throw new Error(`Registro histórico rechazado: ${reason}`);
+    }
+
     this.initialize();
     this.history.push(record);
     /*

@@ -1099,8 +1099,110 @@ export interface BaselineReport {
   reason: 'INSUFFICIENT_ANCHORS' | null;
 }
 
+export type MomentumLabel =
+  | 'FUERTE_ALCISTA'
+  | 'ALCISTA'
+  | 'ALCISTA_DEBIL'
+  | 'NEUTRAL'
+  | 'BAJISTA_DEBIL'
+  | 'BAJISTA'
+  | 'FUERTE_BAJISTA';
+
+export type MomentumTrend = 'AUMENTANDO' | 'ESTABLE' | 'DISMINUYENDO' | 'INDETERMINADO';
+
+export type MovementDirection = 'ALCISTA' | 'BAJISTA' | 'LATERAL' | 'INDETERMINADA';
+
+export type EvidenceTier =
+  | 'SIN_DATOS'
+  | 'DATOS_INSUFICIENTES'
+  | 'HISTORICO_LIMITADO'
+  | 'HISTORICO_SUFICIENTE'
+  | 'ALTA_CONFIANZA_ESTADISTICA';
+
+export interface MomentumFactors {
+  driftSteps: number | null;
+  velocity: number | null;
+  acceleration: number | null;
+  persistence: number | null;
+  consecutiveMoves: number | null;
+  volatility: number | null;
+}
+
+export interface MomentumReading {
+  score: number | null;
+  label: MomentumLabel | null;
+  trend: MomentumTrend;
+  history: number[];
+  factors: MomentumFactors;
+  sampleSize: number;
+  windowSteps: number;
+}
+
+export interface HorizonMovement {
+  label: string;
+  requestedMs: number;
+  windowSteps: number;
+  measuredMs: number | null;
+  available: boolean;
+  direction: MovementDirection;
+  momentum: MomentumReading;
+}
+
+export interface LiquiditySnapshot {
+  buyUsdt: number | null;
+  sellUsdt: number | null;
+  buyAds: number | null;
+  sellAds: number | null;
+  buyChange: number | null;
+  sellChange: number | null;
+}
+
+export interface MarketReadingResult {
+  observations: number;
+  firstTimestamp: number | null;
+  lastTimestamp: number | null;
+  spanMs: number | null;
+  medianIntervalMs: number | null;
+  currentPrice: number | null;
+  typicalStep: number | null;
+  movement: MomentumReading;
+  movementText: string | null;
+  horizons: HorizonMovement[];
+  predominant: { direction: MovementDirection; note: string };
+  liquidity: LiquiditySnapshot | null;
+  evidence: EvidenceTier;
+  evidenceText: string;
+  narrative: string[];
+}
+
+export interface ForecastPerformance {
+  horizonMs: number;
+  label: string;
+  evaluated: number;
+  pending: number;
+  unevaluable: number;
+  directionalAccuracy: number | null;
+  bandCoverage: number | null;
+  medianAbsError: number | null;
+  persistenceMedianAbsError: number | null;
+  bias: number | null;
+  beatsPersistence: boolean | null;
+  reason: 'INSUFFICIENT_EVALUATED' | null;
+}
+
+export interface ForecastReport {
+  totalForecasts: number;
+  evaluated: number;
+  pending: number;
+  unevaluable: number;
+  byHorizon: ForecastPerformance[];
+  byMomentum: { label: MomentumLabel; evaluated: number; directionalAccuracy: number | null }[];
+  verdict: string;
+}
+
 export interface MarketSideProjection {
   side: 'BUY' | 'SELL';
+  reading: MarketReadingResult;
   seriesId: string;
   label: string;
   generatedAt: number;
@@ -1127,4 +1229,5 @@ export interface MarketProjectionResponse {
   source: 'market_history.json';
   sides: MarketSideProjection[];
   usable: boolean;
+  forecastPerformance: ForecastReport | null;
 }

@@ -113,11 +113,22 @@ describe('pollMarket - success path', () => {
     expect(history[0].id).toBe(`tick-${history[0].timestamp}`);
   });
 
-  it('BUG: the history record drops the entire order book', async () => {
-    // Depth loss #3 (audit) - the single most damaging gap for projections.
-    // The order book is STILL dropped: the record now also carries the
-    // strategic level of the observation, but not a single ad, price, limit
-    // or liquidity figure from the book itself. Still a BUG:.
+  it('the record now carries market context, though not the book itself', async () => {
+    /*
+     * Era "BUG: the history record drops the entire order book" (pérdida de
+     * profundidad #3 de la auditoría, la más dañina para las proyecciones).
+     *
+     * PARCIALMENTE CORREGIDO. El registro lleva ahora la capa v3: liquidez
+     * publicada por lado, cuántos anuncios la publicaron, nivel ponderado por
+     * volumen, spread absoluto y estado de la captura. Con eso una proyección
+     * ya puede distinguir un movimiento sostenido por volumen de otro sobre un
+     * libro vacío, que era lo irrecuperable.
+     *
+     * SIGUE FUERA, y a propósito: los anuncios uno a uno. Persistir veinte
+     * anuncios por minuto multiplicaría el fichero por veinte para responder
+     * preguntas que nadie ha hecho todavía. Si algún día hacen falta, se
+     * añaden igual que ésta: de forma aditiva y sin rellenar el pasado.
+     */
     const buy = Array.from({ length: 10 }, (_, i) =>
       makeAdItem({ advNo: `b${i}`, price: String(918 + i), tradable: '500' })
     );
@@ -147,9 +158,26 @@ describe('pollMarket - success path', () => {
         'strategicBuyPrice',
         'strategicSellPrice',
         'strategicSpreadPct',
+        // Añadido aditivamente: el contexto de mercado de esa misma captura.
+        'enrichmentVersion',
+        'buyLiquidityUsdt',
+        'buyLiquidityAds',
+        'sellLiquidityUsdt',
+        'sellLiquidityAds',
+        'weightedBuyPrice',
+        'weightedSellPrice',
+        'spreadAbsolute',
+        'captureStatus',
       ].sort()
     );
-    // No liquidity, no per-ad prices, no payment methods, no merchant ratings.
+
+    // La liquidez es la SUMA de lo publicado, con el recuento al lado: una
+    // suma baja sin saber cuántos anuncios reportaron no significa nada.
+    expect(record.buyLiquidityAds).toBe(10);
+    expect(record.buyLiquidityUsdt).toBe(5000);
+    expect(record.enrichmentVersion).toBe('v3-context');
+
+    // Los anuncios uno a uno siguen fuera, deliberadamente.
     expect(record).not.toHaveProperty('topBuyAds');
     expect(record).not.toHaveProperty('availableUsdt');
   });

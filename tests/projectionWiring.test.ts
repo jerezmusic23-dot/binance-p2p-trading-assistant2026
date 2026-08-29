@@ -182,6 +182,42 @@ describe('la ruta /api/market/projections/analog', () => {
     }
   });
 
+  it('cada lado trae la lectura del estado actual, separada de la proyección', async () => {
+    const body = await (await fetch(`${base}/api/market/projections/analog`)).json();
+
+    for (const side of body.sides) {
+      const reading = side.reading;
+      expect(reading).toBeTruthy();
+      expect(reading.observations).toBe(side.observations);
+      expect(reading.evidenceText).toBeTruthy();
+      expect(Array.isArray(reading.narrative)).toBe(true);
+      expect(reading.narrative.length).toBeGreaterThan(0);
+      // Las ventanas se publican todas, con o sin lectura.
+      expect(reading.horizons.map((h: any) => h.label)).toEqual(['15m', '1h', '4h', '12h', '24h']);
+      for (const h of reading.horizons) {
+        if (!h.available) expect(h.momentum.score).toBeNull();
+        else {
+          expect(h.momentum.score).toBeGreaterThanOrEqual(0);
+          expect(h.momentum.score).toBeLessThanOrEqual(100);
+        }
+      }
+    }
+  });
+
+  it('publica el rendimiento de las proyecciones ya emitidas', async () => {
+    const body = await (await fetch(`${base}/api/market/projections/analog`)).json();
+
+    expect(body.forecastPerformance).toBeTruthy();
+    expect(body.forecastPerformance.verdict).toBeTruthy();
+    // Recién arrancado no hay ninguna vencida: no se publica ni un porcentaje.
+    for (const h of body.forecastPerformance.byHorizon) {
+      if (h.reason === 'INSUFFICIENT_EVALUATED') {
+        expect(h.directionalAccuracy).toBeNull();
+        expect(h.beatsPersistence).toBeNull();
+      }
+    }
+  });
+
   it('no rompe las rutas de proyección que ya existían', async () => {
     for (const route of ['/api/market/projections/general', '/api/market/history']) {
       const res = await fetch(`${base}${route}`);
@@ -202,11 +238,17 @@ describe('el motor nuevo no recupera nada del anterior', () => {
     path.join(ENGINE, 'probability.ts'),
     path.join(ENGINE, 'engine.ts'),
     path.join(ENGINE, 'backtest.ts'),
+    path.join(ENGINE, 'momentum.ts'),
+    path.join(ENGINE, 'reading.ts'),
+    path.join(ENGINE, 'forecastEvaluation.ts'),
     path.join(SERVER, 'marketProjection.ts'),
+    path.join(SERVER, 'marketContext.ts'),
+    path.join(SERVER, 'recordValidation.ts'),
   ];
   const UI_FILES = [
     path.join(SRC, 'ProbabilisticProjectionPanel.tsx'),
     path.join(SRC, 'ProbabilisticProjectionChart.tsx'),
+    path.join(SRC, 'MarketStateBlock.tsx'),
   ];
 
   it('no contiene ninguna de las constantes ni los nombres retirados', () => {
@@ -267,6 +309,8 @@ describe('el motor nuevo no recupera nada del anterior', () => {
       path.join(ENGINE, 'historicalAnalogies.ts'),
       path.join(ENGINE, 'engine.ts'),
       path.join(ENGINE, 'backtest.ts'),
+      path.join(ENGINE, 'momentum.ts'),
+      path.join(ENGINE, 'reading.ts'),
     ]) {
       const decimals = [...code(file).matchAll(/(?<![\w.])\d+\.\d+(?![\w.])/g)].map((m) => m[0]);
       const unexplained = decimals.filter((d) => !allowed.has(d));

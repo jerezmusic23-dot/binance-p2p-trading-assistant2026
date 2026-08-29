@@ -11,6 +11,9 @@ export * from './historicalAnalogies.js';
 export * from './probability.js';
 export * from './engine.js';
 export * from './backtest.js';
+export * from './momentum.js';
+export * from './reading.js';
+export * from './forecastEvaluation.js';
 
 import {
   DEFAULT_HORIZONS_MS,

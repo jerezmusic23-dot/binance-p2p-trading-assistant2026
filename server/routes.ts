@@ -172,7 +172,7 @@ apiRouter.get('/market/projections/analog', async (_req, res) => {
     if (analogInFlight === null || analogInFlight.key !== key) {
       analogInFlight = {
         key,
-        promise: buildMarketProjectionAsync({ readRecords: () => records }),
+        promise: buildMarketProjectionAsync({ readRecords: () => records, trackForecasts: true }),
       };
     }
 

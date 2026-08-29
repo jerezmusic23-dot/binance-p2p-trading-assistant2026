@@ -51,12 +51,16 @@
  */
 
 import { StorageEngine } from './storage.js';
+import { trackForecasts } from './forecastTracker.js';
 import type { HistoryRecord } from './types.js';
 import {
   DEFAULT_HORIZONS_MS,
   decideValidation,
   projectWithBacktest,
   projectWithBacktestAsync,
+  readMarket,
+  type ForecastReport,
+  type MarketReadingResult,
   type SeriesPoint,
   type SeriesProjection,
 } from './projection/index.js';
@@ -113,6 +117,16 @@ export function extractStrategicSeries(
 export interface MarketSideProjection extends SeriesProjection {
   side: MarketSide;
   extraction: Omit<SeriesExtraction, 'points'>;
+  /**
+   * ESTADO ACTUAL, separado de la PROYECCIÓN a propósito.
+   *
+   * `reading` describe lo que el mercado está haciendo ahora —movimiento,
+   * fuerza, tendencia por horizontes, liquidez— y `horizons` afirma hacia
+   * dónde apuntan las situaciones históricas parecidas. Un mercado puede
+   * estar subiendo y proyectarse LATERAL porque sube justo lo que suele
+   * subir; fundir las dos cosas en una etiqueta borraría esa diferencia.
+   */
+  reading: MarketReadingResult;
 }
 
 export interface MarketProjectionReport {
@@ -122,6 +136,15 @@ export interface MarketProjectionReport {
   sides: MarketSideProjection[];
   /** true si algún lado tiene al menos un horizonte READY. */
   usable: boolean;
+  /**
+   * Rendimiento de las proyecciones YA EMITIDAS Y VENCIDAS.
+   *
+   * null cuando el seguimiento está desactivado, que es el caso de los tests y
+   * de cualquier cálculo que no deba escribir. La ruta HTTP sí lo activa: es
+   * la única forma de saber si el modelo acierta en producción, y no en una
+   * simulación del pasado.
+   */
+  forecastPerformance: ForecastReport | null;
 }
 
 export interface MarketProjectionOptions {
@@ -130,6 +153,11 @@ export interface MarketProjectionOptions {
   now?: number;
   /** Inyectable para tests; por defecto lee el histórico persistido. */
   readRecords?: () => readonly HistoryRecord[];
+  /**
+   * Registra las proyecciones de ahora y evalúa las vencidas. ESCRIBE A DISCO,
+   * así que está apagado por defecto: sólo la ruta HTTP lo enciende.
+   */
+  trackForecasts?: boolean;
 }
 
 const SIDE_LABEL: Record<MarketSide, string> = {
@@ -141,7 +169,8 @@ function assemble(
   order: MarketSide[],
   extractions: SeriesExtraction[],
   projections: SeriesProjection[],
-  now: number
+  now: number,
+  records: readonly HistoryRecord[]
 ): MarketProjectionReport {
   /*
    * LA CORRECCIÓN SE APLICA SOBRE LOS DOS LADOS A LA VEZ.
@@ -162,6 +191,7 @@ function assemble(
       droppedLegacy: extractions[i].droppedLegacy,
       droppedInvalid: extractions[i].droppedInvalid,
     },
+    reading: buildReading(extractions[i].points, decided[i], liquidityContext(records, side)),
   }));
 
   return {
@@ -169,24 +199,98 @@ function assemble(
     source: 'market_history.json',
     sides,
     usable: sides.some((s) => s.usable),
+    forecastPerformance: null,
   };
+}
+
+/**
+ * Añade al informe el seguimiento de proyecciones en vivo.
+ *
+ * Separado de `assemble` porque escribe: el informe se puede construir entero
+ * sin tocar disco, y sólo quien quiera medir el rendimiento paga ese coste.
+ */
+function withForecastTracking(
+  report: MarketProjectionReport,
+  extractions: SeriesExtraction[],
+  order: MarketSide[]
+): MarketProjectionReport {
+  const byId = new Map(
+    order.map((side, i) => [`STRATEGIC_${side}`, extractions[i].points as readonly SeriesPoint[]])
+  );
+  const tracking = trackForecasts(
+    report.sides,
+    (seriesId) => byId.get(seriesId) ?? [],
+    report.generatedAt
+  );
+  return { ...report, forecastPerformance: tracking.report };
+}
+
+/**
+ * Liquidez de las últimas capturas, para la lectura del estado actual.
+ *
+ * Sólo los registros que la traen (v3). Los anteriores no se rellenan: nadie
+ * observó esos valores.
+ */
+function liquidityContext(records: readonly HistoryRecord[], side: MarketSide) {
+  const enriched = records.filter((r) => r?.enrichmentVersion === 'v3-context');
+  if (enriched.length === 0) return undefined;
+
+  const last = enriched[enriched.length - 1];
+  const buys = enriched
+    .map((r) => r.buyLiquidityUsdt)
+    .filter((v): v is number => typeof v === 'number');
+  const sells = enriched
+    .map((r) => r.sellLiquidityUsdt)
+    .filter((v): v is number => typeof v === 'number');
+
+  return {
+    current: {
+      buyUsdt: last.buyLiquidityUsdt ?? null,
+      sellUsdt: last.sellLiquidityUsdt ?? null,
+      buyAds: last.buyLiquidityAds ?? null,
+      sellAds: last.sellLiquidityAds ?? null,
+    },
+    recentBuy: buys,
+    recentSell: sells,
+  };
+}
+
+/**
+ * Compone la lectura del estado actual con lo que la proyección ya descubrió.
+ *
+ * El nivel de evidencia no se decide aquí por su cuenta: se alimenta de si
+ * algún horizonte reunió análogos y de si el backtest respaldó alguno, que son
+ * hechos que sólo el motor conoce.
+ */
+function buildReading(
+  points: readonly SeriesPoint[],
+  projection: SeriesProjection,
+  liquidity: ReturnType<typeof liquidityContext>
+): MarketReadingResult {
+  return readMarket(points, {
+    liquidity,
+    hasSufficientAnalogues: projection.horizons.some((h) => h.available),
+    backtestValidated: projection.horizons.some((h) => h.status === 'READY'),
+  });
 }
 
 function prepare(options: MarketProjectionOptions) {
   const read = options.readRecords ?? (() => StorageEngine.getHistory());
   const records = read();
   const order: MarketSide[] = ['BUY', 'SELL'];
+  const now = options.now ?? Date.now();
 
   return {
     order,
-    now: options.now ?? Date.now(),
+    now,
+    records,
     extractions: order.map((side) => extractStrategicSeries(records, side)),
     projectOptions: (side: MarketSide) => ({
       seriesId: `STRATEGIC_${side}`,
       label: SIDE_LABEL[side],
       horizonsMs: options.horizonsMs ?? DEFAULT_HORIZONS_MS,
       historyTail: options.historyTail,
-      now: options.now ?? Date.now(),
+      now,
     }),
   };
 }
@@ -195,11 +299,12 @@ function prepare(options: MarketProjectionOptions) {
 export function buildMarketProjection(
   options: MarketProjectionOptions = {}
 ): MarketProjectionReport {
-  const { order, now, extractions, projectOptions } = prepare(options);
+  const { order, now, records, extractions, projectOptions } = prepare(options);
   const projections = order.map((side, i) =>
     projectWithBacktest(extractions[i].points, projectOptions(side))
   );
-  return assemble(order, extractions, projections, now);
+  const report = assemble(order, extractions, projections, now, records);
+  return options.trackForecasts ? withForecastTracking(report, extractions, order) : report;
 }
 
 /**
@@ -213,10 +318,11 @@ export function buildMarketProjection(
 export async function buildMarketProjectionAsync(
   options: MarketProjectionOptions = {}
 ): Promise<MarketProjectionReport> {
-  const { order, now, extractions, projectOptions } = prepare(options);
+  const { order, now, records, extractions, projectOptions } = prepare(options);
   const projections: SeriesProjection[] = [];
   for (let i = 0; i < order.length; i += 1) {
     projections.push(await projectWithBacktestAsync(extractions[i].points, projectOptions(order[i])));
   }
-  return assemble(order, extractions, projections, now);
+  const report = assemble(order, extractions, projections, now, records);
+  return options.trackForecasts ? withForecastTracking(report, extractions, order) : report;
 }

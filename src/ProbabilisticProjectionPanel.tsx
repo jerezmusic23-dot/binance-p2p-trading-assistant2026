@@ -32,9 +32,11 @@ import {
   MarketProjectionResponse,
   MarketSideProjection,
   ProjectionStatus,
+  ForecastReport,
 } from './types';
 import { NO_DATA, fmt, fmtInt } from './format';
 import { ProbabilisticProjectionChart } from './ProbabilisticProjectionChart';
+import { MarketStateBlock } from './MarketStateBlock';
 
 const DIRECTION_STYLE: Record<string, { label: string; className: string }> = {
   ALCISTA: { label: '🟢 ALCISTA', className: 'text-[#02c076]' },
@@ -392,19 +394,28 @@ const SideBlock: React.FC<{ side: MarketSideProjection }> = ({ side }) => {
         </p>
       </div>
 
+      {/* ESTADO ACTUAL: qué hace el mercado ahora. */}
+      <MarketStateBlock reading={side.reading} />
+
       {side.notice && (
         <div className="mx-3 mt-3 px-3 py-2 rounded border border-[#f0b90b]/40 bg-[#f0b90b]/5 text-[10px] text-[#f0b90b]">
           {side.notice}
         </div>
       )}
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 p-3">
+      {/*
+        PROYECCIÓN: hacia dónde apuntan las situaciones históricas parecidas.
+        Va debajo del estado actual y con su propio encabezado porque responde
+        a otra pregunta: aquélla describe el presente, ésta afirma sobre el
+        futuro y se mide contra la deriva estructural del bolívar.
+      */}
+      <div className="px-3 pt-3">
+        <h4 className="text-[11px] font-semibold text-[#eaecef]">Proyección por analogía histórica</h4>
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-3 p-3">
         <div>
-          <p className="text-[10px] text-[#5e6673] uppercase">Precio actual</p>
-          <p className="text-lg font-mono text-[#eaecef]">{fmt(side.currentPrice)}</p>
-        </div>
-        <div>
-          <p className="text-[10px] text-[#5e6673] uppercase">Dirección</p>
+          <p className="text-[10px] text-[#5e6673] uppercase">Dirección proyectada</p>
           <p className={`text-base font-semibold ${style?.className ?? 'text-[#848e9c]'}`}>
             {style?.label ?? 'SIN LECTURA'}
           </p>
@@ -457,6 +468,89 @@ const SideBlock: React.FC<{ side: MarketSideProjection }> = ({ side }) => {
         </p>
         <BaselineTable side={side} />
       </div>
+    </div>
+  );
+};
+
+/* ------------------------------------------------------------------------ */
+
+/**
+ * RENDIMIENTO DE LAS PROYECCIONES YA EMITIDAS.
+ *
+ * Distinto del backtest: aquél simula el pasado, esto mide lo que el bot dijo
+ * EN VIVO y qué ocurrió después. Mientras no haya proyecciones vencidas
+ * suficientes NO se publica ni un porcentaje, sólo el recuento y el aviso.
+ */
+const ForecastPerformanceTable: React.FC<{ report: ForecastReport }> = ({ report }) => {
+  const measurable = report.byHorizon.filter((h) => h.reason === null);
+
+  return (
+    <div className="border border-[#2b2f36] rounded bg-[#181a20] mb-4 p-3">
+      <h3 className="text-xs font-semibold text-[#eaecef] mb-1">
+        ¿Acertaron las proyecciones anteriores?
+      </h3>
+      <p className="text-[10px] text-[#848e9c] mb-2">
+        Cada proyección se guarda con el precio que había al emitirla y se juzga cuando vence su
+        horizonte, contra el precio real. {report.verdict}
+      </p>
+
+      <div className="flex flex-wrap gap-4 text-[10px] text-[#848e9c] mb-2">
+        <span>
+          Emitidas: <b className="text-[#eaecef]">{report.totalForecasts}</b>
+        </span>
+        <span>
+          Vencidas y evaluadas: <b className="text-[#eaecef]">{report.evaluated}</b>
+        </span>
+        <span>
+          Pendientes: <b className="text-[#eaecef]">{report.pending}</b>
+        </span>
+        <span>
+          No evaluables por hueco de captura: <b className="text-[#eaecef]">{report.unevaluable}</b>
+        </span>
+      </div>
+
+      {measurable.length === 0 ? (
+        <p className="text-[10px] text-[#f0b90b]">
+          Todavía no hay muestra suficiente en ningún horizonte. No se publica ningún porcentaje.
+        </p>
+      ) : (
+        <table className="w-full text-[10px]">
+          <thead className="text-[#5e6673]">
+            <tr>
+              <th className="text-left py-1 px-2">Horizonte</th>
+              <th className="text-right py-1 px-2">Evaluadas</th>
+              <th className="text-right py-1 px-2">Acierto</th>
+              <th className="text-right py-1 px-2">Cobertura</th>
+              <th className="text-right py-1 px-2">Error</th>
+              <th className="text-right py-1 px-2">Error persistencia</th>
+              <th className="text-right py-1 px-2">Sesgo</th>
+              <th className="text-right py-1 px-2">Veredicto</th>
+            </tr>
+          </thead>
+          <tbody className="text-[#848e9c]">
+            {measurable.map((h) => (
+              <tr key={h.horizonMs} className="border-t border-[#2b2f36]">
+                <td className="py-1 px-2 font-mono text-[#eaecef]">{h.label}</td>
+                <td className="py-1 px-2 text-right font-mono">{h.evaluated}</td>
+                <td className="py-1 px-2 text-right font-mono">{pct(h.directionalAccuracy)}</td>
+                <td className="py-1 px-2 text-right font-mono">{pct(h.bandCoverage)}</td>
+                <td className="py-1 px-2 text-right font-mono">{fmt(h.medianAbsError, 4)}</td>
+                <td className="py-1 px-2 text-right font-mono">
+                  {fmt(h.persistenceMedianAbsError, 4)}
+                </td>
+                <td className="py-1 px-2 text-right font-mono">{fmt(h.bias, 4)}</td>
+                <td
+                  className={`py-1 px-2 text-right font-semibold ${
+                    h.beatsPersistence ? 'text-[#02c076]' : 'text-[#f6465d]'
+                  }`}
+                >
+                  {h.beatsPersistence ? 'SUPERA' : 'NO SUPERA'}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
     </div>
   );
 };
@@ -522,6 +616,10 @@ export const ProbabilisticProjectionPanel: React.FC = () => {
           Ningún horizonte ha alcanzado el estado READY. Lo que se muestra abajo es una lectura del
           histórico, no una recomendación de operación.
         </div>
+      )}
+
+      {data?.forecastPerformance && (
+        <ForecastPerformanceTable report={data.forecastPerformance} />
       )}
 
       {data?.sides.map((side) => <SideBlock key={side.side} side={side} />)}

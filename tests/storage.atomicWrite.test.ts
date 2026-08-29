@@ -134,7 +134,7 @@ describe('D - a failure while writing the temp file preserves the target', () =>
     vi.spyOn(fs, 'writeFileSync').mockImplementation(() => {
       throw new Error('ENOSPC: no space left on device');
     });
-    StorageEngine.appendRecord(makeHistory(1, { startTs: 1_900_000_000_000 })[0]);
+    StorageEngine.appendRecord(makeHistory(1, { startTs: 1_770_000_000_000 })[0]);
 
     expect(readText(historyFile())).toBe(before);
     expect(JSON.parse(readText(historyFile())) as HistoryRecord[]).toHaveLength(4);
@@ -148,7 +148,7 @@ describe('D - a failure while writing the temp file preserves the target', () =>
     vi.spyOn(fs, 'openSync').mockImplementation((p: fs.PathLike) => {
       throw new Error(`EACCES: permission denied, open '${String(p)}'`);
     });
-    StorageEngine.appendRecord(makeHistory(1, { startTs: 1_900_000_000_000 })[0]);
+    StorageEngine.appendRecord(makeHistory(1, { startTs: 1_770_000_000_000 })[0]);
 
     expect(readText(historyFile())).toBe(before);
   });
@@ -171,7 +171,7 @@ describe('E - a failure after the write but before the rename preserves the targ
     vi.spyOn(fs, 'fsyncSync').mockImplementation(() => {
       throw new Error('EIO: i/o error');
     });
-    StorageEngine.appendRecord(makeHistory(1, { startTs: 1_900_000_000_000 })[0]);
+    StorageEngine.appendRecord(makeHistory(1, { startTs: 1_770_000_000_000 })[0]);
 
     expect(readText(historyFile())).toBe(before);
   });
@@ -184,7 +184,7 @@ describe('E - a failure after the write but before the rename preserves the targ
     vi.spyOn(fs, 'renameSync').mockImplementation(() => {
       throw new Error('EXDEV: cross-device link not permitted');
     });
-    StorageEngine.appendRecord(makeHistory(1, { startTs: 1_900_000_000_000 })[0]);
+    StorageEngine.appendRecord(makeHistory(1, { startTs: 1_770_000_000_000 })[0]);
 
     expect(readText(historyFile())).toBe(before);
   });
@@ -196,11 +196,11 @@ describe('E - a failure after the write but before the rename preserves the targ
     const renameSpy = vi.spyOn(fs, 'renameSync').mockImplementationOnce(() => {
       throw new Error('EIO');
     });
-    StorageEngine.appendRecord(makeHistory(1, { startTs: 1_900_000_000_000 })[0]);
+    StorageEngine.appendRecord(makeHistory(1, { startTs: 1_770_000_000_000 })[0]);
     expect(JSON.parse(readText(historyFile())) as HistoryRecord[]).toHaveLength(4);
 
     renameSpy.mockRestore();
-    StorageEngine.appendRecord(makeHistory(1, { startTs: 1_900_000_100_000 })[0]);
+    StorageEngine.appendRecord(makeHistory(1, { startTs: 1_770_000_100_000 })[0]);
     // Both appends are in memory; the successful write flushes all 6.
     expect(JSON.parse(readText(historyFile())) as HistoryRecord[]).toHaveLength(6);
   });
@@ -214,7 +214,7 @@ describe('F - a temp file never substitutes for the target', () => {
     vi.spyOn(fs, 'renameSync').mockImplementation(() => {
       throw new Error('EIO');
     });
-    StorageEngine.appendRecord(makeHistory(1, { startTs: 1_900_000_000_000 })[0]);
+    StorageEngine.appendRecord(makeHistory(1, { startTs: 1_770_000_000_000 })[0]);
 
     expect(tempFiles()).toEqual([]);
   });
@@ -226,7 +226,7 @@ describe('F - a temp file never substitutes for the target', () => {
     vi.spyOn(fs, 'writeFileSync').mockImplementation(() => {
       throw new Error('ENOSPC');
     });
-    StorageEngine.appendRecord(makeHistory(1, { startTs: 1_900_000_000_000 })[0]);
+    StorageEngine.appendRecord(makeHistory(1, { startTs: 1_770_000_000_000 })[0]);
 
     expect(fs.existsSync(historyFile())).toBe(true);
     expect(() => JSON.parse(readText(historyFile()))).not.toThrow();

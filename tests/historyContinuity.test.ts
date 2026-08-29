@@ -154,7 +154,7 @@ describe('persistence has no silent losses', () => {
       throw new Error('EROFS: read-only file system');
     });
 
-    StorageEngine.appendRecord(makeHistory(1, { startTs: 2_000_000_000_000 })[0]);
+    StorageEngine.appendRecord(makeHistory(1, { startTs: 1_780_000_000_000 })[0]);
 
     expect(error).toHaveBeenCalled();
     openSpy.mockRestore();

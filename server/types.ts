@@ -334,6 +334,42 @@ export interface HistoryRecord {
   strategicBuyPrice?: number;
   strategicSellPrice?: number;
   strategicSpreadPct?: number;
+
+  /**
+   * ADDITIVE, v3. Contexto de mercado que el CentralStore YA calcula en cada
+   * captura y que hasta ahora se tiraba: liquidez, profundidad y nivel
+   * ponderado por volumen.
+   *
+   * Existe porque una proyección que sólo mira el precio no puede distinguir
+   * un movimiento sostenido por volumen de otro que ocurre sobre un libro
+   * vacío, y ésos no son el mismo mercado. Todos son OPCIONALES y sólo se
+   * escriben cuando la observación los produjo: los registros anteriores NO se
+   * rellenan hacia atrás, porque nadie observó esos valores.
+   *
+   * `enrichmentVersion` marca los registros que llevan esta capa, igual que
+   * `calculationVersion` marca los estratégicos. Un registro puede ser v2 sin
+   * ser v3: la captura de precios y la de liquidez pueden fallar por separado.
+   */
+  enrichmentVersion?: 'v3-context';
+  /**
+   * USDT anunciados en el lado, sumando SÓLO los anuncios que publicaron
+   * volumen. `null` significa "ninguno lo publicó", que no es lo mismo que 0.
+   */
+  buyLiquidityUsdt?: number;
+  sellLiquidityUsdt?: number;
+  /**
+   * Cuántos anuncios del lado publicaron volumen. Sin este número, una suma
+   * baja no distingue "poca liquidez" de "casi nadie la publicó".
+   */
+  buyLiquidityAds?: number;
+  sellLiquidityAds?: number;
+  /** Nivel ponderado por volumen: dónde está el precio del dinero, no el del anuncio. */
+  weightedBuyPrice?: number;
+  weightedSellPrice?: number;
+  /** Spread en VES. El porcentual ya está arriba; éste evita recalcularlo. */
+  spreadAbsolute?: number;
+  /** Estado de la captura que produjo el registro. */
+  captureStatus?: 'LIVE' | 'STALE' | 'OFFLINE';
 }
 
 /** What the storage layer is actually doing, for diagnosing persistence. */

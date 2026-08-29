@@ -72,9 +72,18 @@ export type Strength = 'MUY_DEBIL' | 'DEBIL' | 'MODERADA' | 'FUERTE' | 'MUY_FUER
 
 /**
  * Horizontes que se INTENTAN. No es una promesa: cada uno se publica sólo si
- * el histórico lo sostiene. Los tres primeros son los que el histórico actual
- * puede llegar a alcanzar; +2 h y +4 h están aquí para que aparezcan SOLOS el
- * día que haya datos, sin tocar código.
+ * el histórico lo sostiene, y aparece SOLO el día que haya datos, sin tocar
+ * código.
+ *
+ * Lo que cada uno cuesta, a un registro por minuto (41·H observaciones):
+ *
+ *   +15 min  ~10 h de histórico      +4 h    ~7 días
+ *   +30 min  ~21 h                   +12 h   ~21 días
+ *   +1 h     ~41 h                   +24 h   ~42 días
+ *   +2 h     ~3.5 días
+ *
+ * Los largos dirán INSUFICIENTE HISTÓRICO durante semanas, y es correcto que
+ * lo digan: publicar +24 h con dos días de datos sería inventarse la mitad.
  */
 export const DEFAULT_HORIZONS_MS: readonly number[] = [
   15 * 60 * 1000,
@@ -82,6 +91,8 @@ export const DEFAULT_HORIZONS_MS: readonly number[] = [
   60 * 60 * 1000,
   2 * 60 * 60 * 1000,
   4 * 60 * 60 * 1000,
+  12 * 60 * 60 * 1000,
+  24 * 60 * 60 * 1000,
 ];
 
 export const DEFAULT_HISTORY_TAIL = 240;
