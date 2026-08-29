@@ -10,6 +10,10 @@ import { runProjectionBacktest } from './projectionBacktest.js';
 import { GENERAL_MARKET_KEY, projectCell } from './makerProjectionEngine.js';
 import { CentralMarketStore } from './centralStore.js';
 import { StorageEngine } from './storage.js';
+import {
+  buildMarketAnalogProjection,
+  type MarketAnalogReport,
+} from './marketAnalogProjection.js';
 import { AlertRule } from './types.js';
 
 export const apiRouter = Router();
@@ -117,6 +121,44 @@ apiRouter.get('/market/projections/general', (_req, res) => {
     res.json({ projection, series });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Error building market projection' });
+  }
+});
+
+/*
+ * PROYECCIÓN PROBABILÍSTICA POR ANALOGÍA SOBRE LA SERIE PRINCIPAL.
+ *
+ * Distinta de /projections/general, y no la sustituye: aquélla lee la serie de
+ * celdas y da tendencia y banda empírica del libro maker. Ésta lee
+ * market_history.json - la serie global de un registro por minuto - y responde
+ * a "qué pasó históricamente en las situaciones parecidas a la de ahora".
+ *
+ * Todo número que sale de aquí llega con su procedencia: cuántos casos lo
+ * sostienen, cuáles son (con fecha), contra qué deriva de régimen se juzgaron,
+ * y si el backtest contra la persistencia lo valida o no. Un horizonte sin
+ * histórico suficiente devuelve INSUFICIENTE HISTÓRICO, no un número.
+ *
+ * CACHÉ. Recorrer 3.000 registros con backtest incluido cuesta ~3 s, y el
+ * histórico sólo cambia una vez por minuto. Se cachea contra el estado real de
+ * la serie - cuántos registros hay y cuál es el último - así que un registro
+ * nuevo invalida la caché al instante y nunca se sirve una proyección que no
+ * corresponda a los datos actuales. No es un TTL: un TTL podría servir datos
+ * viejos o recalcular sin motivo.
+ */
+let analogCache: { key: string; report: MarketAnalogReport } | null = null;
+
+apiRouter.get('/market/projections/analog', (_req, res) => {
+  try {
+    const records = StorageEngine.getHistory();
+    const newest = records.length > 0 ? records[records.length - 1].timestamp : 0;
+    const key = `${records.length}:${newest}`;
+
+    if (analogCache === null || analogCache.key !== key) {
+      analogCache = { key, report: buildMarketAnalogProjection({ readRecords: () => records }) };
+    }
+
+    res.json(analogCache.report);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Error building analog projection' });
   }
 });
 

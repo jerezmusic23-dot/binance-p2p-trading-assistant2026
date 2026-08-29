@@ -177,6 +177,20 @@ describe('every percentage on the screen is a frequency or a price ratio', () =>
     'directionalAccuracy',
     'baselineAccuracy',
     'bandCoverage',
+    /*
+     * Proyección por analogía. Las tres primeras son literalmente un recuento
+     * partido por otro: casos_que_subieron / casos_comparables, con los dos
+     * términos publicados al lado y las fechas de cada caso detrás. Las dos
+     * últimas son los extremos del intervalo de Wilson al 95% de esa misma
+     * frecuencia, así que son de la misma naturaleza que ella; existen
+     * precisamente para que el porcentaje no se lea con más precisión de la
+     * que tiene.
+     */
+    'probabilityUp',
+    'probabilityFlat',
+    'probabilityDown',
+    'probabilityUpLow',
+    'probabilityUpHigh',
     'upRate',
     'flatRate',
     'downRate',

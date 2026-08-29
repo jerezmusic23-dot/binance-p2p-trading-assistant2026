@@ -4,6 +4,7 @@ import {
   MakerMatrixResponse,
   MakerProjectionsResponse,
   GeneralProjectionResponse,
+  AnalogProjectionResponse,
   CellSeriesResponse,
   OpportunitiesResponse,
   HistoryRecord,
@@ -101,6 +102,15 @@ export class ApiService {
    */
   public static async getGeneralProjection(): Promise<GeneralProjectionResponse> {
     return requestJson<GeneralProjectionResponse>('/api/market/projections/general');
+  }
+
+  /*
+   * La proyección por analogía sobre market_history.json. El servidor la
+   * cachea contra el estado de la serie, así que pedirla a menudo es barato,
+   * pero recorrer el histórico con backtest no lo es la primera vez.
+   */
+  public static async getAnalogProjection(): Promise<AnalogProjectionResponse> {
+    return requestJson<AnalogProjectionResponse>('/api/market/projections/analog');
   }
 
   /**

@@ -20,6 +20,7 @@ import {
 
 import { MainOverview } from './MainOverview';
 import { MarketProjectionPanel } from './MarketProjectionPanel';
+import { AnalogProjectionPanel } from './AnalogProjectionPanel';
 import { BankMatrix } from './BankMatrix';
 import { MakerMatrix } from './MakerMatrix';
 import { MarketAnalysisPanel } from './MarketAnalysisPanel';
@@ -428,7 +429,26 @@ export default function App() {
           question from the stored series - the real history, then a band that
           is the 10th and 90th percentile of the moves the book actually made.
         */}
-        {activeTab === 'projections' && <MarketProjectionPanel />}
+        {/*
+          DOS LECTURAS DISTINTAS, UNA DEBAJO DE OTRA, Y NO SE MEZCLAN.
+
+          AnalogProjectionPanel responde "¿qué pasó históricamente en las
+          situaciones parecidas a la de ahora?" sobre market_history.json, con
+          los casos concretos detrás de cada porcentaje y un contraste contra
+          la persistencia que decide si puede presentarse como utilizable.
+
+          MarketProjectionPanel, debajo, sigue describiendo el libro maker
+          desde la serie de celdas: tendencia por horizontes y banda empírica.
+          Describe el AHORA; no proyecta probabilidades. Van separadas a
+          propósito: son dos series y dos preguntas, y promediarlas daría un
+          número que ninguna de las dos respalda.
+        */}
+        {activeTab === 'projections' && (
+          <div className="space-y-6">
+            <AnalogProjectionPanel />
+            <MarketProjectionPanel />
+          </div>
+        )}
 
         {/* WHAT PRICE MY OWN AD SHOULD CARRY */}
         {activeTab === 'publish' && <MakerMatrix />}

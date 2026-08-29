@@ -949,3 +949,125 @@ export interface AlertTriggerLog {
   price: number;
   timestamp: number;
 }
+
+/* ==========================================================================
+ * PROYECCIÓN POR ANALOGÍA
+ *
+ * Espejo de server/analogProjection.ts y server/marketAnalogProjection.ts.
+ * Se mantiene a mano, como el resto de este fichero: el servidor no publica
+ * sus tipos y una divergencia aquí es un fallo de compilación allí, no un
+ * número equivocado en pantalla.
+ * ========================================================================== */
+
+export type AnalogOutcome = 'UP' | 'FLAT' | 'DOWN';
+export type AnalogDirection = 'ALCISTA' | 'LATERAL' | 'BAJISTA';
+export type AnalogStrength = 'DEBIL' | 'MODERADA' | 'FUERTE';
+
+export interface AnalogPoint {
+  t: number;
+  price: number;
+}
+
+export interface AnalogSample {
+  t: number;
+  price: number;
+  delta: number;
+  outcome: AnalogOutcome;
+  distance: number;
+}
+
+export interface AnalogAudit {
+  observations: number;
+  firstTimestamp: number | null;
+  lastTimestamp: number | null;
+  medianIntervalMs: number | null;
+  typicalStep: number | null;
+  horizonSteps: number;
+  measuredHorizonMs: number | null;
+  lookbackSteps: number;
+  candidatePool: number;
+  analoguesUsed: number;
+  independentAnalogues: number;
+  maxDistanceUsed: number | null;
+  featureScales: Record<string, number>;
+  upCount: number;
+  flatCount: number;
+  downCount: number;
+  regimeDelta: number | null;
+  directionThreshold: number | null;
+  p10: number | null;
+  p50: number | null;
+  p90: number | null;
+  samples: AnalogSample[];
+}
+
+export interface AnalogHorizonProjection {
+  requestedHorizonMs: number;
+  label: string;
+  available: boolean;
+  reason: string | null;
+  reasonText: string | null;
+  currentPrice: number | null;
+  central: number | null;
+  low: number | null;
+  high: number | null;
+  probabilityUp: number | null;
+  probabilityFlat: number | null;
+  probabilityDown: number | null;
+  probabilityUpLow: number | null;
+  probabilityUpHigh: number | null;
+  direction: AnalogDirection | null;
+  strength: AnalogStrength | null;
+  evidence: string | null;
+  audit: AnalogAudit | null;
+}
+
+export interface AnalogBaselineReport {
+  requestedHorizonMs: number;
+  label: string;
+  anchors: number;
+  skipped: number;
+  directionalAccuracy: number | null;
+  persistenceDirectionalAccuracy: number | null;
+  bandCoverage: number | null;
+  modelMedianAbsError: number | null;
+  persistenceMedianAbsError: number | null;
+  modelBetterCount: number;
+  persistenceBetterCount: number;
+  tiedCount: number;
+  pValue: number | null;
+  alpha: number | null;
+  familySize: number | null;
+  beatsPersistence: boolean | null;
+  reason: 'INSUFFICIENT_ANCHORS' | null;
+}
+
+export interface AnalogSideProjection {
+  side: 'BUY' | 'SELL';
+  seriesId: string;
+  label: string;
+  generatedAt: number;
+  observations: number;
+  firstTimestamp: number | null;
+  lastTimestamp: number | null;
+  medianIntervalMs: number | null;
+  typicalStep: number | null;
+  currentPrice: number | null;
+  history: AnalogPoint[];
+  horizons: AnalogHorizonProjection[];
+  baselines: AnalogBaselineReport[];
+  usable: boolean;
+  notice: string | null;
+  extraction: {
+    recordsRead: number;
+    droppedLegacy: number;
+    droppedInvalid: number;
+  };
+}
+
+export interface AnalogProjectionResponse {
+  generatedAt: number;
+  source: 'market_history.json';
+  sides: AnalogSideProjection[];
+  usable: boolean;
+}
