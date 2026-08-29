@@ -5,13 +5,14 @@
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
-    "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
-    "start": "node dist/server.cjs",
+    "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs && npm run build:probe",
+    "start": "node dist/p2p-probe.cjs & node dist/server.cjs",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "build:probe": "esbuild scripts/run-p2p-army-probe-once.ts --bundle --platform=node --format=cjs --packages=external --outfile=dist/p2p-probe.cjs"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
