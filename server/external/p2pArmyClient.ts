@@ -45,8 +45,20 @@ export const API_KEY_ENV = 'P2P_ARMY_API_KEY';
 
 export interface P2PArmyRequest {
   path: string;
+  /**
+   * Método HTTP.
+   *
+   * `/history/p2p_prices` es POST según su documentación. Se hizo GET en el
+   * primer probe y el servidor devolvió 200 con cuerpo vacío en lugar de un
+   * 405: los parámetros viajaban en la query, donde no los mira, así que la
+   * respuesta parecía "no hay datos" cuando en realidad era "no me has
+   * preguntado nada". De ahí que el método sea explícito aquí.
+   */
+  method?: 'GET' | 'POST';
   /** Parámetros de consulta. Nunca debe incluir credenciales. */
   query?: Record<string, string | number | undefined>;
+  /** Cuerpo JSON para POST. Nunca debe incluir credenciales. */
+  body?: Record<string, unknown>;
   /** Algunas rutas (ping/time) no exigen clave. */
   requiresKey?: boolean;
   timeoutMs?: number;
@@ -59,10 +71,26 @@ export interface P2PArmyResponse {
   body: unknown;
   /** URL pedida SIN credenciales, apta para registrar. */
   requestedUrl: string;
+  method: string;
   durationMs: number;
   /** Cabeceras útiles para deducir límites de frecuencia. */
   rateLimitHeaders: Record<string, string>;
   error: string | null;
+
+  /*
+   * DIAGNÓSTICO DE LA RESPUESTA CRUDA.
+   *
+   * Sin esto, un 200 que devuelve HTML es indistinguible de un 200 que
+   * devuelve un JSON vacío, y las dos cosas significan problemas
+   * completamente distintos.
+   */
+  contentType: string | null;
+  bodyLength: number;
+  isJson: boolean;
+  /** Primeras claves del objeto raíz, o [] si no es un objeto. */
+  rootKeys: string[];
+  /** Primeros caracteres del cuerpo crudo, para ver qué llegó de verdad. */
+  bodyPreview: string;
 }
 
 export class MissingApiKeyError extends Error {
@@ -122,16 +150,46 @@ export async function callP2PArmy(request: P2PArmyRequest): Promise<P2PArmyRespo
     headers['X-APIKEY'] = key.trim();
   }
 
+  const method = request.method ?? 'GET';
+  let payload: string | undefined;
+  if (method === 'POST') {
+    headers['Content-Type'] = 'application/json';
+    payload = JSON.stringify(request.body ?? {});
+  }
+
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), request.timeoutMs ?? 20_000);
 
+  const failed = (error: string): P2PArmyResponse => ({
+    ok: false,
+    status: 0,
+    body: null,
+    requestedUrl,
+    method,
+    durationMs: Date.now() - started,
+    rateLimitHeaders: {},
+    error,
+    contentType: null,
+    bodyLength: 0,
+    isJson: false,
+    rootKeys: [],
+    bodyPreview: '',
+  });
+
   try {
-    const res = await fetch(requestedUrl, { headers, signal: controller.signal });
+    const res = await fetch(requestedUrl, {
+      method,
+      headers,
+      body: payload,
+      signal: controller.signal,
+    });
     const text = await res.text();
 
     let body: unknown = text;
+    let isJson = false;
     try {
       body = JSON.parse(text);
+      isJson = true;
     } catch {
       // Se conserva el texto: un HTML de error dice tanto como un JSON.
     }
@@ -147,21 +205,23 @@ export async function callP2PArmy(request: P2PArmyRequest): Promise<P2PArmyRespo
       status: res.status,
       body,
       requestedUrl,
+      method,
       durationMs: Date.now() - started,
       rateLimitHeaders,
       error: res.ok ? null : `HTTP ${res.status}`,
+      contentType: res.headers.get('content-type'),
+      bodyLength: text.length,
+      isJson,
+      rootKeys:
+        isJson && body !== null && typeof body === 'object' && !Array.isArray(body)
+          ? Object.keys(body as Record<string, unknown>)
+          : [],
+      // Recortado: sólo hace falta ver QUÉ llegó, no todo lo que llegó.
+      bodyPreview: text.slice(0, 240).replace(/\s+/g, ' '),
     };
   } catch (err: unknown) {
     // El mensaje de red nunca contiene la clave: viaja en una cabecera.
-    return {
-      ok: false,
-      status: 0,
-      body: null,
-      requestedUrl,
-      durationMs: Date.now() - started,
-      rateLimitHeaders: {},
-      error: err instanceof Error ? err.message : String(err),
-    };
+    return failed(err instanceof Error ? err.message : String(err));
   } finally {
     clearTimeout(timeout);
   }

@@ -1,32 +1,62 @@
 /**
- * PROBE REAL DE P2P.ARMY — Binance / USDT / VES
- * ============================================
+ * PROBE REAL DE P2P.ARMY — FASE 2: POR QUÉ UN 200 SIN REGISTROS
+ * =============================================================
  *
- * Consulta la API real y devuelve un informe. NO escribe ficheros, NO toca
- * `market_history.json` ni `forecast_log.json`, NO importa nada al motor. Esta
- * fase es sólo diagnóstico.
+ * La primera ejecución devolvió HTTP 200 en todas las rutas y CERO registros en
+ * todas ellas. Esta versión NO vuelve a hacer lo mismo esperando otro resultado:
+ * está construida para DISTINGUIR entre las explicaciones posibles de ese 200.
  *
- * ═══ SALIDA AMORTIGUADA ═══
+ * ═══ EL FALLO DE LA VERSIÓN ANTERIOR ═══
  *
- * El informe se acumula y se imprime DE UNA VEZ al final. Corre en paralelo al
- * arranque del servidor, y si escribiera línea a línea quedaría entrelazado con
- * los logs del polling de Binance, ilegible justo en Railway, que es donde hay
- * que leerlo.
+ * `/v1/api/history/p2p_prices` es POST. Se consultó con GET y los parámetros en
+ * la query. Un servidor que acepta ambos métodos y lee el cuerpo —no la query—
+ * recibe una petición SIN filtros y responde con un conjunto vacío. El 200 no
+ * significaba "no hay datos": significaba "no me has preguntado nada". Esta
+ * versión manda POST con cuerpo JSON, que es la corrección directa, y además
+ * conserva una petición GET idéntica para PROBAR esa diferencia en la misma
+ * ejecución en vez de afirmarla.
  *
- * ═══ DESCUBRE, NO SUPONE ═══
+ * ═══ SIN CONTROLES, UN 200 NO DICE NADA ═══
  *
- * De la documentación pública sólo está verificado: el endpoint
- * /v1/api/history/p2p_prices, la cabecera X-APIKEY, que acepta market / fiat /
- * asset / método de pago / límite, y que el histórico va en planes de pago.
- * Los nombres exactos de parámetros, los métodos de pago válidos para VES y los
- * límites NO están verificados: los averigua aquí, contra el servidor, e
- * imprime los errores literales — cuando una API rechaza un parámetro suele
- * decir en el mensaje qué valores acepta.
+ * Dos controles hacen falta para poder interpretar cualquier respuesta:
+ *
+ *   RUTA INEXISTENTE — se pide a propósito una ruta que no puede existir. Si
+ *   devuelve 200 con cuerpo vacío, entonces "200 + vacío" es exactamente lo que
+ *   este servidor contesta a lo que no conoce, y los cuatro catálogos vacíos de
+ *   la fase 1 quedan explicados sin suponer nada: esas rutas no existen.
+ *
+ *   PARÁMETROS IMPOSIBLES — se pide el histórico de un mercado y una moneda que
+ *   no existen. Si eso también devuelve 200 y vacío, el servidor NO valida la
+ *   entrada, y por tanto un 200 vacío con parámetros correctos tampoco prueba
+ *   que no haya datos. Si en cambio devuelve un error, entonces sí valida, y el
+ *   vacío de la consulta buena pasa a ser una respuesta con contenido.
+ *
+ * Sin estos dos controles cualquier conclusión sería una suposición con formato
+ * de informe.
+ *
+ * ═══ LOS ESTADOS NO SE COLAPSAN ═══
+ *
+ * API_ACCESSIBLE, AUTHENTICATED, ENDPOINT_ACCESSIBLE y DATA_AVAILABLE se
+ * informan por separado. Un 200 nunca se convierte en "disponible": DATA_AVAILABLE
+ * exige registros parseados, con fechas y precios. Es la confusión que produjo el
+ * informe optimista de la fase 1.
+ *
+ * ═══ PRESUPUESTO ═══
+ *
+ * Seis peticiones planificadas y una séptima que SÓLO se gasta si el servidor
+ * revela vocabulario válido (un mensaje de error que nombre parámetros o valores).
+ * No se prueban métodos de pago uno a uno: hasta saber si `payment_method` es
+ * obligatorio, eso sería quemar el presupuesto adivinando.
+ *
+ * ═══ NO IMPORTA NADA ═══
+ *
+ * No escribe ficheros, no toca `market_history.json` ni `forecast_log.json`, no
+ * alimenta el motor de proyección. Sólo diagnostica.
  *
  * ═══ LA CLAVE ═══
  *
  * Se lee de process.env y viaja sólo en la cabecera X-APIKEY. Nada de lo que
- * esto imprime la contiene, ni siquiera en los mensajes de error.
+ * esto imprime la contiene, ni siquiera los mensajes de error.
  */
 
 import {
@@ -36,37 +66,76 @@ import {
   hasApiKey,
   type P2PArmyResponse,
 } from '../server/external/p2pArmyClient.js';
-import { validateHistoryBatch, type HistoryValidation } from '../server/external/p2pArmyHistory.js';
+import { extractRows, validateHistoryBatch, type HistoryValidation } from '../server/external/p2pArmyHistory.js';
 
-const MAX_REQUESTS = 14;
-const REQUEST_TIMEOUT_MS = 10_000;
+/** 6 planificadas + 1 reservada para seguir una pista que dé el servidor. */
+const MAX_REQUESTS = 7;
+const REQUEST_TIMEOUT_MS = 15_000;
+
+const HISTORY_PATH = '/v1/api/history/p2p_prices';
+
+/**
+ * Ruta que no puede existir. Lleva un sufijo aleatorio para que no pueda
+ * coincidir jamás con algo real ni quedar cacheada de una ejecución anterior.
+ */
+const NONEXISTENT_PATH = `/v1/api/__ruta_inexistente_de_control_${Math.random().toString(36).slice(2, 10)}`;
 
 const out: string[] = [];
 const say = (s = '') => out.push(s);
 const flush = () => console.log(out.join('\n'));
 
 let spent = 0;
-const attempts: { label: string; url: string; status: number; error: string | null }[] = [];
+
+/*
+ * Estado compartido con el formateador: `notRun()` necesita saber POR QUÉ se
+ * saltó una petición, y quien la salta es main(). Se declaran aquí en vez de
+ * pasarlos por parámetro a cada llamada de `describe`.
+ */
+let apiAccessible = false;
+let authRejected = false;
+
+interface Attempt {
+  label: string;
+  method: string;
+  url: string;
+  status: number;
+  contentType: string | null;
+  bodyLength: number;
+  isJson: boolean;
+  rootKeys: string[];
+  preview: string;
+  error: string | null;
+}
+
+const attempts: Attempt[] = [];
 
 async function request(
   label: string,
-  path: string,
-  query?: Record<string, string | number | undefined>,
-  requiresKey = true
+  init: {
+    path: string;
+    method?: 'GET' | 'POST';
+    query?: Record<string, string | number | undefined>;
+    body?: Record<string, unknown>;
+    requiresKey?: boolean;
+  }
 ): Promise<P2PArmyResponse | null> {
   if (spent >= MAX_REQUESTS) return null;
   spent += 1;
 
-  const res = await callP2PArmy({ path, query, requiresKey, timeoutMs: REQUEST_TIMEOUT_MS });
-  attempts.push({ label, url: res.requestedUrl, status: res.status, error: res.error });
+  const res = await callP2PArmy({ ...init, timeoutMs: REQUEST_TIMEOUT_MS });
+  attempts.push({
+    label,
+    method: res.method,
+    url: res.requestedUrl,
+    status: res.status,
+    contentType: res.contentType,
+    bodyLength: res.bodyLength,
+    isJson: res.isJson,
+    rootKeys: res.rootKeys,
+    preview: res.bodyPreview,
+    error: res.error,
+  });
   return res;
-}
-
-/** Cuerpo de error recortado. Nunca contiene la clave: viaja en cabecera. */
-function errorBody(res: P2PArmyResponse): string {
-  if (res.body === null) return res.error ?? 'sin cuerpo';
-  const text = typeof res.body === 'string' ? res.body : JSON.stringify(res.body);
-  return text.slice(0, 300);
 }
 
 function section(title: string, body: string | string[]): void {
@@ -75,8 +144,67 @@ function section(title: string, body: string | string[]): void {
   for (const line of Array.isArray(body) ? body : [body]) say(`  ${line}`);
 }
 
+/**
+ * Por qué una petición no llegó a hacerse.
+ *
+ * Decir "presupuesto agotado" cuando la causa fue que no había conectividad
+ * manda a pedir más cuota para arreglar un problema de red. Es el mismo tipo de
+ * confusión que produjo el informe de la fase 1, así que la causa se nombra.
+ */
+function notRun(): string {
+  if (!apiAccessible) return 'NO EJECUTADA — el ping no respondió 2xx: no se llegó al servidor';
+  if (authRejected) return 'NO EJECUTADA — la API rechazó la credencial';
+  return 'NO EJECUTADA — presupuesto de peticiones agotado';
+}
+
+/** Ficha cruda de una respuesta. Es la materia prima del diagnóstico. */
+function describe(res: P2PArmyResponse | null): string[] {
+  if (res === null) return [notRun()];
+  return [
+    `${res.method} ${res.requestedUrl}`,
+    `HTTP ${res.status}${res.error ? ` (${res.error})` : ''} · ${res.durationMs} ms`,
+    `Content-Type: ${res.contentType ?? '—'}`,
+    `tamaño del cuerpo: ${res.bodyLength} caracteres · JSON válido: ${res.isJson ? 'sí' : 'NO'}`,
+    `claves de la raíz: ${res.rootKeys.length > 0 ? res.rootKeys.join(', ') : '(ninguna: no es un objeto)'}`,
+    `cuerpo: ${res.bodyPreview === '' ? '(vacío)' : res.bodyPreview}`,
+  ];
+}
+
+/** ¿Trae un array de registros y cuántos? Distinto de "respondió 200". */
+function rowCount(res: P2PArmyResponse | null): number | null {
+  if (res === null || !res.isJson) return null;
+  const rows = extractRows(res.body);
+  return rows === null ? null : rows.length;
+}
+
+/** Lo mismo, en texto, sin confundir "no se pidió" con "no venía ningún array". */
+function rowCountLabel(res: P2PArmyResponse | null): string {
+  if (res === null) return notRun();
+  if (!res.isJson) return 'la respuesta no era JSON';
+  const n = rowCount(res);
+  return n === null ? 'JSON sin ningún array de registros' : String(n);
+}
+
+/**
+ * Un mensaje de error del servidor suele nombrar el parámetro que falta o los
+ * valores que acepta. Es la única fuente legítima de vocabulario: lo demás
+ * sería inventarlo.
+ */
+function serverMessage(res: P2PArmyResponse | null): string | null {
+  if (res === null || !res.isJson || res.body === null || typeof res.body !== 'object') return null;
+  const obj = res.body as Record<string, unknown>;
+  for (const key of ['message', 'error', 'detail', 'details', 'msg', 'errors', 'reason']) {
+    const value = obj[key];
+    if (typeof value === 'string' && value.trim() !== '') return `${key}: ${value.slice(0, 300)}`;
+    if (value !== undefined && value !== null && typeof value === 'object') {
+      return `${key}: ${JSON.stringify(value).slice(0, 300)}`;
+    }
+  }
+  return null;
+}
+
 async function main(): Promise<void> {
-  say('========== P2P.ARMY REAL PROBE ==========');
+  say('========== P2P.ARMY REAL PROBE — FASE 2 (DIAGNÓSTICO) ==========');
   say(`Timestamp: ${new Date().toISOString()}`);
   say(`Base URL: ${P2P_ARMY_BASE_URL}`);
   say(`${API_KEY_ENV} present: ${hasApiKey()}`);
@@ -90,222 +218,283 @@ async function main(): Promise<void> {
     return;
   }
 
-  /* ── 1. Conectividad y autenticación ────────────────────────────────── */
-  const ping = await request('ping (sin clave)', '/v1/api/ping', undefined, false);
+  /* ── R1. ¿Se llega al servidor? ──────────────────────────────────────── */
+  const ping = await request('R1 ping (sin clave)', { path: '/v1/api/ping', requiresKey: false });
+  // CONECTIVIDAD = respondió 2xx. Un 403 puede venir de un intermediario que
+  // ni siquiera dejó salir la petición; darlo por "hablamos con p2p.army"
+  // manda a revisar una credencial que está bien.
+  apiAccessible = ping !== null && ping.ok;
+  section('R1 · ¿la API responde?', describe(ping));
 
+  /* ── R2. ¿La clave vale? ─────────────────────────────────────────────── */
+  const authed = apiAccessible ? await request('R2 autenticación', { path: '/v1/api/time' }) : null;
+  const authenticated = authed !== null && authed.ok;
+  authRejected = authed !== null && (authed.status === 401 || authed.status === 403);
+  section('R2 · ¿la clave es aceptada?', describe(authed));
+
+  /* ── R3. CONTROL: ruta que no existe ─────────────────────────────────── */
   /*
-   * CONECTIVIDAD = el ping RESPONDIÓ 2xx.
-   *
-   * No basta con "hubo algún status". Un intermediario —proxy corporativo,
-   * egress de la plataforma, WAF— puede devolver 403 sin que la petición haya
-   * llegado nunca a p2p.army. Contarlo como conectividad OK y el 403 siguiente
-   * como "clave rechazada" enviaría a revisar una credencial que está
-   * perfectamente bien. Se comprobó en un ensayo: con la red bloqueada, el
-   * probe informaba exactamente de eso.
+   * Calibra el significado de un 200. Todo lo que se concluya de las respuestas
+   * siguientes depende de saber qué contesta este servidor a lo que no conoce.
    */
-  const connectivity = ping !== null && ping.ok;
-  say(`P2P.Army connectivity: ${connectivity ? 'OK' : 'FAIL'}`);
-  if (ping && !ping.ok) {
-    say(`  HTTP ${ping.status} · ${errorBody(ping)}`);
-    if (ping.status === 0) say('  la petición no llegó a completarse (red o DNS)');
-    else say('  ATENCIÓN: esta respuesta puede venir de un intermediario, no de p2p.army');
-  }
+  const control404 = apiAccessible ? await request('R3 control: ruta inexistente', { path: NONEXISTENT_PATH }) : null;
+  section('R3 · CONTROL, ruta que no puede existir', describe(control404));
 
-  const authed = await request('autenticación', '/v1/api/time');
-  const authOk = authed !== null && authed.ok;
-  // Sólo se puede hablar de credencial rechazada si se llegó a hablar con ellos.
-  const authRejected =
-    connectivity && authed !== null && (authed.status === 401 || authed.status === 403);
-  say(
-    `Authentication: ${
-      authOk
-        ? 'OK'
-        : authRejected
-          ? 'FAIL (la API rechazó la clave)'
-          : connectivity
-            ? 'UNKNOWN'
-            : 'NOT TESTED (sin conectividad)'
-    }`
+  const unknownRouteReturns200 = control404 !== null && control404.status === 200;
+  section(
+    'R3 · lectura del control',
+    control404 === null
+      ? 'no ejecutado'
+      : unknownRouteReturns200
+        ? [
+            'Una ruta inexistente devuelve HTTP 200.',
+            'CONSECUENCIA: en esta API un 200 NO prueba que la ruta exista.',
+            'Los cuatro catálogos vacíos de la fase 1 quedan explicados por esto.',
+          ]
+        : [
+            `Una ruta inexistente devuelve HTTP ${control404.status}.`,
+            'CONSECUENCIA: el servidor SÍ distingue rutas. Un 200 en otra ruta significa que esa ruta existe.',
+          ]
   );
-  if (authed && !authed.ok) say(`  HTTP ${authed.status} · ${errorBody(authed)}`);
 
-  /* ── 2. Descubrimiento de rutas y vocabulario ───────────────────────── */
-  const discovered: string[] = [];
-  if (connectivity) {
-    for (const [label, path] of [
-      ['markets', '/v1/api/markets'],
-      ['fiats', '/v1/api/fiats'],
-      ['assets', '/v1/api/assets'],
-      ['payment methods', '/v1/api/payment_methods'],
-    ] as [string, string][]) {
-      const res = await request(label, path, { market: 'binance', fiat: 'VES' });
-      if (res === null) continue;
-      const body = res.ok ? JSON.stringify(res.body).slice(0, 400) : errorBody(res);
-      discovered.push(`${label.padEnd(16)} HTTP ${res.status} · ${body}`);
-    }
-  }
+  /* ── R4. El histórico, POST y con cuerpo ─────────────────────────────── */
+  /*
+   * Parámetros: sólo los que la documentación pública nombra Y cuyo valor se
+   * puede formar sin inventar vocabulario.
+   *
+   *   market / fiat / asset  → valores evidentes.
+   *   from_date / to_date    → nombres documentados; el FORMATO no está
+   *                            verificado, se envía ISO 'YYYY-MM-DD' y si es
+   *                            incorrecto el error del servidor lo dirá.
+   *   limit                  → documentado.
+   *
+   * Se OMITEN a propósito `payment_method`, `mode`, `period_type` y `date_format`:
+   * sus nombres están documentados pero sus VALORES admitidos no. Enviarlos con
+   * un valor adivinado convertiría un "no hay datos" en un "rechazado por un
+   * parámetro que me inventé", indistinguibles en el resultado. Si alguno es
+   * obligatorio, el servidor lo dirá y R7 lo recoge.
+   */
+  const day = (offsetDays: number) =>
+    new Date(Date.now() - offsetDays * 86_400_000).toISOString().slice(0, 10);
 
-  /* ── 3. Histórico ───────────────────────────────────────────────────── */
-  const base = { market: 'binance', fiat: 'VES', asset: 'USDT', limit: 200 };
-  let historyRes: P2PArmyResponse | null = null;
-  let validation: HistoryValidation | null = null;
-  let paymentMethodUsed = 'not required';
-  let granularityAsked = '1h';
+  const historyBody: Record<string, unknown> = {
+    market: 'binance',
+    fiat: 'VES',
+    asset: 'USDT',
+    from_date: day(7),
+    to_date: day(0),
+    limit: 200,
+  };
 
-  if (connectivity && !authRejected) {
-    // Sin método de pago primero: si es obligatorio, el error dirá cuáles valen.
-    historyRes = await request('histórico 1h sin payment_method', '/v1/api/history/p2p_prices', {
-      ...base,
-      period: '1h',
+  const post = apiAccessible && !authRejected
+    ? await request('R4 histórico POST', { path: HISTORY_PATH, method: 'POST', body: historyBody })
+    : null;
+  section('R4 · histórico por POST (cuerpo JSON)', [
+    `cuerpo enviado: ${JSON.stringify(historyBody)}`,
+    ...describe(post),
+  ]);
+
+  /* ── R5. CONTROL: los mismos parámetros por GET ──────────────────────── */
+  /*
+   * A/B en la misma ejecución. Si POST trae registros y GET no, la causa del
+   * 200 vacío de la fase 1 queda demostrada, no argumentada.
+   */
+  const get = apiAccessible && !authRejected
+    ? await request('R5 control: mismo histórico por GET', {
+        path: HISTORY_PATH,
+        method: 'GET',
+        query: {
+          market: 'binance',
+          fiat: 'VES',
+          asset: 'USDT',
+          from_date: day(7),
+          to_date: day(0),
+          limit: 200,
+        },
+      })
+    : null;
+  section('R5 · CONTROL, el mismo histórico por GET', describe(get));
+
+  /* ── R6. CONTROL: parámetros imposibles ──────────────────────────────── */
+  /*
+   * ¿Valida el servidor lo que recibe? Si un mercado y una moneda inexistentes
+   * dan el mismo 200 vacío que la consulta correcta, entonces el vacío no
+   * informa de nada sobre la disponibilidad de datos.
+   */
+  const nonsenseBody: Record<string, unknown> = {
+    market: '__mercado_que_no_existe__',
+    fiat: 'ZZZ',
+    asset: '__moneda_que_no_existe__',
+    from_date: day(7),
+    to_date: day(0),
+    limit: 5,
+  };
+  const nonsense = apiAccessible && !authRejected
+    ? await request('R6 control: parámetros imposibles', {
+        path: HISTORY_PATH,
+        method: 'POST',
+        body: nonsenseBody,
+      })
+    : null;
+  section('R6 · CONTROL, parámetros imposibles', [
+    `cuerpo enviado: ${JSON.stringify(nonsenseBody)}`,
+    ...describe(nonsense),
+  ]);
+
+  const validatesInput =
+    nonsense !== null && post !== null && (nonsense.status !== post.status || nonsense.bodyLength !== post.bodyLength);
+  section(
+    'R6 · lectura del control',
+    nonsense === null
+      ? 'no ejecutado'
+      : validatesInput
+        ? [
+            'Parámetros imposibles producen una respuesta DISTINTA de la consulta válida.',
+            'CONSECUENCIA: el servidor valida la entrada; un vacío en la consulta válida sí es informativo.',
+          ]
+        : [
+            'Parámetros imposibles producen la MISMA respuesta que la consulta válida.',
+            'CONSECUENCIA: el servidor no valida (o no diferencia) la entrada.',
+            'Un 200 vacío con parámetros correctos NO prueba ausencia de datos.',
+          ]
+  );
+
+  /* ── R7. Reservada: sólo si el servidor reveló vocabulario ───────────── */
+  /*
+   * No se gasta a ciegas. Únicamente si R4 o R6 devolvieron un mensaje de error
+   * que nombra un parámetro que falta o unos valores admitidos.
+   */
+  const hint = serverMessage(post) ?? serverMessage(nonsense);
+  let followUp: P2PArmyResponse | null = null;
+  if (hint !== null && post !== null && !post.ok) {
+    followUp = await request('R7 reintento guiado por el mensaje del servidor', {
+      path: HISTORY_PATH,
+      method: 'POST',
+      // Mismo cuerpo: lo que cambia es que ahora el informe lleva el mensaje
+      // literal del servidor, que es lo que permitirá construir el cuerpo
+      // correcto en la fase siguiente sin adivinar.
+      body: historyBody,
     });
-
-    if (historyRes && !historyRes.ok) {
-      // Un intento con nombres alternativos, UNA vez, sin inventar métodos de pago.
-      const alt = await request('histórico, variante de parámetros', '/v1/api/history/p2p_prices', {
-        ...base,
-        fiat: 'ves',
-        asset: 'usdt',
-        interval: '1h',
-      });
-      if (alt?.ok) {
-        historyRes = alt;
-        granularityAsked = '1h (parámetro `interval`)';
-      }
-    }
-    if (historyRes?.ok) validation = validateHistoryBatch(historyRes.body);
   }
+  section(
+    'R7 · pista del servidor',
+    hint === null
+      ? 'el servidor no devolvió ningún mensaje que nombre parámetros ni valores'
+      : [`mensaje literal: ${hint}`, ...(followUp ? describe(followUp) : ['no se reintentó'])]
+  );
 
-  const histOk = historyRes !== null && historyRes.ok;
-  say(`Historical endpoint: ${histOk ? 'OK' : historyRes === null ? 'NOT ATTEMPTED' : 'FAIL'}`);
-  say(`HTTP status: ${historyRes?.status ?? 'n/a'}`);
-  if (historyRes && !historyRes.ok) say(`  respuesta: ${errorBody(historyRes)}`);
-
-  section('Market', 'Binance');
-  section('Fiat', 'VES');
-  section('Asset', 'USDT');
-  section('Payment method', paymentMethodUsed);
-  section('Granularity requested', granularityAsked);
+  /* ── Lectura de los datos, si los hay ────────────────────────────────── */
+  const best = [post, followUp, get].find((r) => r !== null && r.ok && (rowCount(r) ?? 0) > 0) ?? post;
+  let validation: HistoryValidation | null = null;
+  if (best !== null && best !== undefined && best.isJson) validation = validateHistoryBatch(best.body);
 
   const iso = (t: number | null | undefined) => (t == null ? '—' : new Date(t).toISOString());
   const f = validation?.detectedFields;
 
-  section('Records returned', String(validation?.points.length ?? 0));
-  section('Oldest timestamp', iso(validation?.firstTimestamp));
-  section('Newest timestamp', iso(validation?.lastTimestamp));
+  section('Registros devueltos (POST)', rowCountLabel(post));
+  section('Registros devueltos (GET)', rowCountLabel(get));
+  section('Registros válidos tras parsear', String(validation?.points.length ?? 0));
+  section('Fecha más antigua', iso(validation?.firstTimestamp));
+  section('Fecha más reciente', iso(validation?.lastTimestamp));
   section(
-    'Granularity returned',
+    'Granularidad medida',
     validation?.medianIntervalMs == null
       ? '—'
-      : `${(validation.medianIntervalMs / 60000).toFixed(1)} min (mediana medida)`
+      : `${(validation.medianIntervalMs / 60000).toFixed(1)} min (mediana real, no la pedida)`
   );
-  section('Detected fields', f ? JSON.stringify(f) : '—');
-  section('BUY field', f?.buy ?? 'NO PRESENTE');
-  section('SELL field', f?.sell ?? 'NO PRESENTE');
-  section('BUY average', f?.buyAvg ?? 'NO PRESENTE');
-  section('SELL average', f?.sellAvg ?? 'NO PRESENTE');
-  section('Volume/depth fields', [
+  section('Campos detectados', f ? JSON.stringify(f) : '—');
+  section('Variables de profundidad', [
     `volumen: ${f?.volume ?? 'NO PRESENTE'}`,
     `nº de anuncios: ${f?.ads ?? 'NO PRESENTE'}`,
     `spread: ${f?.spread ?? 'NO PRESENTE'}`,
   ]);
-
-  if (validation) {
-    section('Data quality', [
-      `orden cronológico: ${validation.chronological ? 'sí' : 'NO — llega desordenado'}`,
-      `duplicados: ${validation.duplicateTimestamps}`,
-      `huecos (>1.5x cadencia): ${validation.gaps.length}`,
-      `valores imposibles: ${validation.nonFiniteValues}`,
-      `cobertura: ${validation.coveragePct?.toFixed(1) ?? '—'}%`,
-      `descartados: ${validation.rejected}`,
-      validation.rejectionReasons.length > 0
-        ? `motivos: ${validation.rejectionReasons.join(' | ')}`
-        : 'sin descartes',
-    ]);
-
-    section(
-      'Raw response schema summary',
-      validation.schemaSummary.length === 0
-        ? '—'
-        : validation.schemaSummary.map((s) => `${s.key}: ${s.type} = ${s.example}`)
-    );
-
-    const sample = [
-      ...validation.points.slice(0, 2),
-      ...validation.points.slice(-1),
-    ];
-    section(
-      'Sample records',
-      sample.length === 0
-        ? '—'
-        : sample.map(
-            (p) =>
-              `${new Date(p.t).toISOString()} buy=${p.buy ?? 'null'} buy_avg=${p.buyAvg ?? 'null'} sell=${p.sell ?? 'null'} sell_avg=${p.sellAvg ?? 'null'}`
-          )
-    );
-  }
-
-  /* ── 4. Profundidad histórica ───────────────────────────────────────── */
-  const depth: string[] = [];
-  let deepest: string | null = null;
-  if (histOk) {
-    const now = Date.now();
-    for (const [label, days] of [
-      ['7 días', 7],
-      ['30 días', 30],
-      ['90 días', 90],
-      ['365 días', 365],
-    ] as [string, number][]) {
-      const since = new Date(now - days * 86_400_000).toISOString();
-      const res = await request(`profundidad ${label}`, '/v1/api/history/p2p_prices', {
-        ...base,
-        period: '1h',
-        limit: 5,
-        start: since,
-        from: since,
-      });
-      if (res === null) {
-        depth.push(`${label}: no comprobado (presupuesto agotado)`);
-        break;
-      }
-      if (!res.ok) {
-        depth.push(`${label}: HTTP ${res.status} · ${errorBody(res)}`);
-        break;
-      }
-      const v = validateHistoryBatch(res.body);
-      if (v.points.length === 0) {
-        depth.push(`${label}: sin datos — el histórico no llega tan atrás`);
-        break;
-      }
-      deepest = label;
-      depth.push(`${label}: hay datos, el más antiguo del lote es ${iso(v.firstTimestamp)}`);
-    }
-  }
-  section('Historical depth probing', depth.length > 0 ? depth : 'no ejecutado');
-
-  const access = !connectivity
-    ? 'UNKNOWN (sin conectividad)'
-    : authRejected
-      ? 'NOT_AVAILABLE (clave rechazada)'
-      : histOk
-        ? 'AVAILABLE'
-        : historyRes?.status === 402 || historyRes?.status === 403
-          ? 'NOT_AVAILABLE (restricción de plan)'
-          : 'UNKNOWN';
-  section('Historical access', access);
   section(
-    'Account/plan restriction',
-    historyRes && !historyRes.ok ? `HTTP ${historyRes.status} · ${errorBody(historyRes)}` : 'ninguna observada'
+    'Esquema crudo del primer registro',
+    validation && validation.schemaSummary.length > 0
+      ? validation.schemaSummary.map((s) => `${s.key}: ${s.type} = ${s.example}`)
+      : '— (no llegó ningún registro que inspeccionar)'
   );
-  section('Max historical depth confirmed', deepest ?? 'ninguna confirmada');
 
-  /* ── 5. Trazabilidad ────────────────────────────────────────────────── */
-  section('Endpoints discovered', discovered.length > 0 ? discovered : 'ninguno respondió');
+  /* ── Estados, sin colapsar ───────────────────────────────────────────── */
+  /*
+   * Cuatro preguntas distintas. La fase 1 las respondió con una sola palabra y
+   * por eso dijo "AVAILABLE" de un endpoint que no había devuelto ni un dato.
+   */
+  const endpointAccessible =
+    post !== null && post.ok && (unknownRouteReturns200 ? validatesInput : true);
+  const dataAvailable = (validation?.points.length ?? 0) > 0;
+
+  section('ESTADOS', [
+    `API_ACCESSIBLE      : ${apiAccessible ? 'sí' : 'NO'} — ${
+      apiAccessible ? 'el ping respondió 2xx' : 'no hubo respuesta 2xx del ping'
+    }`,
+    `AUTHENTICATED       : ${
+      authenticated
+        ? 'sí — una ruta con clave respondió 2xx'
+        : authRejected
+          ? 'NO — la API rechazó la clave (401/403)'
+          : 'DESCONOCIDO — no se pudo comprobar'
+    }`,
+    `ENDPOINT_ACCESSIBLE : ${
+      post === null
+        ? 'NO COMPROBADO'
+        : endpointAccessible
+          ? 'sí — la ruta existe y responde'
+          : unknownRouteReturns200
+            ? 'INDETERMINADO — un 200 aquí no distingue de una ruta inexistente'
+            : `NO — HTTP ${post.status}`
+    }`,
+    `DATA_AVAILABLE      : ${
+      dataAvailable
+        ? `sí — ${validation?.points.length} registros con fecha y precio`
+        : 'NO — no llegó ni un registro utilizable'
+    }`,
+    '',
+    'DATA_AVAILABLE exige registros parseados. Un HTTP 200 nunca se cuenta como',
+    'datos disponibles: ese fue exactamente el error del informe anterior.',
+  ]);
+
+  /* ── Diagnóstico del 200 sin registros ───────────────────────────────── */
+  const verdict: string[] = [];
+  if (post === null) {
+    verdict.push('No se pudo consultar el histórico; no hay diagnóstico posible.');
+  } else if (dataAvailable) {
+    verdict.push('CAUSA CONFIRMADA: el método HTTP. Con POST y cuerpo JSON llegan registros.');
+    verdict.push(`POST devolvió ${rowCount(post) ?? 0} filas; GET devolvió ${rowCount(get) ?? 0}.`);
+    verdict.push('El 200 vacío de la fase 1 era una consulta sin filtros, no una ausencia de datos.');
+  } else if (unknownRouteReturns200 && post.status === 200) {
+    verdict.push('CAUSA CONFIRMADA: este servidor responde 200 a rutas que no existen.');
+    verdict.push('Un 200 vacío aquí es indistinguible de "esta ruta no está publicada".');
+    verdict.push('Explica también los cuatro catálogos vacíos sin necesidad de otra hipótesis.');
+  } else if (post.status === 402 || post.status === 403) {
+    verdict.push(`CAUSA CONFIRMADA: restricción de plan o de permisos (HTTP ${post.status}).`);
+  } else if (post.status === 200 && !validatesInput) {
+    verdict.push('CAUSA PROBABLE: el servidor ignora los parámetros que enviamos.');
+    verdict.push('Parámetros imposibles dan la misma respuesta que los correctos.');
+    verdict.push('Falta por determinar el nombre o el formato exacto que sí lee.');
+  } else if (post.status === 200 && validatesInput) {
+    verdict.push('CAUSA PROBABLE: la consulta es correcta y no hay histórico para VES/USDT en ese rango.');
+    verdict.push('El servidor valida la entrada, así que el vacío es una respuesta real.');
+  } else {
+    verdict.push(`Sin conclusión: HTTP ${post.status} y ningún mensaje que la explique.`);
+  }
+  section('DIAGNÓSTICO DEL 200 SIN REGISTROS', verdict);
+
+  /* ── Trazabilidad ────────────────────────────────────────────────────── */
   section(
-    'Request log (sin credenciales)',
-    attempts.map((a) => `HTTP ${String(a.status).padStart(3)} · ${a.label} · ${a.url}`)
+    'Registro de peticiones (sin credenciales)',
+    attempts.flatMap((a) => [
+      `${a.method.padEnd(4)} HTTP ${String(a.status).padStart(3)} · ${a.label}`,
+      `     ${a.url}`,
+      `     ${a.bodyLength} car. · ${a.contentType ?? 'sin content-type'} · json=${a.isJson} · raíz=[${a.rootKeys.join(', ')}]`,
+      `     ${a.preview === '' ? '(cuerpo vacío)' : a.preview.slice(0, 200)}`,
+    ])
   );
-  section('Rate limit headers', JSON.stringify(historyRes?.rateLimitHeaders ?? {}));
-  section('Requests spent', `${spent}/${MAX_REQUESTS}`);
+  section(
+    'Cabeceras de límite de frecuencia',
+    JSON.stringify(post?.rateLimitHeaders ?? ping?.rateLimitHeaders ?? {})
+  );
+  section('Peticiones gastadas', `${spent}/${MAX_REQUESTS}`);
 
   say();
   say('Lo que no aparezca en este informe es que NO se pudo comprobar,');

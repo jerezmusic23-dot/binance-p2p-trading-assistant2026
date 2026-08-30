@@ -23,6 +23,7 @@ import {
 } from '../server/external/p2pArmyHistory.js';
 import {
   API_KEY_ENV,
+  callP2PArmy,
   describeRequest,
   hasApiKey,
 } from '../server/external/p2pArmyClient.js';
@@ -224,5 +225,203 @@ describe('validación del lote', () => {
       'no contiene ningún array'
     );
     expect(validateHistoryBatch(null).points).toEqual([]);
+  });
+});
+
+/**
+ * EL CLIENTE: MÉTODO HTTP Y DISECCIÓN DE LA RESPUESTA
+ * ==================================================
+ *
+ * Aquí SÍ se sustituye `fetch`, y conviene decir por qué eso no contradice el
+ * encabezado de este fichero. No se está simulando p2p.army para fingir que la
+ * integración funciona: la integración se sigue probando contra el servidor real
+ * en el probe. Lo que se comprueba aquí es LO QUE NOSOTROS ENVIAMOS y CÓMO
+ * INTERPRETAMOS lo que llega — dos cosas que ocurren enteras dentro de este
+ * proceso y que la API real no puede validar por nosotros.
+ *
+ * Existe por un fallo concreto: la fase 1 consultó el histórico por GET con los
+ * parámetros en la query. El servidor lee el cuerpo, no la query, así que
+ * respondió 200 con cero registros y el informe lo leyó como "no hay datos".
+ * Estas pruebas fijan la diferencia entre GET y POST para que no vuelva a
+ * pasarse por alto.
+ */
+describe('el cliente construye la petición que dice construir', () => {
+  const withFetch = async (
+    impl: (url: string, init: RequestInit) => Promise<Response>,
+    run: () => Promise<void>
+  ) => {
+    const original = globalThis.fetch;
+    const key = process.env[API_KEY_ENV];
+    process.env[API_KEY_ENV] = 'clave-local-de-prueba';
+    globalThis.fetch = ((url: string, init: RequestInit) => impl(url, init)) as typeof fetch;
+    try {
+      await run();
+    } finally {
+      globalThis.fetch = original;
+      if (key === undefined) delete process.env[API_KEY_ENV];
+      else process.env[API_KEY_ENV] = key;
+    }
+  };
+
+  const json = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { 'content-type': 'application/json' },
+    });
+
+  it('POST manda los parámetros en el cuerpo, no en la query', async () => {
+    let seenUrl = '';
+    let seenInit: RequestInit | undefined;
+
+    await withFetch(
+      async (url, init) => {
+        seenUrl = url;
+        seenInit = init;
+        return json({ data: [] });
+      },
+      async () => {
+        await callP2PArmy({
+          path: '/v1/api/history/p2p_prices',
+          method: 'POST',
+          body: { market: 'binance', fiat: 'VES', asset: 'USDT', limit: 200 },
+        });
+      }
+    );
+
+    expect(seenInit?.method).toBe('POST');
+    // El fallo de la fase 1 al revés: los filtros van donde el servidor los mira.
+    expect(seenUrl).not.toContain('market=');
+    expect(seenUrl).not.toContain('fiat=');
+    expect(JSON.parse(String(seenInit?.body))).toEqual({
+      market: 'binance',
+      fiat: 'VES',
+      asset: 'USDT',
+      limit: 200,
+    });
+    const headers = seenInit?.headers as Record<string, string>;
+    expect(headers['Content-Type']).toBe('application/json');
+  });
+
+  it('GET no lleva cuerpo y sí lleva query', async () => {
+    let seenUrl = '';
+    let seenInit: RequestInit | undefined;
+
+    await withFetch(
+      async (url, init) => {
+        seenUrl = url;
+        seenInit = init;
+        return json([]);
+      },
+      async () => {
+        await callP2PArmy({ path: '/v1/api/ping', query: { market: 'binance' } });
+      }
+    );
+
+    expect(seenInit?.method).toBe('GET');
+    expect(seenInit?.body).toBeUndefined();
+    expect(seenUrl).toContain('market=binance');
+  });
+
+  it('la clave viaja sólo en la cabecera: ni en la URL ni en el cuerpo', async () => {
+    let seenUrl = '';
+    let seenInit: RequestInit | undefined;
+
+    await withFetch(
+      async (url, init) => {
+        seenUrl = url;
+        seenInit = init;
+        return json({ data: [] });
+      },
+      async () => {
+        await callP2PArmy({
+          path: '/v1/api/history/p2p_prices',
+          method: 'POST',
+          body: { market: 'binance' },
+        });
+      }
+    );
+
+    const headers = seenInit?.headers as Record<string, string>;
+    expect(headers['X-APIKEY']).toBe('clave-local-de-prueba');
+    expect(seenUrl).not.toContain('clave-local-de-prueba');
+    expect(String(seenInit?.body)).not.toContain('clave-local-de-prueba');
+  });
+});
+
+describe('el cliente distingue lo que la fase 1 no supo distinguir', () => {
+  const withFetch = async (response: Response | Error, run: () => Promise<void>) => {
+    const original = globalThis.fetch;
+    const key = process.env[API_KEY_ENV];
+    process.env[API_KEY_ENV] = 'clave-local-de-prueba';
+    globalThis.fetch = (async () => {
+      if (response instanceof Error) throw response;
+      return response;
+    }) as typeof fetch;
+    try {
+      await run();
+    } finally {
+      globalThis.fetch = original;
+      if (key === undefined) delete process.env[API_KEY_ENV];
+      else process.env[API_KEY_ENV] = key;
+    }
+  };
+
+  it('un 200 que devuelve HTML no se presenta como JSON', async () => {
+    await withFetch(
+      new Response('<html><body>  Not found  </body></html>', {
+        status: 200,
+        headers: { 'content-type': 'text/html' },
+      }),
+      async () => {
+        const res = await callP2PArmy({ path: '/v1/api/lo-que-sea' });
+        expect(res.status).toBe(200);
+        expect(res.isJson).toBe(false);
+        expect(res.contentType).toContain('text/html');
+        expect(res.rootKeys).toEqual([]);
+        // El preview colapsa espacios: en un log de Railway una sola línea se lee.
+        expect(res.bodyPreview).toBe('<html><body> Not found </body></html>');
+        expect(res.bodyLength).toBeGreaterThan(0);
+      }
+    );
+  });
+
+  it('publica las claves de la raíz para poder nombrar el envoltorio', async () => {
+    await withFetch(
+      new Response(JSON.stringify({ status: 'ok', data: [], total: 0 }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+      async () => {
+        const res = await callP2PArmy({ path: '/v1/api/history/p2p_prices', method: 'POST' });
+        expect(res.isJson).toBe(true);
+        expect(res.rootKeys).toEqual(['status', 'data', 'total']);
+        // 200 con envoltorio y cero filas: el estado exacto que hay que poder ver.
+        expect(extractRows(res.body)).toEqual([]);
+      }
+    );
+  });
+
+  it('un array pelado no tiene claves de raíz y no se inventa ninguna', async () => {
+    await withFetch(
+      new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } }),
+      async () => {
+        const res = await callP2PArmy({ path: '/v1/api/history/p2p_prices', method: 'POST' });
+        expect(res.rootKeys).toEqual([]);
+        expect(res.isJson).toBe(true);
+      }
+    );
+  });
+
+  it('un fallo de red se informa como tal y sin la credencial', async () => {
+    await withFetch(new Error('getaddrinfo ENOTFOUND p2p.army'), async () => {
+      const res = await callP2PArmy({ path: '/v1/api/ping' });
+      expect(res.ok).toBe(false);
+      expect(res.status).toBe(0); // 0 = no hubo respuesta, distinto de cualquier HTTP
+      expect(res.error).toContain('ENOTFOUND');
+      expect(res.error).not.toContain('clave-local-de-prueba');
+      expect(res.isJson).toBe(false);
+      expect(res.bodyLength).toBe(0);
+      expect(res.rootKeys).toEqual([]);
+    });
   });
 });
