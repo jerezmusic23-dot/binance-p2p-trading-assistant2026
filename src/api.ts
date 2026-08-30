@@ -5,6 +5,7 @@ import {
   MakerProjectionsResponse,
   GeneralProjectionResponse,
   MarketProjectionResponse,
+  DailyProjectionResponse,
   CellSeriesResponse,
   OpportunitiesResponse,
   HistoryRecord,
@@ -111,6 +112,16 @@ export class ApiService {
    */
   public static async getAnalogProjection(): Promise<MarketProjectionResponse> {
     return requestJson<MarketProjectionResponse>('/api/market/projections/analog');
+  }
+
+  /*
+   * La proyección de fluctuación del día en curso.
+   *
+   * Barata de calcular —una pasada lineal por el histórico— así que el servidor
+   * no la cachea y se puede pedir en cada refresco sin miedo.
+   */
+  public static async getDailyProjection(): Promise<DailyProjectionResponse> {
+    return requestJson<DailyProjectionResponse>('/api/market/projections/daily');
   }
 
   /**

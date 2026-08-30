@@ -21,6 +21,7 @@ import {
 import { MainOverview } from './MainOverview';
 import { MarketProjectionPanel } from './MarketProjectionPanel';
 import { ProbabilisticProjectionPanel } from './ProbabilisticProjectionPanel';
+import { DailyFluctuationPanel } from './DailyFluctuationPanel';
 import { BankMatrix } from './BankMatrix';
 import { MakerMatrix } from './MakerMatrix';
 import { MarketAnalysisPanel } from './MarketAnalysisPanel';
@@ -443,8 +444,28 @@ export default function App() {
           propósito: son dos series y dos preguntas, y promediarlas daría un
           número que ninguna de las dos respalda.
         */}
+        {/*
+          TRES LECTURAS, TRES PREGUNTAS, Y NO SE MEZCLAN.
+
+          DailyFluctuationPanel va primero porque responde la pregunta más
+          concreta: qué le queda por hacer al día de HOY, hora a hora, hasta el
+          cierre. Usa el día como unidad de evidencia —qué hicieron los días
+          anteriores entre esta hora y las 8— y por eso alcanza el cierre de la
+          jornada con 5 días, cuando el motor de analogías necesitaría ~18 para
+          el mismo horizonte.
+
+          ProbabilisticProjectionPanel responde "¿qué pasó históricamente en las
+          situaciones parecidas a la de ahora?" a +15m, +1h, +4h, con los casos
+          concretos detrás de cada porcentaje.
+
+          MarketProjectionPanel describe el AHORA del libro maker. No proyecta.
+
+          Son tres estimadores distintos sobre datos distintos. Promediar sus
+          curvas daría un número que ninguno de los tres respalda.
+        */}
         {activeTab === 'projections' && (
           <div className="space-y-6">
+            <DailyFluctuationPanel />
             <ProbabilisticProjectionPanel />
             <MarketProjectionPanel />
           </div>

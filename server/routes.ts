@@ -7,6 +7,7 @@ import { Router } from 'express';
 import { selectBestMakerCell } from './makerMatrix.js';
 import { HistoricalMarketStore } from './historicalMarketStore.js';
 import { runProjectionBacktest } from './projectionBacktest.js';
+import { dailyProjectionFromStorage } from './dailyProjection.js';
 import { GENERAL_MARKET_KEY, projectCell } from './makerProjectionEngine.js';
 import { CentralMarketStore } from './centralStore.js';
 import { StorageEngine } from './storage.js';
@@ -183,6 +184,29 @@ apiRouter.get('/market/projections/analog', async (_req, res) => {
   } catch (err: any) {
     analogInFlight = null;
     res.status(500).json({ error: err.message || 'Error building market projection' });
+  }
+});
+
+/*
+ * PROYECCIÓN DE FLUCTUACIÓN DIARIA.
+ *
+ * Distinta de /projections/analog y no la sustituye. Aquélla proyecta a +15m,
+ * +1h, +4h buscando analogías minuto a minuto; ésta proyecta HORA A HORA hasta
+ * el cierre de la jornada usando el día como unidad de evidencia. Son dos
+ * estimadores con dos requisitos de datos distintos, y por eso conviven: para
+ * llegar a las 8 de la tarde el primero necesita ~18 días de serie continua y
+ * el segundo empieza a poder decir algo con 5.
+ *
+ * No se cachea: el cálculo recorre el histórico una vez por lado y agrupa por
+ * horas, que es trabajo lineal y barato comparado con la búsqueda de analogías
+ * del otro endpoint. Añadir caché aquí sería complejidad sin medida que la
+ * respalde.
+ */
+apiRouter.get('/market/projections/daily', (_req, res) => {
+  try {
+    res.json(dailyProjectionFromStorage());
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Error building daily projection' });
   }
 });
 

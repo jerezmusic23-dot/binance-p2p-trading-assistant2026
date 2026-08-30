@@ -1231,3 +1231,86 @@ export interface MarketProjectionResponse {
   usable: boolean;
   forecastPerformance: ForecastReport | null;
 }
+
+/*
+ * PROYECCIÓN DE FLUCTUACIÓN DIARIA
+ * ================================
+ *
+ * Espejo de `server/dailyProjection.ts`. Todo llega calculado: el panel no
+ * proyecta, no promedia y no rellena horas. Si un campo viene null es porque el
+ * servidor no pudo medirlo, y la pantalla tiene que decirlo en vez de dibujar
+ * algo plausible.
+ */
+
+export type DailyTier = 'SIN_DATOS' | 'SOLO_HOY' | 'PERFIL_LIMITADO' | 'PERFIL_CONDICIONADO';
+export type DayDirection = 'SUBIENDO' | 'BAJANDO' | 'LATERAL' | 'INDETERMINADA';
+export type DaySpeed = 'LENTO' | 'MODERADO' | 'RAPIDO' | 'INDETERMINADA';
+export type DailyBandKind = 'P10_P90' | 'RANGO_OBSERVADO';
+
+export interface DailyHourProjection {
+  hour: number;
+  central: number;
+  low: number;
+  high: number;
+  bandKind: DailyBandKind;
+  daysUsed: number;
+  movePct: number | null;
+}
+
+export interface DailySideProjection {
+  tier: DailyTier;
+  side: 'BUY' | 'SELL';
+  anchorHour: number;
+  anchorPrice: number | null;
+  real: { hour: number; price: number; observations: number; movePct: number | null }[];
+  projected: DailyHourProjection[];
+  profileDays: number;
+  candidateDays: number;
+  conditioned: boolean;
+}
+
+export interface DailyExtreme {
+  price: number;
+  hour: number;
+  side: 'BUY' | 'SELL';
+  observed: boolean;
+}
+
+export interface DailyProjectionResponse {
+  generatedAt: number;
+  source: 'market_history.json';
+  dayKey: string;
+  startHour: number;
+  endHour: number;
+  anchorHour: number;
+  sides: DailySideProjection[];
+  extraction: Record<
+    'BUY' | 'SELL',
+    { recordsRead: number; droppedLegacy: number; droppedInvalid: number }
+  >;
+  ceiling: DailyExtreme | null;
+  floor: DailyExtreme | null;
+  maxSpread: { hour: number; spreadPct: number; observed: boolean } | null;
+  market: {
+    direction: DayDirection;
+    speed: DaySpeed;
+    changePct: number | null;
+    side: 'BUY' | 'SELL';
+  };
+  turn: { pct: number | null; sampleSize: number };
+  turningNow: boolean;
+  remainingPct: number | null;
+  watchWindow: { fromHour: number; toHour: number; movePct: number } | null;
+  tier: DailyTier;
+  tierText: string;
+  validation: {
+    comparisons: number;
+    profileWins: number;
+    persistenceWins: number;
+    ties: number;
+    pairs: number;
+    pValue: number | null;
+    beatsPersistence: boolean;
+  };
+  daysMissing: number;
+}

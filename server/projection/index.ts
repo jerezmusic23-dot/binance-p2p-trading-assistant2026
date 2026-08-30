@@ -14,6 +14,7 @@ export * from './backtest.js';
 export * from './momentum.js';
 export * from './reading.js';
 export * from './forecastEvaluation.js';
+export * from './dailyShape.js';
 
 import {
   DEFAULT_HORIZONS_MS,
