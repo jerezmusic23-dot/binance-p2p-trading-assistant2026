@@ -216,6 +216,14 @@ describe('every percentage on the screen is a frequency or a price ratio', () =>
      * medida: sin el objetivo al lado, la medida no se puede juzgar.
      */
     'coverageTarget',
+    /*
+     * `coverage` es la cobertura MEDIDA de la proyección diaria: de los cierres
+     * que el backtest temporal llegó a comparar, la fracción que cayó dentro de
+     * la banda anunciada. Es un recuento partido por otro, de la misma
+     * naturaleza que `observedFrequency`, y viaja junto al número de días y de
+     * anclas que la sostienen. No es una confianza elegida.
+     */
+    'coverage',
     'upRate',
     'flatRate',
     'downRate',

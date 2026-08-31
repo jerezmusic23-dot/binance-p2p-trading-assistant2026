@@ -1,55 +1,48 @@
 /**
- * FORMA DEL DÍA: PROYECCIÓN DE FLUCTUACIÓN INTRADÍA
- * ================================================
+ * FORMA DEL DÍA — PROYECCIÓN DE MI VENTA Y MI COMPRA
+ * =================================================
  *
- * Proyecta el precio de cada hora que queda del día a partir de LO QUE HICIERON
- * LOS DÍAS ANTERIORES A ESA MISMA HORA, anclado en el precio de ahora.
+ * ═══ SEMÁNTICA OPERACIONAL. ES LA PARTE QUE NO SE PUEDE EQUIVOCAR ═══
  *
- * ═══ POR QUÉ NO SIRVE EL MOTOR DE HORIZONTES QUE YA EXISTE ═══
+ * El propietario opera como MAKER: publica anuncios. Desde su lado:
  *
- * `projectSeries` proyecta a +15m, +1h, +4h… buscando analogías MINUTO a minuto,
- * y necesita ~41 analogías independientes separadas por el horizonte completo.
- * Para llegar a las 8 de la tarde desde las 9 de la mañana hacen falta 11 horas
- * de horizonte, y eso son ~41 × 11 h ≈ 18 días de serie continua antes de poder
- * dibujar nada.
+ *   BINANCE BUY   → gente que quiere COMPRAR USDT → si publico ahí, VENDO
+ *                 → MI VENTA   → interesa el precio MÁS ALTO → TECHO
  *
- * Este estimador pregunta otra cosa: "de las 9 a las 8 de la tarde, ¿cuánto se
- * movió el precio los días anteriores?". La unidad de evidencia pasa a ser EL
- * DÍA, no el minuto, así que con 5 días ya hay una mediana que mirar. Esa es la
- * única razón por la que existe un segundo estimador: compra los horizontes
- * largos que el primero no alcanza. No lo sustituye ni se mezcla con él —
- * mezclar dos estimadores produce un número que ninguno de los dos respalda.
+ *   BINANCE SELL  → gente que VENDE USDT → si publico ahí, RECOMPRO
+ *                 → MI COMPRA  → interesa el precio MÁS BAJO → PISO
  *
- * ═══ QUÉ ES "EL MEJOR PRECIO DE LA HORA" ═══
+ * Esto no es una convención elegida aquí: es la que ya usa el resto del camino
+ * maker del sistema. `tests/arbitrageSideSemantics.test.ts` lo fija con un caso
+ * literal — con anuncios BUY a 945 y SELL a 940, el mensaje de Telegram dice
+ * «Venta: 944.99» y «Compra: 940.01». Vender por encima de donde se recompra es
+ * exactamente de lo que vive un maker.
  *
- * Cada hora se resume por su MEJOR precio, no por su media, y "mejor" depende
- * del lado, con la semántica que ya está fijada en `types.ts` y que aquí no se
- * toca:
+ * ═══ POR QUÉ EXISTE `MakerLeg` Y NO UN `side: 'BUY' | 'SELL'` ═══
  *
- *   BUY  = el ask, lo que me cuesta comprar USDT  → mejor es el MÁS BAJO
- *   SELL = el bid, lo que me pagan por venderlos  → mejor es el MÁS ALTO
+ * La versión anterior de este módulo usaba `'BUY' | 'SELL'` y aplicaba el
+ * criterio del TAKER: el mejor BUY era el más barato. Para un maker es al revés
+ * y el error era invisible, porque la gráfica seguía saliendo bonita y las dos
+ * líneas seguían en su sitio: sólo estaban sistemáticamente pegadas al centro
+ * del libro en vez de a los extremos que el propietario puede capturar.
  *
- * Invertir esto daría una proyección coherente consigo misma y equivocada en
- * todas partes, así que hay un test que lo fija.
+ * Nombrar la pierna por LA OPERACIÓN y no por el lado de Binance hace que ese
+ * error no se pueda volver a escribir sin que se lea mal en voz alta.
  *
- * ═══ EL MOMENTO DEL MERCADO ENTRA COMO CONDICIÓN, NO COMO CORRECCIÓN ═══
+ * ═══ CADA PIERNA TIENE SU PROPIO EXTREMO Y NUNCA SE COMPARAN ═══
  *
- * No se proyecta la forma media del día y luego se le suma algo por el momentum.
- * Se ELIGEN los días análogos: aquellos que a esta misma hora llevaban un
- * recorrido parecido al de hoy desde la apertura. La proyección es la mediana
- * de lo que hicieron ESOS días. Es la misma idea que el motor de analogías, con
- * el día como unidad.
+ * VENTA agrega por MÁXIMO. COMPRA agrega por MÍNIMO. No hay ni un punto del
+ * módulo donde se calcule `max(VENTA, COMPRA)` o `min(VENTA, COMPRA)`: son dos
+ * operaciones distintas y mezclarlas produce un techo que no se pudo vender y
+ * un piso que no se pudo comprar. Hay tests que lo prohíben explícitamente.
  *
- * Condicionar exige días de sobra: con 7 días, quedarse con los 3 más parecidos
- * no es condicionar, es tirar cuatro quintos de la evidencia. Por eso hay dos
- * niveles y el informe dice siempre cuál se usó y con cuántos días.
+ * ═══ POR QUÉ EL DÍA ES LA UNIDAD DE EVIDENCIA ═══
  *
- * ═══ LO QUE ESTE MÓDULO NO HACE ═══
- *
- * No inventa horas que nadie observó, no rellena días incompletos, no promedia
- * entre días con y sin datos, y no convierte una mediana de 5 días en una
- * probabilidad. Cuando no hay evidencia devuelve el nivel `SOLO_HOY` o
- * `SIN_DATOS` y el panel dibuja lo real y nada más.
+ * El motor de horizontes busca analogías minuto a minuto y necesita ~41
+ * separadas por el horizonte completo: llegar a las 20:00 desde media mañana le
+ * cuesta ~18 días de serie continua. Aquí la unidad es EL DÍA —"de esta hora al
+ * cierre, ¿qué hicieron los días anteriores?"— y con 5 días ya hay una mediana.
+ * Son dos estimadores distintos y no se mezclan.
  */
 
 import { percentileOf, type SeriesPoint } from './series.js';
@@ -59,105 +52,156 @@ import { binomialTailProbability } from './probability.js';
 export const VENEZUELA_OFFSET_MS = 4 * 3_600_000;
 
 /**
- * Ventana del día que se dibuja.
- *
- * Es una DECISIÓN DE PRESENTACIÓN, no una medición: son las horas que el
- * propietario quiere ver. Se deja como parámetro para que nadie la lea como
- * "está demostrado que el mercado sólo se mueve de 8 a 20".
+ * Ventana del día que se dibuja. DECISIÓN DE PRESENTACIÓN, no una medición:
+ * son las horas que el propietario quiere ver, y por eso es un parámetro.
  */
 export const DEFAULT_DAY_START_HOUR = 8;
 export const DEFAULT_DAY_END_HOUR = 20;
 
+/** La operación del propietario. Nunca el lado de Binance a secas. */
+export type MakerLeg = 'VENTA' | 'COMPRA';
+
 /**
- * Días mínimos para dibujar una curva de forma del día.
+ * De qué lado de Binance se lee cada pierna. ÚNICA definición del módulo.
  *
- * Por debajo de 5, la mediana de los cocientes es prácticamente una o dos
- * observaciones y la banda es el recorrido de un puñado de puntos. No es un
- * umbral de significación —no lo hay con estos tamaños— sino un suelo para no
- * publicar una curva sostenida por un solo día. `daysUsed` viaja siempre en la
- * respuesta para que quien la lea juzgue por sí mismo.
+ * Si alguna vez hay que cambiarla, se cambia aquí y en ningún otro sitio; todo
+ * lo demás la consulta.
+ */
+export const LEG_BINANCE_SIDE: Record<MakerLeg, 'BUY' | 'SELL'> = {
+  VENTA: 'BUY',
+  COMPRA: 'SELL',
+};
+
+export const LEG_LABEL: Record<MakerLeg, string> = {
+  VENTA: 'MI VENTA (Binance BUY)',
+  COMPRA: 'MI COMPRA (Binance SELL)',
+};
+
+/**
+ * Días mínimos para dibujar una curva.
+ *
+ * Por debajo de 5 la mediana de los cocientes es una o dos observaciones. No es
+ * un umbral de significación —no lo hay con estos tamaños— sino un suelo para
+ * no publicar una curva sostenida por un solo día. `daysUsed` viaja siempre.
  */
 export const MIN_PROFILE_DAYS = 5;
 
 /**
- * Días mínimos para CONDICIONAR por el momento del mercado.
- *
- * Condicionar se queda con la mitad más parecida. Con menos de 12 días esa
- * mitad baja de 6 y el condicionado tendría menos evidencia que el sin
- * condicionar: se preferiría un filtro elegante a un dato mejor.
+ * Días mínimos para CONDICIONAR por el estado de hoy. Condicionar se queda con
+ * la mitad más parecida: con menos de 12 esa mitad baja de 6 y el condicionado
+ * tendría menos evidencia que el sin condicionar.
  */
 export const MIN_CONDITIONED_DAYS = 12;
+
+/**
+ * Días mínimos para condicionar por DOS variables (recorrido + volatilidad).
+ *
+ * Cada dimensión que se añade divide el pool. Con 20 días, quedarse con la
+ * mitad deja 10, que es el mínimo con el que los percentiles siguen siendo
+ * percentiles. Por debajo, añadir la segunda variable cambiaría evidencia por
+ * apariencia de sofisticación.
+ */
+export const MIN_TWO_FACTOR_DAYS = 20;
 
 /** Fracción de días análogos que se conserva al condicionar. */
 export const CONDITIONED_FRACTION = 0.5;
 
 /**
- * Días mínimos para llamar percentiles a los extremos de la banda.
- *
- * Con 9 días o menos, el "p10" caería sobre el mínimo observado; llamarlo
- * percentil sugeriría una precisión que no existe, así que la banda se publica
- * como RANGO_OBSERVADO y el nombre lo dice.
+ * Días mínimos para llamar percentiles a los extremos de la banda. Con 9 o
+ * menos, el "p10" caería sobre el mínimo observado y llamarlo percentil
+ * sugeriría una precisión inexistente.
  */
 export const BAND_PERCENTILE_DAYS = 10;
 
-export type DailySide = 'BUY' | 'SELL';
-
 export type DailyTier =
-  /** Ni siquiera hay serie de hoy. */
   | 'SIN_DATOS'
-  /** Hay hoy, pero no hay días anteriores suficientes: no se proyecta nada. */
   | 'SOLO_HOY'
-  /** Perfil de hora del día sin condicionar por el momento del mercado. */
   | 'PERFIL_LIMITADO'
-  /** Perfil construido sólo con los días análogos al momento de hoy. */
   | 'PERFIL_CONDICIONADO';
 
 export const TIER_TEXT: Record<DailyTier, string> = {
   SIN_DATOS: 'No hay serie suficiente para dibujar el día.',
   SOLO_HOY: 'Sólo hay datos de hoy. Faltan días anteriores para proyectar el resto de la jornada.',
-  PERFIL_LIMITADO: 'Proyección sobre pocos días, sin filtrar por el momento del mercado.',
+  PERFIL_LIMITADO: 'Proyección sobre pocos días, sin filtrar por el estado de hoy.',
   PERFIL_CONDICIONADO: 'Proyección sobre los días que llegaron a esta hora en un estado parecido al de hoy.',
 };
 
-/** Hora local de Venezuela de un instante. */
+/** Fuerza de la evidencia, separada del nivel de perfil. */
+export type DailyEvidenceLevel =
+  | 'SIN_DATOS_SUFICIENTES'
+  | 'SOLO_OBSERVACION'
+  | 'ESTIMACION_SIN_VALIDAR'
+  | 'EVIDENCIA_DEBIL'
+  | 'EVIDENCIA_FUERTE';
+
 export function venezuelaHourOf(t: number): number {
   return new Date(t - VENEZUELA_OFFSET_MS).getUTCHours();
 }
 
-/** Clave de día local 'YYYY-MM-DD'. Dos instantes del mismo día la comparten. */
 export function venezuelaDayKey(t: number): string {
   return new Date(t - VENEZUELA_OFFSET_MS).toISOString().slice(0, 10);
 }
 
-/** El mejor precio de un lado es el más bajo comprando y el más alto vendiendo. */
-export function isBetter(side: DailySide, candidate: number, incumbent: number): boolean {
-  return side === 'BUY' ? candidate < incumbent : candidate > incumbent;
+/** 0 = domingo. Sólo se publica; no condiciona hasta que haya semanas de sobra. */
+export function venezuelaWeekday(t: number): number {
+  return new Date(t - VENEZUELA_OFFSET_MS).getUTCDay();
+}
+
+/**
+ * ¿Mejora `candidate` a `incumbent` PARA ESTA PIERNA?
+ *
+ * VENTA quiere el más alto (vendo más caro). COMPRA quiere el más bajo
+ * (recompro más barato). Es la regla de la que cuelga todo lo demás.
+ *
+ * ═══ POR QUÉ COMPRUEBA LA PIERNA EN VEZ DE USAR UN TERNARIO ═══
+ *
+ * Escrito como `leg === 'VENTA' ? mayor : menor`, cualquier valor que no fuera
+ * exactamente 'VENTA' —undefined incluido— caía en la rama de COMPRA y el motor
+ * devolvía mínimos donde debía devolver máximos, sin un solo error. Ocurrió: una
+ * llamada a la que le faltaba el argumento produjo un backtest entero con la
+ * pierna equivocada y resultados que parecían razonables. TypeScript lo impide
+ * en compilación; esto lo impide también en ejecución, que es donde llegan los
+ * datos de fuera.
+ */
+export function isBetterForLeg(leg: MakerLeg, candidate: number, incumbent: number): boolean {
+  if (leg === 'VENTA') return candidate > incumbent;
+  if (leg === 'COMPRA') return candidate < incumbent;
+  throw new Error(`Pierna desconocida: ${String(leg)}. Debe ser VENTA o COMPRA.`);
+}
+
+/** El extremo de la pierna: máximo para VENTA, mínimo para COMPRA. */
+export function extremeForLeg(leg: MakerLeg, values: readonly number[]): number | null {
+  let best: number | null = null;
+  for (const v of values) {
+    if (!Number.isFinite(v) || v <= 0) continue;
+    if (best === null || isBetterForLeg(leg, v, best)) best = v;
+  }
+  return best;
 }
 
 export interface HourCell {
   hour: number;
-  /** Mejor precio observado en esa hora. */
+  /** El extremo de la pierna dentro de esa hora. */
   best: number;
   observations: number;
-  /** Último instante observado dentro de la hora. */
   lastT: number;
 }
 
 export interface DayShape {
   dayKey: string;
+  weekday: number;
   /** Sólo horas realmente observadas. Las que faltan NO se rellenan. */
   hours: Map<number, HourCell>;
 }
 
 /**
- * Agrupa una serie en días y horas locales, quedándose con el mejor precio.
- *
- * Las horas fuera de la ventana se descartan aquí y no más tarde: así el perfil
- * y el dibujo hablan exactamente del mismo tramo del día.
+ * Agrupa una serie en días y horas locales quedándose con el extremo de la
+ * pierna. Las horas fuera de la ventana se descartan aquí, no más tarde, para
+ * que el perfil y el dibujo hablen del mismo tramo del día.
  */
 export function groupByDay(
   points: readonly SeriesPoint[],
-  side: DailySide,
+  leg: MakerLeg,
   startHour = DEFAULT_DAY_START_HOUR,
   endHour = DEFAULT_DAY_END_HOUR
 ): DayShape[] {
@@ -171,7 +215,7 @@ export function groupByDay(
     const key = venezuelaDayKey(p.t);
     let day = days.get(key);
     if (day === undefined) {
-      day = { dayKey: key, hours: new Map() };
+      day = { dayKey: key, weekday: venezuelaWeekday(p.t), hours: new Map() };
       days.set(key, day);
     }
 
@@ -182,7 +226,7 @@ export function groupByDay(
     }
     cell.observations += 1;
     if (p.t > cell.lastT) cell.lastT = p.t;
-    if (isBetter(side, p.price, cell.best)) cell.best = p.price;
+    if (isBetterForLeg(leg, p.price, cell.best)) cell.best = p.price;
   }
 
   return [...days.values()].sort((a, b) => a.dayKey.localeCompare(b.dayKey));
@@ -191,9 +235,8 @@ export function groupByDay(
 /**
  * Cociente de precio entre dos horas del mismo día.
  *
- * Se trabaja en cocientes y no en diferencias absolutas porque el VES tiene
- * deriva: 3 bolívares en un día de 900 y 3 en un día de 300 no son el mismo
- * movimiento, y promediarlos como si lo fueran deformaría el perfil.
+ * Cocientes y no diferencias porque el VES tiene deriva: 3 bolívares sobre 900
+ * y 3 sobre 300 no son el mismo movimiento y promediarlos deformaría el perfil.
  */
 export interface RatioSample {
   dayKey: string;
@@ -209,10 +252,40 @@ export function ratiosBetween(
   for (const day of days) {
     const a = day.hours.get(anchorHour);
     const t = day.hours.get(targetHour);
-    // Un día sin una de las dos horas no aporta: no se interpola la que falta.
-    if (a === undefined || t === undefined) continue;
+    if (a === undefined || t === undefined) continue; // no se interpola la que falta
     if (a.best <= 0 || t.best <= 0) continue;
     out.push({ dayKey: day.dayKey, ratio: t.best / a.best });
+  }
+  return out;
+}
+
+/**
+ * Cociente entre el EXTREMO del tramo que queda y el ancla, por día.
+ *
+ * Es lo que responde "¿hasta dónde llegó a subir mi venta después de esta
+ * hora?". Se calcula por día y LUEGO se toman percentiles, que no es lo mismo
+ * que tomar el máximo de los percentiles hora a hora: eso último sería el
+ * máximo de ocho p90 distintos y exageraría el techo sistemáticamente.
+ */
+export function remainingExtremeRatios(
+  days: readonly DayShape[],
+  leg: MakerLeg,
+  anchorHour: number,
+  endHour: number
+): RatioSample[] {
+  const out: RatioSample[] = [];
+  for (const day of days) {
+    const anchor = day.hours.get(anchorHour);
+    if (anchor === undefined || anchor.best <= 0) continue;
+
+    const future: number[] = [];
+    for (let h = anchorHour + 1; h <= endHour; h += 1) {
+      const cell = day.hours.get(h);
+      if (cell !== undefined) future.push(cell.best);
+    }
+    const extreme = extremeForLeg(leg, future);
+    if (extreme === null) continue;
+    out.push({ dayKey: day.dayKey, ratio: extreme / anchor.best });
   }
   return out;
 }
@@ -226,67 +299,65 @@ function medianOf(values: readonly number[]): number | null {
 
 export type BandKind = 'P10_P90' | 'RANGO_OBSERVADO';
 
-export interface HourProjection {
-  hour: number;
-  /** Escenario central: la mediana de lo que hicieron los días análogos. */
+/** Distribución empírica de un cociente, aplicada a un precio ancla. */
+export interface Quantiles {
   central: number;
   low: number;
   high: number;
   bandKind: BandKind;
-  /** Días que aportaron esta hora. Puede ser menor que el total del perfil. */
   daysUsed: number;
-  /** Cambio respecto de la hora anterior de la trayectoria, en %. */
+}
+
+export function quantilesFrom(ratios: readonly number[], anchorPrice: number): Quantiles | null {
+  if (ratios.length === 0 || anchorPrice <= 0) return null;
+  const sorted = [...ratios].sort((a, b) => a - b);
+  const central = medianOf(sorted);
+  if (central === null) return null;
+
+  const usePercentiles = sorted.length >= BAND_PERCENTILE_DAYS;
+  const low = usePercentiles ? percentileOf(sorted, 0.1) : sorted[0];
+  const high = usePercentiles ? percentileOf(sorted, 0.9) : sorted[sorted.length - 1];
+  if (low === null || high === null) return null;
+
+  return {
+    central: anchorPrice * central,
+    low: anchorPrice * low,
+    high: anchorPrice * high,
+    bandKind: usePercentiles ? 'P10_P90' : 'RANGO_OBSERVADO',
+    daysUsed: sorted.length,
+  };
+}
+
+export interface HourProjection extends Quantiles {
+  hour: number;
+  /** Cambio del central respecto de la hora anterior de la trayectoria, en %. */
   movePct: number | null;
 }
 
-/**
- * Proyecta una hora desde el ancla.
- *
- * `null` cuando ningún día análogo tenía esa hora: una hora sin evidencia no se
- * dibuja, en vez de heredar la de al lado.
- */
 export function projectHour(
   days: readonly DayShape[],
   anchorHour: number,
   targetHour: number,
   anchorPrice: number
 ): HourProjection | null {
-  const samples = ratiosBetween(days, anchorHour, targetHour);
-  if (samples.length === 0 || anchorPrice <= 0) return null;
-
-  const ratios = samples.map((s) => s.ratio).sort((a, b) => a - b);
-  const central = medianOf(ratios);
-  if (central === null) return null;
-
-  const usePercentiles = ratios.length >= BAND_PERCENTILE_DAYS;
-  const lowRatio = usePercentiles ? percentileOf(ratios, 0.1) : ratios[0];
-  const highRatio = usePercentiles ? percentileOf(ratios, 0.9) : ratios[ratios.length - 1];
-  if (lowRatio === null || highRatio === null) return null;
-
-  return {
-    hour: targetHour,
-    central: anchorPrice * central,
-    low: anchorPrice * lowRatio,
-    high: anchorPrice * highRatio,
-    bandKind: usePercentiles ? 'P10_P90' : 'RANGO_OBSERVADO',
-    daysUsed: ratios.length,
-    movePct: null, // lo rellena projectRestOfDay, que conoce la hora anterior
-  };
+  const ratios = ratiosBetween(days, anchorHour, targetHour).map((s) => s.ratio);
+  const q = quantilesFrom(ratios, anchorPrice);
+  return q === null ? null : { ...q, hour: targetHour, movePct: null };
 }
 
 /**
  * Recorrido de un día desde su primera hora observada hasta `hour`.
  *
- * Es el descriptor del "momento del mercado" con el que se eligen los días
- * análogos: dos días que a la misma hora llevaban el mismo recorrido desde la
- * apertura estaban, en lo que aquí se puede medir, en el mismo estado.
+ * Descriptor del estado del día: dos días que a la misma hora llevaban el mismo
+ * recorrido desde la apertura estaban, en lo medible aquí, en el mismo sitio.
+ * Sólo mira horas ≤ `hour`, que es lo que lo hace utilizable en tiempo real.
  */
 export function openToHourRatio(day: DayShape, hour: number): number | null {
   const target = day.hours.get(hour);
   if (target === undefined || target.best <= 0) return null;
 
   let openHour = Number.POSITIVE_INFINITY;
-  for (const h of day.hours.keys()) if (h < openHour) openHour = h;
+  for (const h of day.hours.keys()) if (h < openHour && h <= hour) openHour = h;
   if (!Number.isFinite(openHour) || openHour >= hour) return null;
 
   const open = day.hours.get(openHour);
@@ -295,75 +366,143 @@ export function openToHourRatio(day: DayShape, hour: number): number | null {
 }
 
 /**
- * Se queda con los días cuyo recorrido hasta el ancla se parece más al de hoy.
+ * Volatilidad realizada hasta el ancla: mediana de |cambio| entre horas
+ * contiguas. Segunda variable de condicionamiento — una mañana tranquila y una
+ * violenta no predicen la misma tarde — y también mira sólo el pasado.
+ */
+export function realisedVolatilityUpTo(day: DayShape, hour: number): number | null {
+  const hours = [...day.hours.values()].filter((c) => c.hour <= hour).sort((a, b) => a.hour - b.hour);
+  const moves: number[] = [];
+  for (let i = 1; i < hours.length; i += 1) {
+    if (hours[i].hour !== hours[i - 1].hour + 1) continue;
+    const from = hours[i - 1].best;
+    if (from <= 0) continue;
+    moves.push(Math.abs((hours[i].best - from) / from));
+  }
+  return medianOf(moves);
+}
+
+export interface TodayState {
+  openToAnchor: number | null;
+  volatility: number | null;
+}
+
+export interface DaySelection {
+  days: DayShape[];
+  conditioned: boolean;
+  /** Variables que realmente filtraron. Vacío si no se condicionó. */
+  factors: string[];
+}
+
+/**
+ * Elige los días parecidos al estado de hoy.
  *
- * Devuelve TODOS los días cuando no hay suficientes para condicionar: preferir
- * un subconjunto pequeño y parecido a un conjunto grande es cambiar evidencia
- * por estética.
+ * Devuelve TODOS cuando no hay días de sobra: preferir un subconjunto pequeño y
+ * parecido a un conjunto grande es cambiar evidencia por estética. La segunda
+ * variable sólo entra por encima de `MIN_TWO_FACTOR_DAYS` por la misma razón.
  */
 export function selectAnalogousDays(
   days: readonly DayShape[],
   anchorHour: number,
-  todayRatio: number | null
-): { days: DayShape[]; conditioned: boolean } {
-  if (todayRatio === null || days.length < MIN_CONDITIONED_DAYS) {
-    return { days: [...days], conditioned: false };
-  }
+  today: TodayState
+): DaySelection {
+  const none: DaySelection = { days: [...days], conditioned: false, factors: [] };
+  if (today.openToAnchor === null || days.length < MIN_CONDITIONED_DAYS) return none;
+
+  const useVolatility = days.length >= MIN_TWO_FACTOR_DAYS && today.volatility !== null;
 
   const scored: { day: DayShape; distance: number }[] = [];
   for (const day of days) {
     const ratio = openToHourRatio(day, anchorHour);
     if (ratio === null) continue;
-    scored.push({ day, distance: Math.abs(Math.log(ratio) - Math.log(todayRatio)) });
+    // Log para que un +1% y un −1% disten lo mismo del centro.
+    let distance = Math.abs(Math.log(ratio) - Math.log(today.openToAnchor));
+
+    if (useVolatility) {
+      const vol = realisedVolatilityUpTo(day, anchorHour);
+      if (vol === null) continue;
+      /*
+       * Las dos distancias son ya adimensionales y del mismo orden (fracciones
+       * de precio), así que se suman sin pesos inventados. Un peso elegido a
+       * mano decidiría en silencio cuál de las dos manda.
+       */
+      distance += Math.abs(vol - today.volatility!);
+    }
+    scored.push({ day, distance });
   }
-  if (scored.length < MIN_CONDITIONED_DAYS) return { days: [...days], conditioned: false };
+
+  if (scored.length < MIN_CONDITIONED_DAYS) return none;
 
   scored.sort((a, b) => a.distance - b.distance);
   const keep = Math.max(MIN_PROFILE_DAYS, Math.round(scored.length * CONDITIONED_FRACTION));
-  return { days: scored.slice(0, keep).map((s) => s.day), conditioned: true };
+  return {
+    days: scored.slice(0, keep).map((s) => s.day),
+    conditioned: true,
+    factors: useVolatility ? ['recorrido desde la apertura', 'volatilidad realizada'] : ['recorrido desde la apertura'],
+  };
 }
 
-export interface DayProjection {
+export interface LegProjection {
+  leg: MakerLeg;
+  binanceSide: 'BUY' | 'SELL';
   tier: DailyTier;
-  side: DailySide;
   anchorHour: number;
   anchorPrice: number | null;
-  /**
-   * Horas ya ocurridas hoy, con su mejor precio real.
-   *
-   * `movePct` viaja calculado desde aquí y no se deja para la pantalla: el
-   * panel no debe restar precios, porque en cuanto lo haga tendrá que decidir
-   * qué hacer con las horas que faltan y esa decisión es estadística, no de
-   * presentación.
-   */
+
+  /** Horas ya ocurridas hoy, con el extremo de la pierna en cada una. */
   real: { hour: number; price: number; observations: number; movePct: number | null }[];
-  /** Horas que quedan, proyectadas. Vacío si no hay evidencia. */
+  /** Extremo YA OCURRIDO hoy: techo observado en VENTA, piso observado en COMPRA. */
+  observedExtreme: { price: number; hour: number } | null;
+
+  /** Horas que quedan. Vacío si no hay evidencia. */
   projected: HourProjection[];
-  /** Días del perfil tras condicionar (o todos, si no se condicionó). */
+  /** Extremo del tramo que queda, estimado de la distribución por día. */
+  projectedExtreme: Quantiles | null;
+  /** Precio estimado al cierre de la ventana. */
+  projectedClose: Quantiles | null;
+
   profileDays: number;
-  /** Días disponibles antes de condicionar. */
   candidateDays: number;
   conditioned: boolean;
+  conditioningFactors: string[];
 }
 
 /**
- * Construye el día completo de un lado: lo real hasta ahora y lo proyectado
- * después. `now` se pasa explícito para que la función sea determinista y
- * testable.
+ * Proyecta una pierna: lo real hasta ahora y lo que queda después.
+ *
+ * `now` se pasa explícito para que la función sea determinista y para que el
+ * backtest pueda situarse en un instante del pasado sin tocar el reloj.
  */
-export function projectRestOfDay(
+export function projectLeg(
   points: readonly SeriesPoint[],
-  side: DailySide,
+  leg: MakerLeg,
   now: number,
   startHour = DEFAULT_DAY_START_HOUR,
   endHour = DEFAULT_DAY_END_HOUR
-): DayProjection {
-  const all = groupByDay(points, side, startHour, endHour);
+): LegProjection {
+  const all = groupByDay(points, leg, startHour, endHour);
   const todayKey = venezuelaDayKey(now);
-  const today = all.find((d) => d.dayKey === todayKey) ?? null;
-  const previous = all.filter((d) => d.dayKey < todayKey);
+  return projectLegFromDays(all, leg, todayKey, venezuelaHourOf(now), startHour, endHour);
+}
 
-  const anchorHour = Math.min(Math.max(venezuelaHourOf(now), startHour), endHour);
+/**
+ * El núcleo, ya sobre días agrupados.
+ *
+ * Separado de `projectLeg` porque el backtest necesita entrar aquí con un
+ * conjunto de días RECORTADO —sólo los anteriores al que evalúa— y ésa es la
+ * única forma de garantizar por construcción que no hay look-ahead.
+ */
+export function projectLegFromDays(
+  allDays: readonly DayShape[],
+  leg: MakerLeg,
+  todayKey: string,
+  rawAnchorHour: number,
+  startHour = DEFAULT_DAY_START_HOUR,
+  endHour = DEFAULT_DAY_END_HOUR
+): LegProjection {
+  const today = allDays.find((d) => d.dayKey === todayKey) ?? null;
+  const previous = allDays.filter((d) => d.dayKey < todayKey);
+  const anchorHour = Math.min(Math.max(rawAnchorHour, startHour), endHour);
 
   const observedHours =
     today === null
@@ -383,58 +522,81 @@ export function projectRestOfDay(
     };
   });
 
+  let observedExtreme: { price: number; hour: number } | null = null;
+  for (const r of real) {
+    if (observedExtreme === null || isBetterForLeg(leg, r.price, observedExtreme.price)) {
+      observedExtreme = { price: r.price, hour: r.hour };
+    }
+  }
+
   const anchorCell = today?.hours.get(anchorHour) ?? null;
   // Si la hora en curso aún no tiene observación, se ancla en la última que sí.
-  const anchor = anchorCell ?? (real.length > 0 ? { best: real[real.length - 1].price } : null);
-  const anchorPrice = anchor?.best ?? null;
+  const anchorPrice = anchorCell?.best ?? (real.length > 0 ? real[real.length - 1].price : null);
 
-  const base: DayProjection = {
+  const base: LegProjection = {
+    leg,
+    binanceSide: LEG_BINANCE_SIDE[leg],
     tier: real.length === 0 ? 'SIN_DATOS' : 'SOLO_HOY',
-    side,
     anchorHour,
     anchorPrice,
     real,
+    observedExtreme,
     projected: [],
+    projectedExtreme: null,
+    projectedClose: null,
     profileDays: 0,
     candidateDays: previous.length,
     conditioned: false,
+    conditioningFactors: [],
   };
 
-  if (anchorPrice === null) return base;
-  if (previous.length < MIN_PROFILE_DAYS) return base;
+  if (anchorPrice === null || previous.length < MIN_PROFILE_DAYS) return base;
 
-  const todayRatio = today === null ? null : openToHourRatio(today, anchorHour);
-  const { days: profile, conditioned } = selectAnalogousDays(previous, anchorHour, todayRatio);
-  if (profile.length < MIN_PROFILE_DAYS) return base;
+  const state: TodayState =
+    today === null
+      ? { openToAnchor: null, volatility: null }
+      : {
+          openToAnchor: openToHourRatio(today, anchorHour),
+          volatility: realisedVolatilityUpTo(today, anchorHour),
+        };
+
+  const selection = selectAnalogousDays(previous, anchorHour, state);
+  if (selection.days.length < MIN_PROFILE_DAYS) return base;
 
   const projected: HourProjection[] = [];
   let previousPrice = anchorPrice;
   for (let hour = anchorHour + 1; hour <= endHour; hour += 1) {
-    const projection = projectHour(profile, anchorHour, hour, anchorPrice);
+    const projection = projectHour(selection.days, anchorHour, hour, anchorPrice);
     if (projection === null) continue;
-    projection.movePct = previousPrice > 0 ? ((projection.central - previousPrice) / previousPrice) * 100 : null;
+    projection.movePct =
+      previousPrice > 0 ? ((projection.central - previousPrice) / previousPrice) * 100 : null;
     previousPrice = projection.central;
     projected.push(projection);
   }
-
   if (projected.length === 0) return base;
+
+  const extremeRatios = remainingExtremeRatios(selection.days, leg, anchorHour, endHour).map((s) => s.ratio);
+  const closeRatios = ratiosBetween(selection.days, anchorHour, endHour).map((s) => s.ratio);
 
   return {
     ...base,
-    tier: conditioned ? 'PERFIL_CONDICIONADO' : 'PERFIL_LIMITADO',
+    tier: selection.conditioned ? 'PERFIL_CONDICIONADO' : 'PERFIL_LIMITADO',
     projected,
-    profileDays: profile.length,
-    conditioned,
+    projectedExtreme: quantilesFrom(extremeRatios, anchorPrice),
+    projectedClose: quantilesFrom(closeRatios, anchorPrice),
+    profileDays: selection.days.length,
+    conditioned: selection.conditioned,
+    conditioningFactors: selection.factors,
   };
 }
 
 /**
  * Umbral de giro, MEDIDO en vez de elegido.
  *
- * Un giro es un cambio de hora a hora mayor que el de una hora corriente. Cuál
- * es "una hora corriente" lo dice la propia serie: la mediana de los cambios
- * absolutos entre horas consecutivas. Poner aquí un 0.3 % fijo sería inventar
- * el listón que decide qué se le anuncia al propietario.
+ * Un giro es un cambio de hora a hora mayor que el de una hora corriente, y qué
+ * es "corriente" lo dice la serie: la mediana de los cambios absolutos entre
+ * horas contiguas. Un 0.3 % fijo decidiría qué se le anuncia al propietario sin
+ * que nadie lo hubiera medido.
  */
 export interface TurnThreshold {
   pct: number | null;
@@ -446,8 +608,7 @@ export function turnThreshold(days: readonly DayShape[]): TurnThreshold {
   for (const day of days) {
     const hours = [...day.hours.values()].sort((a, b) => a.hour - b.hour);
     for (let i = 1; i < hours.length; i += 1) {
-      // Horas no contiguas no forman un cambio "por hora": el hueco se respeta.
-      if (hours[i].hour !== hours[i - 1].hour + 1) continue;
+      if (hours[i].hour !== hours[i - 1].hour + 1) continue; // el hueco se respeta
       const from = hours[i - 1].best;
       if (from <= 0) continue;
       moves.push(Math.abs((hours[i].best - from) / from) * 100);
@@ -456,102 +617,197 @@ export function turnThreshold(days: readonly DayShape[]): TurnThreshold {
   return { pct: medianOf(moves), sampleSize: moves.length };
 }
 
-/**
- * ¿Bate el perfil a "el precio se queda donde está"?
+/* ════════════════════════════════════════════════════════════════════════
+ * BACKTEST TEMPORAL, SIN LOOK-AHEAD
+ * ════════════════════════════════════════════════════════════════════════
  *
- * Validación dejando un día fuera: para cada día anterior se construye el perfil
- * con los DEMÁS y se compara su error contra el de la persistencia. El contraste
- * es el mismo que usa el motor de horizontes —signo exacto sobre el error
- * absoluto— para que las dos partes del sistema se juzguen con la misma vara.
+ * Se recorre el histórico hacia adelante. Para el día i el perfil se construye
+ * con `days.slice(0, i)` — ESTRICTAMENTE los días anteriores.
  *
- * ═══ UN DÍA, UN CASO ═══
+ * Esto no es un detalle: la versión anterior usaba "todos menos el día i", que
+ * incluye días POSTERIORES. Eso es look-ahead puro y habría inflado el
+ * resultado con información que en ese momento no existía. La garantía aquí es
+ * estructural, no una promesa: el conjunto se recorta antes de entrar y la
+ * función que proyecta no recibe nada más.
  *
- * Cada día produce decenas de pares ancla→objetivo, y es tentador contarlos
- * todos: daría cientos de "casos" y una p diminuta. Serían falsos. Todos esos
- * pares recorren la MISMA trayectoria de un mismo día, así que un día
- * excepcional se contaría cincuenta veces y el contraste mediría la suerte de
- * un día como si fueran cincuenta días.
- *
- * Por eso el día entero aporta UN caso: se promedia su error en todos los pares
- * y se compara con el promedio de la persistencia en los mismos pares. Con 10
- * días eso son 10 casos, y con 10 casos el signo exacto rara vez llegará a
- * significación. Ese es el punto: mientras no llegue, el sistema NO puede
- * afirmar que el perfil aporte nada, y lo dice.
+ * Dentro del día evaluado, el ancla parte los datos en dos: hasta la hora ancla
+ * se usa para condicionar, y sólo después se lee la realidad para comparar.
  */
-export interface ShapeValidation {
-  /** Días comparados. Cada día es UN caso, no uno por par de horas. */
-  comparisons: number;
-  profileWins: number;
+
+export interface LegBacktest {
+  leg: MakerLeg;
+  /** Días evaluados. Es la unidad independiente del contraste. */
+  days: number;
+  /** Anclas día×hora evaluadas. Contexto, NO tamaño de muestra del contraste. */
+  anchors: number;
+
+  /** Error absoluto medio del cierre proyectado, y el de la persistencia. */
+  closeErrorModel: number | null;
+  closeErrorPersistence: number | null;
+  /** Error absoluto medio del extremo (techo en VENTA, piso en COMPRA). */
+  extremeErrorModel: number | null;
+  extremeErrorPersistence: number | null;
+  /** Proporción de veces que el cierre real cayó dentro de la banda, 0–1. */
+  coverage: number | null;
+  /** Aciertos de dirección sobre los casos en que hubo dirección que acertar. */
+  directionHits: number;
+  directionTotal: number;
+
+  modelWins: number;
   persistenceWins: number;
   ties: number;
-  /** Pares ancla→objetivo que sostienen la comparación, para dar contexto. */
-  pairs: number;
   pValue: number | null;
   beatsPersistence: boolean;
 }
 
-export const SHAPE_VALIDATION_ALPHA = 0.05;
+export const BACKTEST_ALPHA = 0.05;
 
-export function validateShape(
+const mean = (xs: readonly number[]): number | null =>
+  xs.length === 0 ? null : xs.reduce((a, b) => a + b, 0) / xs.length;
+
+export function backtestLeg(
   days: readonly DayShape[],
+  leg: MakerLeg,
   startHour = DEFAULT_DAY_START_HOUR,
   endHour = DEFAULT_DAY_END_HOUR
-): ShapeValidation {
-  let profileWins = 0;
+): LegBacktest {
+  const ordered = [...days].sort((a, b) => a.dayKey.localeCompare(b.dayKey));
+
+  const closeModel: number[] = [];
+  const closePersistence: number[] = [];
+  const extremeModel: number[] = [];
+  const extremePersistence: number[] = [];
+  let covered = 0;
+  let coverageCases = 0;
+  let directionHits = 0;
+  let directionTotal = 0;
+  let anchors = 0;
+
+  let modelWins = 0;
   let persistenceWins = 0;
   let ties = 0;
-  let pairs = 0;
+  let evaluatedDays = 0;
 
-  for (const held of days) {
-    const others = days.filter((d) => d.dayKey !== held.dayKey);
-    if (others.length < MIN_PROFILE_DAYS) continue;
+  for (let i = 0; i < ordered.length; i += 1) {
+    // ESTRICTAMENTE anterior. Aquí es donde se impide el look-ahead.
+    const past = ordered.slice(0, i);
+    if (past.length < MIN_PROFILE_DAYS) continue;
 
-    let profileError = 0;
-    let persistenceError = 0;
-    let dayPairs = 0;
+    const actual = ordered[i];
+    const dayModelErrors: number[] = [];
+    const dayPersistenceErrors: number[] = [];
 
     for (let anchor = startHour; anchor < endHour; anchor += 1) {
-      const anchorCell = held.hours.get(anchor);
+      const anchorCell = actual.hours.get(anchor);
       if (anchorCell === undefined || anchorCell.best <= 0) continue;
 
-      for (let target = anchor + 1; target <= endHour; target += 1) {
-        const actual = held.hours.get(target);
-        if (actual === undefined) continue;
-        const projection = projectHour(others, anchor, target, anchorCell.best);
-        if (projection === null) continue;
+      /*
+       * El día evaluado se recorta hasta el ancla antes de proyectar: el motor
+       * no puede ver ni una hora posterior de su propio día.
+       */
+      const visibleToday: DayShape = {
+        dayKey: actual.dayKey,
+        weekday: actual.weekday,
+        hours: new Map([...actual.hours.entries()].filter(([h]) => h <= anchor)),
+      };
 
-        profileError += Math.abs(projection.central - actual.best);
-        persistenceError += Math.abs(anchorCell.best - actual.best);
-        dayPairs += 1;
+      const projection = projectLegFromDays(
+        [...past, visibleToday],
+        leg,
+        actual.dayKey,
+        anchor,
+        startHour,
+        endHour
+      );
+      if (projection.projected.length === 0) continue;
+      anchors += 1;
+
+      // ── Cierre ──
+      const closeCell = actual.hours.get(endHour);
+      if (closeCell !== undefined && projection.projectedClose !== null) {
+        const modelError = Math.abs(projection.projectedClose.central - closeCell.best);
+        const persistenceError = Math.abs(anchorCell.best - closeCell.best);
+        closeModel.push(modelError);
+        closePersistence.push(persistenceError);
+        dayModelErrors.push(modelError);
+        dayPersistenceErrors.push(persistenceError);
+
+        coverageCases += 1;
+        const lo = Math.min(projection.projectedClose.low, projection.projectedClose.high);
+        const hi = Math.max(projection.projectedClose.low, projection.projectedClose.high);
+        if (closeCell.best >= lo && closeCell.best <= hi) covered += 1;
+
+        // Dirección: sólo cuenta cuando el mercado se movió de verdad.
+        const realMove = closeCell.best - anchorCell.best;
+        const projectedMove = projection.projectedClose.central - anchorCell.best;
+        if (realMove !== 0 && projectedMove !== 0) {
+          directionTotal += 1;
+          if (Math.sign(realMove) === Math.sign(projectedMove)) directionHits += 1;
+        }
+      }
+
+      // ── Extremo del tramo restante ──
+      const futureValues: number[] = [];
+      for (let h = anchor + 1; h <= endHour; h += 1) {
+        const cell = actual.hours.get(h);
+        if (cell !== undefined) futureValues.push(cell.best);
+      }
+      const realExtreme = extremeForLeg(leg, futureValues);
+      if (realExtreme !== null && projection.projectedExtreme !== null) {
+        extremeModel.push(Math.abs(projection.projectedExtreme.central - realExtreme));
+        // La persistencia no predice un extremo distinto del precio de ahora.
+        extremePersistence.push(Math.abs(anchorCell.best - realExtreme));
       }
     }
 
-    if (dayPairs === 0) continue;
-    pairs += dayPairs;
-    // Promedios, no sumas: un día con más horas observadas no pesa más.
-    const profileMean = profileError / dayPairs;
-    const persistenceMean = persistenceError / dayPairs;
-    if (profileMean < persistenceMean) profileWins += 1;
-    else if (profileMean > persistenceMean) persistenceWins += 1;
+    if (dayModelErrors.length === 0) continue;
+    evaluatedDays += 1;
+    /*
+     * UN DÍA, UN CASO. Las anclas de un mismo día recorren la misma trayectoria;
+     * contarlas por separado daría cientos de "casos" y una p diminuta que sería
+     * falsa. Se promedian y el día aporta un solo signo.
+     */
+    const m = mean(dayModelErrors)!;
+    const p = mean(dayPersistenceErrors)!;
+    if (m < p) modelWins += 1;
+    else if (m > p) persistenceWins += 1;
     else ties += 1;
   }
 
-  const comparisons = profileWins + persistenceWins;
-  /*
-   * Los empates se descartan, no se reparten: el signo exacto se define sobre
-   * los casos que discrepan. Repartirlos inflaría la muestra con días que no
-   * distinguen nada.
-   */
-  const pValue = comparisons === 0 ? null : binomialTailProbability(profileWins, comparisons);
+  const comparisons = modelWins + persistenceWins;
+  const pValue = comparisons === 0 ? null : binomialTailProbability(modelWins, comparisons);
 
   return {
-    comparisons,
-    profileWins,
+    leg,
+    days: evaluatedDays,
+    anchors,
+    closeErrorModel: mean(closeModel),
+    closeErrorPersistence: mean(closePersistence),
+    extremeErrorModel: mean(extremeModel),
+    extremeErrorPersistence: mean(extremePersistence),
+    coverage: coverageCases === 0 ? null : covered / coverageCases,
+    directionHits,
+    directionTotal,
+    modelWins,
     persistenceWins,
     ties,
-    pairs,
     pValue,
-    beatsPersistence:
-      pValue !== null && pValue < SHAPE_VALIDATION_ALPHA && profileWins > persistenceWins,
+    beatsPersistence: pValue !== null && pValue < BACKTEST_ALPHA && modelWins > persistenceWins,
   };
 }
+
+/** Fuerza de la evidencia de una pierna, a partir de su backtest y su perfil. */
+export function evidenceFor(projection: LegProjection, backtest: LegBacktest): DailyEvidenceLevel {
+  if (projection.tier === 'SIN_DATOS') return 'SIN_DATOS_SUFICIENTES';
+  if (projection.tier === 'SOLO_HOY') return 'SOLO_OBSERVACION';
+  if (backtest.days === 0 || backtest.pValue === null) return 'ESTIMACION_SIN_VALIDAR';
+  return backtest.beatsPersistence ? 'EVIDENCIA_FUERTE' : 'EVIDENCIA_DEBIL';
+}
+
+export const DAILY_EVIDENCE_TEXT: Record<DailyEvidenceLevel, string> = {
+  SIN_DATOS_SUFICIENTES: 'Sin datos suficientes para decir nada.',
+  SOLO_OBSERVACION: 'Sólo lo observado hoy. No hay proyección.',
+  ESTIMACION_SIN_VALIDAR: 'Estimación sin validar: no hay días bastantes para comparar contra la persistencia.',
+  EVIDENCIA_DEBIL: 'Evidencia débil: el modelo todavía no mejora de forma demostrable a suponer que el precio se queda igual.',
+  EVIDENCIA_FUERTE: 'Evidencia fuerte: el modelo bate a la persistencia en el histórico disponible.',
+};

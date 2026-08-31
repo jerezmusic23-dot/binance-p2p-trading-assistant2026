@@ -39,8 +39,10 @@ import {
 import { DailyProjectionResponse } from './types';
 import { buildRows, hourLabel, type DailyChartRow } from './dailyChartRows';
 
-const BUY_COLOR = '#f0b90b'; // recompra: el ask que pago
-const SELL_COLOR = '#02c076'; // venta: el bid que me pagan
+/* MI VENTA va arriba (techo) y MI COMPRA abajo (piso). El color no decide
+   nada: lo decide el campo del que sale cada serie. */
+const VENTA_COLOR = '#f0b90b';
+const COMPRA_COLOR = '#02c076';
 const GRID = '#2b2f36';
 const MUTED = '#848e9c';
 
@@ -53,7 +55,7 @@ const TooltipBox: React.FC<{ active?: boolean; payload?: any[]; label?: string }
 }) => {
   if (!active || !payload || payload.length === 0) return null;
   const row: DailyChartRow = payload[0].payload;
-  const projected = row.buyReal === undefined && row.buyProjected !== undefined;
+  const projected = row.ventaReal === undefined && row.ventaProjected !== undefined;
 
   return (
     <div className="bg-[#181a20] border border-[#2b2f36] rounded px-3 py-2 text-[11px]">
@@ -63,16 +65,16 @@ const TooltipBox: React.FC<{ active?: boolean; payload?: any[]; label?: string }
           {projected ? 'PROYECCIÓN' : 'OCURRIÓ'}
         </span>
       </div>
-      <div style={{ color: BUY_COLOR }}>
-        recompra {money(row.buyReal ?? row.buyProjected)}
-        {row.buyBand && !row.buyReal && (
-          <span className="text-[#5e6673]"> ({money(row.buyBand[0])}–{money(row.buyBand[1])})</span>
+      <div style={{ color: VENTA_COLOR }}>
+        MI VENTA {money(row.ventaReal ?? row.ventaProjected)}
+        {row.ventaBand && !row.ventaReal && (
+          <span className="text-[#5e6673]"> ({money(row.ventaBand[0])}–{money(row.ventaBand[1])})</span>
         )}
       </div>
-      <div style={{ color: SELL_COLOR }}>
-        venta {money(row.sellReal ?? row.sellProjected)}
-        {row.sellBand && !row.sellReal && (
-          <span className="text-[#5e6673]"> ({money(row.sellBand[0])}–{money(row.sellBand[1])})</span>
+      <div style={{ color: COMPRA_COLOR }}>
+        MI COMPRA {money(row.compraReal ?? row.compraProjected)}
+        {row.compraBand && !row.compraReal && (
+          <span className="text-[#5e6673]"> ({money(row.compraBand[0])}–{money(row.compraBand[1])})</span>
         )}
       </div>
       {row.movePct !== undefined && (
@@ -92,7 +94,7 @@ interface Props {
 export const DailyFluctuationChart: React.FC<Props> = ({ report }) => {
   const rows = buildRows(report);
   const anchorLabel = hourLabel(report.anchorHour);
-  const hasProjection = report.sides.some((s) => s.projected.length > 0);
+  const hasProjection = report.legs.some((l) => l.projection.projected.length > 0);
   const threshold = report.turn.pct;
 
   return (
@@ -126,60 +128,60 @@ export const DailyFluctuationChart: React.FC<Props> = ({ report }) => {
               <ReferenceArea
                 x1={hourLabel(report.watchWindow.fromHour)}
                 x2={hourLabel(report.watchWindow.toHour)}
-                fill={BUY_COLOR}
+                fill={VENTA_COLOR}
                 fillOpacity={0.07}
                 label={{ value: 'MIRAR AQUÍ', position: 'insideTop', fill: MUTED, fontSize: 9 }}
               />
             )}
 
             <Area
-              dataKey="buyBand"
+              dataKey="ventaBand"
               stroke="none"
-              fill={BUY_COLOR}
+              fill={VENTA_COLOR}
               fillOpacity={0.1}
               isAnimationActive={false}
               connectNulls={false}
             />
             <Area
-              dataKey="sellBand"
+              dataKey="compraBand"
               stroke="none"
-              fill={SELL_COLOR}
+              fill={COMPRA_COLOR}
               fillOpacity={0.1}
               isAnimationActive={false}
               connectNulls={false}
             />
 
             <Line
-              dataKey="buyReal"
-              stroke={BUY_COLOR}
+              dataKey="ventaReal"
+              stroke={VENTA_COLOR}
               strokeWidth={2}
-              dot={{ r: 2, fill: BUY_COLOR }}
+              dot={{ r: 2, fill: VENTA_COLOR }}
               isAnimationActive={false}
               connectNulls={false}
             />
             <Line
-              dataKey="sellReal"
-              stroke={SELL_COLOR}
+              dataKey="compraReal"
+              stroke={COMPRA_COLOR}
               strokeWidth={2}
-              dot={{ r: 2, fill: SELL_COLOR }}
+              dot={{ r: 2, fill: COMPRA_COLOR }}
               isAnimationActive={false}
               connectNulls={false}
             />
             <Line
-              dataKey="buyProjected"
-              stroke={BUY_COLOR}
+              dataKey="ventaProjected"
+              stroke={VENTA_COLOR}
               strokeWidth={2}
               strokeDasharray="3 3"
-              dot={{ r: 2, fill: 'none', stroke: BUY_COLOR }}
+              dot={{ r: 2, fill: 'none', stroke: VENTA_COLOR }}
               isAnimationActive={false}
               connectNulls={false}
             />
             <Line
-              dataKey="sellProjected"
-              stroke={SELL_COLOR}
+              dataKey="compraProjected"
+              stroke={COMPRA_COLOR}
               strokeWidth={2}
               strokeDasharray="3 3"
-              dot={{ r: 2, fill: 'none', stroke: SELL_COLOR }}
+              dot={{ r: 2, fill: 'none', stroke: COMPRA_COLOR }}
               isAnimationActive={false}
               connectNulls={false}
             />
@@ -201,7 +203,7 @@ export const DailyFluctuationChart: React.FC<Props> = ({ report }) => {
         dibuja ninguna línea, que es más honesto que dibujar una por defecto.
       */}
       <div className="text-[9px] text-[#5e6673] uppercase tracking-wide mt-2 mb-1">
-        Movimiento por hora (recompra)
+        Movimiento por hora (mi venta)
         {threshold !== null && (
           <span className="ml-2 normal-case tracking-normal">
             · umbral de giro medido ±{threshold.toFixed(2)}% sobre {report.turn.sampleSize} cambios
@@ -231,7 +233,7 @@ export const DailyFluctuationChart: React.FC<Props> = ({ report }) => {
               {rows.map((row) => (
                 <Cell
                   key={row.hour}
-                  fill={(row.movePct ?? 0) >= 0 ? BUY_COLOR : SELL_COLOR}
+                  fill={(row.movePct ?? 0) >= 0 ? VENTA_COLOR : COMPRA_COLOR}
                   /* Hueco = todavía no ha ocurrido. Misma regla que los puntos. */
                   fillOpacity={row.moveIsReal ? 0.85 : 0.35}
                 />
