@@ -319,3 +319,49 @@ describe('the arbitrage vocabulary can no longer reach Telegram', () => {
     expect(body).not.toMatch(/ARBITRAJE|EXECUTABLE|Binance ASK|Binance BID/);
   });
 });
+
+/**
+ * LOS DOS ROLES SOBRE EL MISMO LIBRO
+ * ==================================
+ *
+ * `arbitrageSides.ts` describe al TAKER y `projection/dailyShape.ts` al MAKER.
+ * Para el mismo lado de Binance dicen operaciones opuestas, y las dos son
+ * correctas: el maker publica su venta donde el taker compra.
+ *
+ * Lo que NO puede pasar es que uno de los dos mapas se invierta y deje de
+ * apuntar al lado que dice. Eso es lo que se fija aquí, y es la razón por la
+ * que no se renombró el vocabulario de arbitraje al del maker: no es un nombre
+ * engañoso, es otro rol.
+ */
+describe('taker y maker apuntan al mismo lado de Binance', () => {
+  it('la pierna de ENTRADA del taker y MI VENTA salen ambas de tradeType BUY', async () => {
+    const { tradeTypeForLeg } = await import('../server/arbitrageSides.js');
+    const { LEG_BINANCE_SIDE } = await import('../server/projection/dailyShape.js');
+
+    expect(tradeTypeForLeg('ARBITRAGE_BUY')).toBe('BUY');
+    expect(LEG_BINANCE_SIDE.VENTA).toBe('BUY');
+  });
+
+  it('la pierna de SALIDA del taker y MI COMPRA salen ambas de tradeType SELL', async () => {
+    const { tradeTypeForLeg } = await import('../server/arbitrageSides.js');
+    const { LEG_BINANCE_SIDE } = await import('../server/projection/dailyShape.js');
+
+    expect(tradeTypeForLeg('ARBITRAGE_SELL')).toBe('SELL');
+    expect(LEG_BINANCE_SIDE.COMPRA).toBe('SELL');
+  });
+
+  it('los dos mapas son biyectivos y no colapsan en un solo lado', async () => {
+    const { tradeTypeForLeg } = await import('../server/arbitrageSides.js');
+    const { LEG_BINANCE_SIDE } = await import('../server/projection/dailyShape.js');
+
+    expect(tradeTypeForLeg('ARBITRAGE_BUY')).not.toBe(tradeTypeForLeg('ARBITRAGE_SELL'));
+    expect(LEG_BINANCE_SIDE.VENTA).not.toBe(LEG_BINANCE_SIDE.COMPRA);
+  });
+
+  it('el módulo de arbitraje avisa por escrito de que no debe renombrarse', async () => {
+    const fs = await import('node:fs');
+    const source = fs.readFileSync('server/arbitrageSides.ts', 'utf-8');
+    expect(source).toMatch(/NO renombrar `arbitrageBuyPrice`/);
+    expect(source).toMatch(/LEG_BINANCE_SIDE/);
+  });
+});

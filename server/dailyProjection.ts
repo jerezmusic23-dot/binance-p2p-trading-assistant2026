@@ -40,29 +40,92 @@ import type { HistoryRecord } from './types.js';
 import {
   DEFAULT_DAY_END_HOUR,
   DEFAULT_DAY_START_HOUR,
-  DAILY_EVIDENCE_TEXT,
   LEG_BINANCE_SIDE,
   LEG_LABEL,
   MIN_PROFILE_DAYS,
   TIER_TEXT,
-  backtestLeg,
-  evidenceFor,
+  assertInstant,
   groupByDay,
   isBetterForLeg,
   projectLeg,
-  turnThreshold,
   venezuelaDayKey,
   type DailyEvidenceLevel,
   type DailyTier,
-  type LegBacktest,
   type LegProjection,
   type MakerLeg,
-  type TurnThreshold,
 } from './projection/dailyShape.js';
-import { percentileOf, type SeriesPoint } from './projection/series.js';
+import {
+  DAILY_EVIDENCE_TEXT,
+  backtestLeg,
+  evidenceFor,
+  type LegBacktest,
+} from './projection/dailyBacktest.js';
+import {
+  bestOpportunity,
+  favourableHours,
+  projectedTurn,
+  turnThreshold,
+  type HourFavourability,
+  type LegOpportunity,
+  type ProjectedTurn,
+  type TurnThreshold,
+} from './projection/dailyOpportunity.js';
+import type { SeriesPoint } from './projection/series.js';
+import {
+  detectTurn,
+  fullPath,
+  historicalDayMoves,
+  maxSpreadOf,
+  remainingShare,
+  speedFor,
+  type DaySpeed,
+  type HourSpread,
+} from './dailyMetrics.js';
+
+/**
+ * ESTADO DE LA PANTALLA. Cinco, y no se colapsan.
+ *
+ * `PROYECCION_VALIDADA` es el único que puede llamarse fiable, y sólo lo
+ * concede el backtest walk-forward al batir a la persistencia. Tener muchos
+ * registros no valida nada: valida ganarle a "el precio se queda igual".
+ */
+export type ScreenState =
+  | 'SIN_DATOS'
+  | 'DATOS_INSUFICIENTES'
+  | 'PROYECCION_LIMITADA'
+  | 'PROYECCION_CONDICIONADA'
+  | 'PROYECCION_VALIDADA';
+
+export const SCREEN_STATE_TEXT: Record<ScreenState, string> = {
+  SIN_DATOS: 'No hay histórico capturado todavía.',
+  DATOS_INSUFICIENTES: 'Hay datos, pero no alcanzan para proyectar el resto del día.',
+  PROYECCION_LIMITADA: 'Evidencia inicial: pocos días y sin filtrar por el estado de hoy.',
+  PROYECCION_CONDICIONADA: 'Hay días suficientes para comparar con jornadas parecidas a la de hoy.',
+  PROYECCION_VALIDADA: 'El backtest walk-forward demuestra ventaja sobre la persistencia.',
+};
+
+/**
+ * DE DÓNDE SALE UN PRECIO. Obligatorio en cada cifra de la pantalla.
+ *
+ * Sin esto un número como 935.47 es magia. Con esto se puede seguir la cadena
+ * entera: qué campo del histórico, qué serie, qué cálculo y sobre cuántos días.
+ */
+export interface PriceOrigin {
+  /** Campo literal del histórico del que arranca la cadena. */
+  field: 'strategicBuyPrice' | 'strategicSellPrice';
+  binanceSide: 'BUY' | 'SELL';
+  leg: MakerLeg;
+  /** Qué se hizo con él, en una frase legible. */
+  calculation: string;
+  /** OBSERVADO ocurrió; PROYECTADO no. */
+  kind: 'OBSERVADO' | 'PROYECTADO';
+  /** Días que sostienen el número. null cuando es una observación directa. */
+  daysUsed: number | null;
+}
 
 export type DayDirection = 'SUBIENDO' | 'BAJANDO' | 'LATERAL' | 'INDETERMINADA';
-export type DaySpeed = 'LENTO' | 'MODERADO' | 'RAPIDO' | 'INDETERMINADA';
+export { detectTurn, maxSpreadOf, remainingShare, speedFor };
+export type { DaySpeed, HourSpread };
 
 /** Qué se pudo leer del histórico y qué se descartó, por pierna. */
 export interface LegExtraction {
@@ -86,14 +149,10 @@ export interface DayExtreme {
   dayBest: number | null;
   /** true si `dayBest` sale del tramo proyectado. */
   dayBestIsProjected: boolean;
+  /** Cadena completa del número, para que ninguna cifra sea mágica. */
+  origin: PriceOrigin;
 }
 
-export interface HourSpread {
-  hour: number;
-  /** ((venta − compra) / compra) × 100. Para un maker, positivo es su margen. */
-  spreadPct: number;
-  observed: boolean;
-}
 
 export interface DailyMarketSummary {
   leg: MakerLeg;
@@ -116,6 +175,16 @@ export interface DailyLegReport {
   label: string;
   extraction: LegExtraction;
   market: DailyMarketSummary;
+
+  /** Precio de ahora, con su cadena. null cuando no hay observación hoy. */
+  now: number | null;
+  nowOrigin: PriceOrigin;
+  /** La mejor ocasión que queda por delante para esta pierna. */
+  opportunity: LegOpportunity | null;
+  /** Horas históricamente mejores para esta pierna, mejor primero. */
+  favourableHours: HourFavourability[];
+  /** Giro proyectado en la trayectoria de esta pierna. */
+  turn: ProjectedTurn | null;
 }
 
 export interface DailyProjectionReport {
@@ -141,6 +210,9 @@ export interface DailyProjectionReport {
   /** El peor nivel de las dos piernas: la pantalla no puede prometer más. */
   tier: DailyTier;
   tierText: string;
+  /** Estado de pantalla, que incorpora además el resultado del backtest. */
+  state: ScreenState;
+  stateText: string;
   daysMissing: number;
   variables: VariableReport;
 }
@@ -208,6 +280,7 @@ export function extremeOfLeg(projection: LegProjection): DayExtreme {
     fromProjection = true;
   }
 
+  const extremeWord = projection.leg === 'VENTA' ? 'máximo' : 'mínimo';
   return {
     leg: projection.leg,
     binanceSide: projection.binanceSide,
@@ -215,100 +288,33 @@ export function extremeOfLeg(projection: LegProjection): DayExtreme {
     projected,
     dayBest,
     dayBestIsProjected: fromProjection,
+    origin: {
+      field: FIELD_FOR_LEG[projection.leg],
+      binanceSide: projection.binanceSide,
+      leg: projection.leg,
+      calculation: fromProjection
+        ? `mediana de los ${extremeWord}s que alcanzaron los días análogos entre la hora ancla y el cierre, aplicada al precio real de ahora`
+        : `${extremeWord} de los ${extremeWord}s horarios realmente observados hoy`,
+      kind: fromProjection ? 'PROYECTADO' : 'OBSERVADO',
+      daysUsed: fromProjection ? (projected?.daysUsed ?? null) : null,
+    },
   };
 }
 
-/** Trayectoria completa de una pierna: horas reales y después proyectadas. */
-function fullPath(p: LegProjection): { hour: number; price: number; observed: boolean }[] {
-  return [
-    ...p.real.map((r) => ({ hour: r.hour, price: r.price, observed: true })),
-    ...p.projected.map((x) => ({ hour: x.hour, price: x.central, observed: false })),
-  ];
-}
+/** El campo del histórico del que arranca cada pierna. Una sola definición. */
+export const FIELD_FOR_LEG: Record<MakerLeg, 'strategicBuyPrice' | 'strategicSellPrice'> = {
+  VENTA: 'strategicBuyPrice',
+  COMPRA: 'strategicSellPrice',
+};
 
-/**
- * Mayor margen del día, hora a hora.
- *
- * Sólo se compara una hora consigo misma: cruzar la venta de las 9 con la
- * compra de las 14 daría un margen que nunca estuvo disponible. El signo se
- * conserva — vender por debajo de donde se recompra es una pérdida y tiene que
- * seguir siendo distinguible de una ganancia.
- */
-export function maxSpreadOf(venta: LegProjection, compra: LegProjection): HourSpread | null {
-  const compraByHour = new Map(fullPath(compra).map((p) => [p.hour, p]));
-  let best: HourSpread | null = null;
 
-  for (const v of fullPath(venta)) {
-    const c = compraByHour.get(v.hour);
-    if (c === undefined || c.price <= 0) continue;
-    const spreadPct = ((v.price - c.price) / c.price) * 100;
-    if (best === null || Math.abs(spreadPct) > Math.abs(best.spreadPct)) {
-      best = { hour: v.hour, spreadPct, observed: v.observed && c.observed };
-    }
-  }
-  return best;
-}
 
-/**
- * Velocidad medida contra los propios días de la serie: los tercios de los
- * recorridos históricos ancla→cierre. Sin muestra, INDETERMINADA — nunca
- * "moderado" por defecto.
- */
-export function speedFor(changePct: number | null, historicalMoves: readonly number[]): DaySpeed {
-  if (changePct === null || historicalMoves.length < MIN_PROFILE_DAYS) return 'INDETERMINADA';
-  const sorted = [...historicalMoves].sort((a, b) => a - b);
-  const low = percentileOf(sorted, 1 / 3);
-  const high = percentileOf(sorted, 2 / 3);
-  if (low === null || high === null) return 'INDETERMINADA';
-  const magnitude = Math.abs(changePct);
-  if (magnitude <= low) return 'LENTO';
-  if (magnitude <= high) return 'MODERADO';
-  return 'RAPIDO';
-}
 
-/**
- * ¿Está girando ahora? Exige las dos cosas: que el último movimiento por hora
- * invierta el signo del anterior Y que supere el umbral medido. Un movimiento
- * grande que continúa la tendencia no es un giro; un cambio de signo minúsculo
- * es ruido.
- */
-export function detectTurn(
-  real: readonly { hour: number; price: number }[],
-  thresholdPct: number | null
-): boolean {
-  if (thresholdPct === null || real.length < 3) return false;
-  const [a, b, c] = real.slice(-3);
-  if (a.price <= 0 || b.price <= 0) return false;
-  const previous = (b.price - a.price) / a.price;
-  const latest = (c.price - b.price) / b.price;
-  if (previous === 0 || latest === 0) return false;
-  if (Math.sign(previous) === Math.sign(latest)) return false;
-  return Math.abs(latest) * 100 > thresholdPct;
-}
 
-/**
- * Cuánto del recorrido del día queda por delante.
- *
- * Recorrido = suma de movimientos absolutos hora a hora, no la diferencia entre
- * extremos: un día que sube 2 y baja 2 se movió, aunque acabe donde empezó.
- */
-export function remainingShare(
-  real: readonly { price: number }[],
-  projected: readonly { movePct: number | null }[]
-): number | null {
-  let past = 0;
-  for (let i = 1; i < real.length; i += 1) {
-    const from = real[i - 1].price;
-    if (from <= 0) continue;
-    past += Math.abs((real[i].price - from) / from) * 100;
-  }
-  let ahead = 0;
-  for (const p of projected) if (p.movePct !== null) ahead += Math.abs(p.movePct);
 
-  const total = past + ahead;
-  if (total <= 0) return null;
-  return (ahead / total) * 100;
-}
+
+
+
 
 const TIER_ORDER: DailyTier[] = ['SIN_DATOS', 'SOLO_HOY', 'PERFIL_LIMITADO', 'PERFIL_CONDICIONADO'];
 
@@ -320,23 +326,6 @@ function worstTier(legs: readonly LegProjection[]): DailyTier {
   );
 }
 
-/** Recorridos absolutos ancla→cierre observados en los días del histórico. */
-function historicalDayMoves(
-  points: readonly SeriesPoint[],
-  leg: MakerLeg,
-  anchorHour: number,
-  startHour: number,
-  endHour: number
-): number[] {
-  const moves: number[] = [];
-  for (const day of groupByDay(points, leg, startHour, endHour)) {
-    const from = day.hours.get(anchorHour);
-    const to = day.hours.get(endHour);
-    if (from === undefined || to === undefined || from.best <= 0) continue;
-    moves.push(Math.abs((to.best - from.best) / from.best) * 100);
-  }
-  return moves;
-}
 
 function summariseLeg(
   projection: LegProjection,
@@ -423,12 +412,43 @@ function variableReport(records: readonly HistoryRecord[], previousDays: number)
   return { used, availableNotUsed };
 }
 
+/**
+ * El estado que la pantalla puede prometer.
+ *
+ * VALIDADA exige que el backtest walk-forward gane a la persistencia en AMBAS
+ * piernas. Que una gane y la otra no significa que todavía no se sabe, y decir
+ * "validada" ahí sería vender media evidencia como entera.
+ */
+export function screenState(tier: DailyTier, legs: readonly DailyLegReport[]): ScreenState {
+  if (tier === 'SIN_DATOS') return 'SIN_DATOS';
+  if (tier === 'SOLO_HOY') return 'DATOS_INSUFICIENTES';
+  if (legs.length > 0 && legs.every((l) => l.backtest.beatsPersistence)) return 'PROYECCION_VALIDADA';
+  return tier === 'PERFIL_CONDICIONADO' ? 'PROYECCION_CONDICIONADA' : 'PROYECCION_LIMITADA';
+}
+
 export function buildDailyProjection(
   records: readonly HistoryRecord[],
   now: number,
   startHour = DEFAULT_DAY_START_HOUR,
   endHour = DEFAULT_DAY_END_HOUR
 ): DailyProjectionReport {
+  /*
+   * ═══ POR QUÉ ESTO FALLA EN VEZ DE DEGRADAR ═══
+   *
+   * `now` no es un dato de mercado: es el reloj, y en producción siempre llega
+   * de `Date.now()`. Un valor no finito no significa "hoy no hay datos",
+   * significa que quien llamó está roto.
+   *
+   * Devolver un informe SIN_DATOS aquí sería cómodo y sería mentira: la
+   * pantalla diría "no hay histórico" cuando el histórico puede estar entero y
+   * lo que falla es el reloj. Ese diagnóstico equivocado costaría más que el
+   * error. Así que se detiene, y el mensaje nombra el parámetro.
+   *
+   * La ruta ya envuelve esto en try/catch, de modo que el efecto visible es un
+   * 500 con una causa legible en vez de un `RangeError: Invalid time value`
+   * lanzado desde dentro de `toISOString`.
+   */
+  assertInstant(now, 'buildDailyProjection(now)');
   const ventaSeries = extractLegSeries(records, 'VENTA');
   const compraSeries = extractLegSeries(records, 'COMPRA');
 
@@ -453,26 +473,45 @@ export function buildDailyProjection(
    * usar dos obligaría a explicar cuál manda en el rótulo "AHORA".
    */
   const turn = turnThreshold(previousVenta);
+  const turnThresholdFor = turn;
+
+  const buildLeg = (
+    projection: LegProjection,
+    backtest: LegBacktest,
+    extraction: LegExtraction,
+    points: readonly SeriesPoint[],
+    previousDays: readonly ReturnType<typeof groupByDay>[number][]
+  ): DailyLegReport => {
+    const evidence = evidenceFor(projection, backtest);
+    return {
+      projection,
+      backtest,
+      evidence,
+      evidenceText: DAILY_EVIDENCE_TEXT[evidence],
+      label: LEG_LABEL[projection.leg],
+      extraction,
+      market: summariseLeg(projection, points, turn, startHour, endHour),
+      now: projection.anchorPrice,
+      nowOrigin: {
+        field: FIELD_FOR_LEG[projection.leg],
+        binanceSide: projection.binanceSide,
+        leg: projection.leg,
+        calculation:
+          projection.leg === 'VENTA'
+            ? 'máximo de strategicBuyPrice (mediana del lado Binance BUY) observado en la hora en curso'
+            : 'mínimo de strategicSellPrice (mediana del lado Binance SELL) observado en la hora en curso',
+        kind: 'OBSERVADO',
+        daysUsed: null,
+      },
+      opportunity: bestOpportunity(projection.projected, projection.leg, projection.anchorPrice),
+      favourableHours: favourableHours(previousDays, projection.leg, startHour, endHour),
+      turn: projectedTurn(projection.projected, turnThresholdFor.pct),
+    };
+  };
 
   const legs: DailyLegReport[] = [
-    {
-      projection: venta,
-      backtest: ventaBacktest,
-      evidence: evidenceFor(venta, ventaBacktest),
-      evidenceText: DAILY_EVIDENCE_TEXT[evidenceFor(venta, ventaBacktest)],
-      label: LEG_LABEL.VENTA,
-      extraction: ventaSeries.extraction,
-      market: summariseLeg(venta, ventaSeries.points, turn, startHour, endHour),
-    },
-    {
-      projection: compra,
-      backtest: compraBacktest,
-      evidence: evidenceFor(compra, compraBacktest),
-      evidenceText: DAILY_EVIDENCE_TEXT[evidenceFor(compra, compraBacktest)],
-      label: LEG_LABEL.COMPRA,
-      extraction: compraSeries.extraction,
-      market: summariseLeg(compra, compraSeries.points, turn, startHour, endHour),
-    },
+    buildLeg(venta, ventaBacktest, ventaSeries.extraction, ventaSeries.points, previousVenta),
+    buildLeg(compra, compraBacktest, compraSeries.extraction, compraSeries.points, previousCompra),
   ];
 
   // La ventana a vigilar sale de la pierna con el mayor movimiento esperado.
@@ -510,6 +549,8 @@ export function buildDailyProjection(
     watchWindow,
     tier,
     tierText: TIER_TEXT[tier],
+    state: screenState(tier, legs),
+    stateText: SCREEN_STATE_TEXT[screenState(tier, legs)],
     daysMissing: Math.max(0, MIN_PROFILE_DAYS - previousVenta.length),
     variables: variableReport(records, previousVenta.length),
   };

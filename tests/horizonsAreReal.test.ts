@@ -161,7 +161,10 @@ describe('LA INTERFAZ — dice el período, y no lo esconde', () => {
   const read = (file: string) => fs.readFileSync(path.join(process.cwd(), 'src', file), 'utf8');
 
   it('los tres horizontes muestran sus observaciones y sus minutos como texto', () => {
-    for (const file of ['MarketAnalysisPanel.tsx', 'MarketProjectionPanel.tsx']) {
+    // MarketProjectionPanel.tsx se eliminó al consolidar en un solo motor de
+    // proyección. La regla no era sobre ese fichero: es sobre toda vista que
+    // muestre horizontes, y las que quedan la siguen cumpliendo.
+    for (const file of ['MarketAnalysisPanel.tsx']) {
       const body = read(file);
       // El span estuvo en un atributo title, invisible en un móvil.
       expect(body, file).toMatch(/horizon\.spanMs/);
@@ -170,7 +173,7 @@ describe('LA INTERFAZ — dice el período, y no lo esconde', () => {
   });
 
   it('la banda proyectada muestra su horizonte sólo cuando está medido', () => {
-    for (const file of ['MarketAnalysisPanel.tsx', 'MarketProjectionPanel.tsx']) {
+    for (const file of ['MarketAnalysisPanel.tsx']) {
       const body = read(file);
       expect(body, file).toMatch(/range\.horizonMs !== null/);
     }
@@ -181,9 +184,15 @@ describe('LA INTERFAZ — dice el período, y no lo esconde', () => {
      * Un literal como "a 30 min" en el JSX sería un minuto inventado. Los
      * únicos minutos permitidos salen de una división de horizonMs o spanMs.
      */
-    for (const file of ['MarketAnalysisPanel.tsx', 'MarketProjectionPanel.tsx', 'MarketPulse.tsx']) {
+    for (const file of ['MarketAnalysisPanel.tsx', 'MarketPulse.tsx', 'ProjectionsPanel.tsx']) {
       const body = read(file).replace(/\/\*[\s\S]*?\*\//g, '');
-      const literals = body.match(/[^{}\w]\d+\s*min\b/g) ?? [];
+      /*
+       * `min` NO puede ir seguida de guion ni de letra: `flex-1 min-w-[190px]`
+       * de Tailwind casaba con el patrón anterior y denunciaba una clase CSS
+       * como si fuera un minuto inventado. Un literal de verdad —"a 30 min"—
+       * sigue cayendo.
+       */
+      const literals = body.match(/[^{}\w]\d+\s*min(?![-\w])/g) ?? [];
       expect(literals, file).toEqual([]);
     }
   });

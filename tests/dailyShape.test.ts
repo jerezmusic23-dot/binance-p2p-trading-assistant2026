@@ -16,7 +16,6 @@ import {
   LEG_BINANCE_SIDE,
   MIN_CONDITIONED_DAYS,
   MIN_PROFILE_DAYS,
-  backtestLeg,
   extremeForLeg,
   groupByDay,
   isBetterForLeg,
@@ -27,11 +26,12 @@ import {
   ratiosBetween,
   remainingExtremeRatios,
   selectAnalogousDays,
-  turnThreshold,
   venezuelaDayKey,
   venezuelaHourOf,
   type DayShape,
 } from '../server/projection/dailyShape.js';
+import { backtestLeg } from '../server/projection/dailyBacktest.js';
+import { turnThreshold } from '../server/projection/dailyOpportunity.js';
 import type { SeriesPoint } from '../server/projection/series.js';
 
 /** Instante de la hora local de Venezuela `hour` del día `day` de agosto 2026. */

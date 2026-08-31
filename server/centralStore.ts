@@ -232,7 +232,6 @@ export class CentralMarketStore {
   /** Projections and signals from the latest sweep. Recomputed, never stored. */
   private lastProjections: CellProjection[] = [];
   /** The same reading over the whole book. Recomputed with the rest. */
-  private lastMarketProjection: CellProjection | null = null;
   /**
    * The tail of the general series, for the chart that draws it.
    *
@@ -1375,31 +1374,34 @@ export class CentralMarketStore {
     }
 
     /*
-     * THE MARKET AS A WHOLE, READ BY THE SAME ENGINE AS EVERY CELL.
+     * LA SERIE GENERAL DEL LIBRO, SIN PROYECCIÓN ENCIMA.
      *
-     * The old ProjectionEngine used to answer this question with a different
-     * method - a 1.6-sigma band, a hand-picked session curve, a seasonal
-     * coefficient - and the two answers could disagree about the same market
-     * with nobody able to tell which was speaking. There is one engine now.
+     * ═══ POR QUÉ AQUÍ YA NO SE PROYECTA ═══
      *
-     * Labelled MERCADO_GENERAL because it describes the BOOK and is not a
-     * statement about any bank at any amount: bank and amountKey carry that
-     * name rather than a real cell's, so nothing downstream can mistake it.
+     * Hasta ahora esto llamaba a projectCell() con la serie maker general y le
+     * pasaba `strategicBuyPrice` / `strategicSellPrice` como precio actual. Eso
+     * cruzaba DOS CONVENIOS DE NOMBRES OPUESTOS:
+     *
+     *   HistoryRecord.strategicBuyPrice        = lado Binance BUY  = MI VENTA
+     *   HistoricalObservation.buyRecommendedPrice = mi anuncio de compra = MI COMPRA
+     *
+     * Es decir, el precio de MI VENTA entraba como ancla de una serie de MI
+     * COMPRA. Como mi venta está sistemáticamente por encima de mi recompra, el
+     * precio caía siempre por encima de los techos de la otra pierna y
+     * `detectBreakout` veía una ruptura alcista permanente que no existía.
+     * Nadie invirtió nada: se conectaron dos piezas que hablan idiomas
+     * distintos y el prefijo `buy` significaba lo contrario en cada una.
+     *
+     * La corrección es de contrato, no de etiqueta: la proyección del día vive
+     * ahora en un único motor (`server/projection/dailyShape.ts`), que lee
+     * directamente los campos del histórico y nombra cada pierna por LA
+     * OPERACIÓN. Aquí sólo se conserva la SERIE, que es lo único que se sigue
+     * consumiendo — el backtest de /api/market/projections/backtest la usa.
+     *
+     * `projectCell` sigue existiendo y sigue siendo correcto POR CELDA, donde
+     * el precio actual y la serie vienen del mismo convenio maker.
      */
     this.lastGeneralSeries = generalSeries.slice(-CentralMarketStore.GENERAL_SERIES_TAIL);
-    this.lastMarketProjection =
-      generalSeries.length === 0
-        ? null
-        : projectCell({
-            bank: GENERAL_MARKET_KEY,
-            bankDisplayName: 'Mercado general',
-            amountKey: GENERAL_MARKET_KEY,
-            amountVes: 0,
-            series: generalSeries,
-            currentBuyPrice: this.currentSnapshot?.strategicBuyPrice ?? null,
-            currentSellPrice: this.currentSnapshot?.strategicSellPrice ?? null,
-            includeDayPatterns: true,
-          });
 
     const evaluated = evaluateSignals({ projections, memory: this.signalMemory });
     this.signalMemory = evaluated.memory;
@@ -1430,11 +1432,16 @@ export class CentralMarketStore {
    * a market nobody has observed yet has no reading, and saying so is the
    * answer.
    */
-  public getMarketProjection(): {
-    projection: CellProjection | null;
-    series: HistoricalObservation[];
-  } {
-    return { projection: this.lastMarketProjection, series: this.lastGeneralSeries };
+  /**
+   * La serie general del libro: las observaciones de todas las celdas en una
+   * sola lista cronológica.
+   *
+   * Antes esto se llamaba `getMarketProjection()` y devolvía además una
+   * proyección construida cruzando dos convenios de nombres. La proyección se
+   * retiró; el nombre ahora dice exactamente lo que hay.
+   */
+  public getGeneralSeries(): HistoricalObservation[] {
+    return this.lastGeneralSeries;
   }
 
   /** The captured books, keyed by the tradeType each was requested with. */

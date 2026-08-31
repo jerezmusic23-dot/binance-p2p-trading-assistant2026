@@ -19,9 +19,7 @@ import {
 } from './GlobalFilterBar';
 
 import { MainOverview } from './MainOverview';
-import { MarketProjectionPanel } from './MarketProjectionPanel';
-import { ProbabilisticProjectionPanel } from './ProbabilisticProjectionPanel';
-import { DailyFluctuationPanel } from './DailyFluctuationPanel';
+import { ProjectionsPanel } from './ProjectionsPanel';
 import { BankMatrix } from './BankMatrix';
 import { MakerMatrix } from './MakerMatrix';
 import { MarketAnalysisPanel } from './MarketAnalysisPanel';
@@ -421,55 +419,19 @@ export default function App() {
 
         {/* PROJECTIONS */}
         {/*
-          DailyFluctuationChart USED TO BE HERE.
+          UN SOLO SISTEMA DE PROYECCIONES.
 
-          It drew the old engine's forecast: a per-hour session curve for the
-          hours that had not happened yet, a 1.6-sigma daily band, and a
-          "spread máximo esperado" that was the current spread times 1.15.
-          Nothing in it was measured. MarketProjectionPanel answers the same
-          question from the stored series - the real history, then a band that
-          is the 10th and 90th percentile of the moves the book actually made.
+          Aquí había tres paneles alimentados por tres motores distintos que
+          respondían a la misma pregunta con métodos distintos, y ninguno decía
+          cuál hablaba. Los dos antiguos —ProbabilisticProjectionPanel sobre
+          /projections/analog y MarketProjectionPanel sobre /projections/general—
+          se han eliminado junto con sus rutas.
+
+          Queda uno: ProjectionsPanel, sobre /projections/daily, que nombra cada
+          pierna por LA OPERACIÓN del propietario (MI VENTA = Binance BUY,
+          MI COMPRA = Binance SELL) y publica la procedencia de cada precio.
         */}
-        {/*
-          DOS LECTURAS DISTINTAS, UNA DEBAJO DE OTRA, Y NO SE MEZCLAN.
-
-          ProbabilisticProjectionPanel responde "¿qué pasó históricamente en las
-          situaciones parecidas a la de ahora?" sobre market_history.json, con
-          los casos concretos detrás de cada porcentaje y un contraste contra
-          la persistencia que decide si puede presentarse como utilizable.
-
-          MarketProjectionPanel, debajo, sigue describiendo el libro maker
-          desde la serie de celdas: tendencia por horizontes y banda empírica.
-          Describe el AHORA; no proyecta probabilidades. Van separadas a
-          propósito: son dos series y dos preguntas, y promediarlas daría un
-          número que ninguna de las dos respalda.
-        */}
-        {/*
-          TRES LECTURAS, TRES PREGUNTAS, Y NO SE MEZCLAN.
-
-          DailyFluctuationPanel va primero porque responde la pregunta más
-          concreta: qué le queda por hacer al día de HOY, hora a hora, hasta el
-          cierre. Usa el día como unidad de evidencia —qué hicieron los días
-          anteriores entre esta hora y las 8— y por eso alcanza el cierre de la
-          jornada con 5 días, cuando el motor de analogías necesitaría ~18 para
-          el mismo horizonte.
-
-          ProbabilisticProjectionPanel responde "¿qué pasó históricamente en las
-          situaciones parecidas a la de ahora?" a +15m, +1h, +4h, con los casos
-          concretos detrás de cada porcentaje.
-
-          MarketProjectionPanel describe el AHORA del libro maker. No proyecta.
-
-          Son tres estimadores distintos sobre datos distintos. Promediar sus
-          curvas daría un número que ninguno de los tres respalda.
-        */}
-        {activeTab === 'projections' && (
-          <div className="space-y-6">
-            <DailyFluctuationPanel />
-            <ProbabilisticProjectionPanel />
-            <MarketProjectionPanel />
-          </div>
-        )}
+        {activeTab === 'projections' && <ProjectionsPanel />}
 
         {/* WHAT PRICE MY OWN AD SHOULD CARRY */}
         {activeTab === 'publish' && <MakerMatrix />}

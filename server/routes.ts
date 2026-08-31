@@ -100,107 +100,19 @@ apiRouter.get('/market/projections/maker', (_req, res) => {
 });
 
 /*
- * THE WHOLE BOOK, READ BY THE SAME ENGINE AS EVERY CELL.
+ * PROYECCIÓN DEL DÍA — EL ÚNICO MOTOR DE PROYECCIÓN DE LA PANTALLA.
  *
- * This replaces /market/projections, which was served by the old
- * ProjectionEngine: a 1.6-sigma band around a rolling min/max, a hand-picked
- * intraday session curve, a 0.0035 seasonal coefficient and a point-scored
- * probability distribution. None of those coefficients was measured, and the
- * screen presented all of them as a forecast.
+ * Sustituye a /projections/general y a /projections/analog, que se han
+ * eliminado. Los tres respondían a la misma pregunta con métodos distintos y
+ * la pantalla mostraba las tres a la vez, sin que nadie pudiera decir cuál
+ * hablaba. Ahora hay uno.
  *
- * What comes back instead is a projection over the general series - every
- * cell's observations in one chronological list - computed by
- * makerProjectionEngine: three trend horizons with their real spans, an
- * empirical band that is the 10th and 90th percentiles of the moves this book
- * actually made, zones the price genuinely turned in, and a horizon in minutes
- * measured from the observed cadence. Empty until the first sweep has written
- * observations: a market nobody has observed has no reading.
- */
-apiRouter.get('/market/projections/general', (_req, res) => {
-  try {
-    const { projection, series } = centralStore.getMarketProjection();
-    res.json({ projection, series });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message || 'Error building market projection' });
-  }
-});
-
-/*
- * PROYECCIÓN PROBABILÍSTICA DEL MERCADO, POR ANALOGÍA HISTÓRICA.
+ * Proyecta HORA A HORA hasta el cierre de la jornada usando EL DÍA como unidad
+ * de evidencia, y nombra cada pierna por la operación del propietario:
+ * MI VENTA (lado Binance BUY) y MI COMPRA (lado Binance SELL).
  *
- * Distinta de /projections/general, y no la sustituye: aquélla lee la serie de
- * celdas y da tendencia y banda empírica del libro maker. Ésta lee
- * market_history.json —la serie global de un registro por minuto— y responde a
- * "qué pasó históricamente en las situaciones parecidas a la de ahora".
- *
- * Todo número que sale de aquí llega con su procedencia: cuántos casos lo
- * sostienen, cuáles son con su fecha, contra qué deriva de régimen se
- * juzgaron, en qué estado está el horizonte (READY / INSUFFICIENT_DATA /
- * INSUFFICIENT_ANALOGIES / LOW_CONFIDENCE / NO_EDGE) y si el backtest contra
- * la persistencia lo respalda.
- *
- * LA CAPTURA ES PRIORITARIA.
- *
- * El backtest recorre el histórico una vez por ancla y tarda segundos. Dos
- * defensas, porque una sola no basta:
- *
- *   1. Se usa la variante ASÍNCRONA, que cede el hilo cada pocas anclas. El
- *      trabajo total es el mismo pero ningún bloque bloquea el poll de
- *      Binance.
- *   2. Se cachea contra el ESTADO REAL de la serie —cuántos registros hay y
- *      cuál es el último—, no contra el reloj. Un TTL podría servir datos
- *      viejos o recalcular sin que hubiera cambiado nada; así un registro
- *      nuevo invalida la caché al instante y nunca se sirve una proyección que
- *      no corresponda a los datos actuales.
- *
- * Y un cerrojo: si llegan dos peticiones mientras se calcula, la segunda
- * espera al mismo cálculo en vez de lanzar otro.
- */
-let analogCache: { key: string; report: MarketProjectionReport } | null = null;
-let analogInFlight: { key: string; promise: Promise<MarketProjectionReport> } | null = null;
-
-apiRouter.get('/market/projections/analog', async (_req, res) => {
-  try {
-    const records = StorageEngine.getHistory();
-    const newest = records.length > 0 ? records[records.length - 1].timestamp : 0;
-    const key = `${records.length}:${newest}`;
-
-    if (analogCache !== null && analogCache.key === key) {
-      res.json(analogCache.report);
-      return;
-    }
-
-    if (analogInFlight === null || analogInFlight.key !== key) {
-      analogInFlight = {
-        key,
-        promise: buildMarketProjectionAsync({ readRecords: () => records, trackForecasts: true }),
-      };
-    }
-
-    const report = await analogInFlight.promise;
-    analogCache = { key, report };
-    analogInFlight = null;
-    res.json(report);
-  } catch (err: any) {
-    analogInFlight = null;
-    res.status(500).json({ error: err.message || 'Error building market projection' });
-  }
-});
-
-/*
- * PROYECCIÓN DE FLUCTUACIÓN DIARIA.
- *
- * Distinta de /projections/analog y no la sustituye. Aquélla proyecta a +15m,
- * +1h, +4h buscando analogías minuto a minuto; ésta proyecta HORA A HORA hasta
- * el cierre de la jornada usando el día como unidad de evidencia. Son dos
- * estimadores con dos requisitos de datos distintos, y por eso conviven: para
- * llegar a las 8 de la tarde el primero necesita ~18 días de serie continua y
- * el segundo empieza a poder decir algo con 5.
- *
- * No se cachea: el cálculo recorre el histórico una vez por lado y agrupa por
- * horas, que es trabajo lineal y barato comparado con la búsqueda de analogías
- * del otro endpoint. Añadir caché aquí sería complejidad sin medida que la
- * respalde.
+ * No se cachea: recorre el histórico una vez por pierna y agrupa por horas,
+ * que es trabajo lineal. Añadir caché sería complejidad sin medida detrás.
  */
 apiRouter.get('/market/projections/daily', (_req, res) => {
   try {
@@ -319,7 +231,7 @@ apiRouter.get('/market/projections/backtest', (req, res) => {
      */
     const general = bank === GENERAL_MARKET_KEY;
     const series = general
-      ? centralStore.getMarketProjection().series
+      ? centralStore.getGeneralSeries()
       : HistoricalMarketStore.load(bank, amountKey);
 
     res.json({

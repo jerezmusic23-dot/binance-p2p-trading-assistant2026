@@ -224,6 +224,14 @@ describe('every percentage on the screen is a frequency or a price ratio', () =>
      * anclas que la sostienen. No es una confianza elegida.
      */
     'coverage',
+    /*
+     * `favourability.score` es el rango MEDIO que una hora ocupó dentro de su
+     * propia jornada, entre 0 y 1: un recuento de posiciones partido por el
+     * número de días, no una confianza elegida. Se normaliza dentro del día
+     * precisamente para que la deriva del VES no lo contamine, y viaja con
+     * `daysUsed` al lado.
+     */
+    'favourability.score',
     'upRate',
     'flatRate',
     'downRate',

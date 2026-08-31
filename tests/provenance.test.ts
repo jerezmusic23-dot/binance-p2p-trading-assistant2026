@@ -155,8 +155,11 @@ describe('the heuristic forecast engine is gone, not hidden', () => {
     expect(routes).not.toMatch(/'\/market\/analysis'/);
     expect(routes).not.toMatch(/'\/market\/projections'/);
     expect(routes).not.toMatch(/'\/market\/backtest'/);
-    // And the replacement is there.
-    expect(routes).toMatch(/'\/market\/projections\/general'/);
+    /*
+     * El reemplazo ya no es /projections/general: al consolidar en un solo
+     * motor, general y analog se eliminaron y queda /projections/daily.
+     */
+    expect(routes).toMatch(/'\/market\/projections\/daily'/);
   });
 
   it('the interface no longer renders a probability distribution', () => {

@@ -794,18 +794,6 @@ export interface CellSeriesResponse {
   observations: SeriesPoint[];
 }
 
-/**
- * THE WHOLE BOOK, READ BY THE SAME ENGINE AS EVERY CELL.
- *
- * `projection` carries MERCADO_GENERAL as its bank and amountKey, because it
- * describes the book and is not a statement about any bank at any amount.
- * null before the first sweep has written observations.
- */
-export interface GeneralProjectionResponse {
-  projection: CellProjection | null;
-  series: SeriesPoint[];
-}
-
 /** One anchor of the walk-forward replay. */
 export interface BacktestAnchor {
   index: number;
@@ -967,271 +955,6 @@ export type ProjectionOutcome = 'UP' | 'FLAT' | 'DOWN';
  */
 export type ProjectionDirection = 'ALCISTA' | 'BAJISTA' | 'LATERAL' | 'INDETERMINADA';
 
-export type ProjectionStrength =
-  | 'MUY_DEBIL'
-  | 'DEBIL'
-  | 'MODERADA'
-  | 'FUERTE'
-  | 'MUY_FUERTE';
-
-/** Sólo READY significa "esto puede usarse". */
-export type ProjectionStatus =
-  | 'READY'
-  | 'INSUFFICIENT_DATA'
-  | 'INSUFFICIENT_ANALOGIES'
-  | 'LOW_CONFIDENCE'
-  | 'NO_EDGE';
-
-export interface ProjectionPoint {
-  t: number;
-  price: number;
-}
-
-export interface AnalogueSample {
-  t: number;
-  price: number;
-  delta: number;
-  outcome: ProjectionOutcome;
-  distance: number;
-}
-
-export interface ProjectionScenario {
-  kind: 'BAJISTA' | 'CENTRAL' | 'ALCISTA';
-  outcome: ProjectionOutcome;
-  cases: number;
-  probability: number;
-  probabilityLow: number | null;
-  probabilityHigh: number | null;
-  low: number | null;
-  high: number | null;
-  median: number | null;
-  hasRange: boolean;
-}
-
-export interface ProjectionAudit {
-  observations: number;
-  firstTimestamp: number | null;
-  lastTimestamp: number | null;
-  medianIntervalMs: number | null;
-  typicalStep: number | null;
-  horizonSteps: number;
-  measuredHorizonMs: number | null;
-  lookbackSteps: number;
-  candidatePool: number;
-  analoguesUsed: number;
-  independentAnalogues: number;
-  maxDistanceUsed: number | null;
-  stateScales: Record<string, number>;
-  upCount: number;
-  flatCount: number;
-  downCount: number;
-  regimeDelta: number | null;
-  directionThreshold: number | null;
-  p10: number | null;
-  p50: number | null;
-  p90: number | null;
-  samples: AnalogueSample[];
-}
-
-export interface HorizonProjection {
-  requestedHorizonMs: number;
-  label: string;
-  estimatedAt: number | null;
-  status: ProjectionStatus;
-  statusText: string;
-  available: boolean;
-  currentPrice: number | null;
-  central: number | null;
-  low: number | null;
-  high: number | null;
-  probabilityUp: number | null;
-  probabilityFlat: number | null;
-  probabilityDown: number | null;
-  probabilityUpLow: number | null;
-  probabilityUpHigh: number | null;
-  direction: ProjectionDirection | null;
-  strength: ProjectionStrength | null;
-  scenarios: ProjectionScenario[];
-  evidence: string | null;
-  audit: ProjectionAudit | null;
-}
-
-export interface CalibrationBucket {
-  from: number;
-  to: number;
-  predictions: number;
-  meanPredicted: number | null;
-  observedFrequency: number | null;
-  margin: number | null;
-  overconfident: boolean;
-}
-
-export interface CalibrationReport {
-  buckets: CalibrationBucket[];
-  brier: number | null;
-  brierBaseline: number | null;
-  worstOverconfidence: number | null;
-  overconfident: boolean;
-  predictions: number;
-}
-
-export interface BaselineReport {
-  requestedHorizonMs: number;
-  label: string;
-  anchors: number;
-  skipped: number;
-  anchorStride: number;
-  directionalAccuracy: number | null;
-  persistenceDirectionalAccuracy: number | null;
-  bandCoverage: number | null;
-  coverageTarget: number;
-  medianBandWidth: number | null;
-  modelMedianAbsError: number | null;
-  persistenceMedianAbsError: number | null;
-  modelBetterCount: number;
-  persistenceBetterCount: number;
-  tiedCount: number;
-  pValue: number | null;
-  alpha: number | null;
-  familySize: number | null;
-  beatsPersistence: boolean | null;
-  calibration: CalibrationReport;
-  reason: 'INSUFFICIENT_ANCHORS' | null;
-}
-
-export type MomentumLabel =
-  | 'FUERTE_ALCISTA'
-  | 'ALCISTA'
-  | 'ALCISTA_DEBIL'
-  | 'NEUTRAL'
-  | 'BAJISTA_DEBIL'
-  | 'BAJISTA'
-  | 'FUERTE_BAJISTA';
-
-export type MomentumTrend = 'AUMENTANDO' | 'ESTABLE' | 'DISMINUYENDO' | 'INDETERMINADO';
-
-export type MovementDirection = 'ALCISTA' | 'BAJISTA' | 'LATERAL' | 'INDETERMINADA';
-
-export type EvidenceTier =
-  | 'SIN_DATOS'
-  | 'DATOS_INSUFICIENTES'
-  | 'HISTORICO_LIMITADO'
-  | 'HISTORICO_SUFICIENTE'
-  | 'ALTA_CONFIANZA_ESTADISTICA';
-
-export interface MomentumFactors {
-  driftSteps: number | null;
-  velocity: number | null;
-  acceleration: number | null;
-  persistence: number | null;
-  consecutiveMoves: number | null;
-  volatility: number | null;
-}
-
-export interface MomentumReading {
-  score: number | null;
-  label: MomentumLabel | null;
-  trend: MomentumTrend;
-  history: number[];
-  factors: MomentumFactors;
-  sampleSize: number;
-  windowSteps: number;
-}
-
-export interface HorizonMovement {
-  label: string;
-  requestedMs: number;
-  windowSteps: number;
-  measuredMs: number | null;
-  available: boolean;
-  direction: MovementDirection;
-  momentum: MomentumReading;
-}
-
-export interface LiquiditySnapshot {
-  buyUsdt: number | null;
-  sellUsdt: number | null;
-  buyAds: number | null;
-  sellAds: number | null;
-  buyChange: number | null;
-  sellChange: number | null;
-}
-
-export interface MarketReadingResult {
-  observations: number;
-  firstTimestamp: number | null;
-  lastTimestamp: number | null;
-  spanMs: number | null;
-  medianIntervalMs: number | null;
-  currentPrice: number | null;
-  typicalStep: number | null;
-  movement: MomentumReading;
-  movementText: string | null;
-  horizons: HorizonMovement[];
-  predominant: { direction: MovementDirection; note: string };
-  liquidity: LiquiditySnapshot | null;
-  evidence: EvidenceTier;
-  evidenceText: string;
-  narrative: string[];
-}
-
-export interface ForecastPerformance {
-  horizonMs: number;
-  label: string;
-  evaluated: number;
-  pending: number;
-  unevaluable: number;
-  directionalAccuracy: number | null;
-  bandCoverage: number | null;
-  medianAbsError: number | null;
-  persistenceMedianAbsError: number | null;
-  bias: number | null;
-  beatsPersistence: boolean | null;
-  reason: 'INSUFFICIENT_EVALUATED' | null;
-}
-
-export interface ForecastReport {
-  totalForecasts: number;
-  evaluated: number;
-  pending: number;
-  unevaluable: number;
-  byHorizon: ForecastPerformance[];
-  byMomentum: { label: MomentumLabel; evaluated: number; directionalAccuracy: number | null }[];
-  verdict: string;
-}
-
-export interface MarketSideProjection {
-  side: 'BUY' | 'SELL';
-  reading: MarketReadingResult;
-  seriesId: string;
-  label: string;
-  generatedAt: number;
-  observations: number;
-  firstTimestamp: number | null;
-  lastTimestamp: number | null;
-  medianIntervalMs: number | null;
-  typicalStep: number | null;
-  currentPrice: number | null;
-  history: ProjectionPoint[];
-  horizons: HorizonProjection[];
-  baselines: BaselineReport[];
-  usable: boolean;
-  notice: string | null;
-  extraction: {
-    recordsRead: number;
-    droppedLegacy: number;
-    droppedInvalid: number;
-  };
-}
-
-export interface MarketProjectionResponse {
-  generatedAt: number;
-  source: 'market_history.json';
-  sides: MarketSideProjection[];
-  usable: boolean;
-  forecastPerformance: ForecastReport | null;
-}
-
 /*
  * PROYECCIÓN DE FLUCTUACIÓN DIARIA — MI VENTA Y MI COMPRA
  * ======================================================
@@ -1250,6 +973,12 @@ export type DailyTier = 'SIN_DATOS' | 'SOLO_HOY' | 'PERFIL_LIMITADO' | 'PERFIL_C
 export type DayDirection = 'SUBIENDO' | 'BAJANDO' | 'LATERAL' | 'INDETERMINADA';
 export type DaySpeed = 'LENTO' | 'MODERADO' | 'RAPIDO' | 'INDETERMINADA';
 export type DailyBandKind = 'P10_P90' | 'RANGO_OBSERVADO';
+export type ScreenState =
+  | 'SIN_DATOS'
+  | 'DATOS_INSUFICIENTES'
+  | 'PROYECCION_LIMITADA'
+  | 'PROYECCION_CONDICIONADA'
+  | 'PROYECCION_VALIDADA';
 export type DailyEvidenceLevel =
   | 'SIN_DATOS_SUFICIENTES'
   | 'SOLO_OBSERVACION'
@@ -1312,6 +1041,41 @@ export interface DailyExtreme {
   projected: { price: number; low: number; high: number; daysUsed: number } | null;
   dayBest: number | null;
   dayBestIsProjected: boolean;
+  origin: PriceOrigin;
+}
+
+/** De dónde sale un precio. Obligatorio: ninguna cifra puede ser mágica. */
+export interface PriceOrigin {
+  field: 'strategicBuyPrice' | 'strategicSellPrice';
+  binanceSide: 'BUY' | 'SELL';
+  leg: MakerLeg;
+  calculation: string;
+  kind: 'OBSERVADO' | 'PROYECTADO';
+  daysUsed: number | null;
+}
+
+export interface LegOpportunity {
+  hour: number;
+  price: number;
+  low: number;
+  high: number;
+  bandKind: DailyBandKind;
+  daysUsed: number;
+  improvesOnNow: boolean;
+  improvementPct: number | null;
+}
+
+export interface HourFavourability {
+  hour: number;
+  score: number;
+  daysUsed: number;
+}
+
+export interface ProjectedTurn {
+  hour: number;
+  from: 'SUBIENDO' | 'BAJANDO';
+  to: 'SUBIENDO' | 'BAJANDO';
+  movePct: number;
 }
 
 export interface DailyLegReport {
@@ -1322,6 +1086,11 @@ export interface DailyLegReport {
   label: string;
   extraction: { recordsRead: number; droppedLegacy: number; droppedInvalid: number };
   market: { leg: MakerLeg; direction: DayDirection; speed: DaySpeed; changePct: number | null };
+  now: number | null;
+  nowOrigin: PriceOrigin;
+  opportunity: LegOpportunity | null;
+  favourableHours: HourFavourability[];
+  turn: ProjectedTurn | null;
 }
 
 export interface DailyProjectionResponse {
@@ -1341,6 +1110,8 @@ export interface DailyProjectionResponse {
   watchWindow: { fromHour: number; toHour: number; movePct: number; leg: MakerLeg } | null;
   tier: DailyTier;
   tierText: string;
+  state: ScreenState;
+  stateText: string;
   daysMissing: number;
   variables: {
     used: string[];

@@ -34,6 +34,38 @@
  * parameter as the advertiser's side is the inversion this module exists to
  * make impossible.
  *
+ * ═══════════════════════════════════════════════════════════════════════
+ * DOS ROLES, EL MISMO NÚMERO. LÉASE ESTO ANTES DE "CORREGIR" NADA AQUÍ.
+ * ═══════════════════════════════════════════════════════════════════════
+ *
+ * Este módulo describe al TAKER: alguien que cruza el spread. Para él,
+ * tradeType 'BUY' es de verdad una compra, porque paga el ask.
+ *
+ * El propietario también opera como MAKER, publicando anuncios, y en ese rol el
+ * MISMO lado significa lo contrario:
+ *
+ *              tradeType='BUY' (el ask)      tradeType='SELL' (el bid)
+ *   TAKER      compro, pago el ask           vendo, cobro el bid
+ *   MAKER      publico mi VENTA aquí         publico mi COMPRA aquí
+ *
+ * Las dos lecturas son correctas: un maker que quiere vender compite con los
+ * anuncios que devuelve 'BUY', porque son los rivales que verá su comprador.
+ * Y por eso el maker gana el spread donde el taker lo paga.
+ *
+ * El mapa del maker vive en `projection/dailyShape.ts` (`LEG_BINANCE_SIDE`):
+ *
+ *   MI VENTA  = tradeType 'BUY'  = strategicBuyPrice  -> techo
+ *   MI COMPRA = tradeType 'SELL' = strategicSellPrice -> piso
+ *
+ * NO renombrar `arbitrageBuyPrice` a "mi venta". Sería falso en este rol:
+ * `isArbitrageOpportunity` compara la entrada contra la salida DEL TAKER, y
+ * cambiarle el nombre invertiría el sentido de una comparación que decide si
+ * una operación gana o pierde dinero. Los dos módulos no se contradicen; hablan
+ * de dos operaciones distintas sobre el mismo libro.
+ *
+ * `tests/arbitrageSideSemantics.test.ts` fija que ambos mapas apuntan al mismo
+ * lado de Binance, de modo que si alguien invierte uno de los dos, salta.
+ *
  * HOW TO FALSIFY IT WITH DATA
  *
  * In a functioning market the ask sits at or above the bid, because crossing

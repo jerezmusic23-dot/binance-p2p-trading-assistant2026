@@ -14,7 +14,10 @@ export * from './backtest.js';
 export * from './momentum.js';
 export * from './reading.js';
 export * from './forecastEvaluation.js';
+export * from './venezuelaClock.js';
 export * from './dailyShape.js';
+export * from './dailyBacktest.js';
+export * from './dailyOpportunity.js';
 
 import {
   DEFAULT_HORIZONS_MS,

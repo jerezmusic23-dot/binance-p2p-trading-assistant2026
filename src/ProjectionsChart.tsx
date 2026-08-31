@@ -1,6 +1,6 @@
 /**
- * EL DÍA, DE 8 A 20, SIN CONFUNDIR LO VIVIDO CON LO PROYECTADO
- * ============================================================
+ * LA GRÁFICA ÚNICA: EL DÍA SIN CONFUNDIR LO VIVIDO CON LO PROYECTADO
+ * =================================================================
  *
  * Lo que este componente tiene que hacer imposible es que alguien lea un precio
  * proyectado creyendo que ocurrió. Por eso, igual que en la gráfica de
@@ -91,7 +91,7 @@ interface Props {
   report: DailyProjectionResponse;
 }
 
-export const DailyFluctuationChart: React.FC<Props> = ({ report }) => {
+export const ProjectionsChart: React.FC<Props> = ({ report }) => {
   const rows = buildRows(report);
   const anchorLabel = hourLabel(report.anchorHour);
   const hasProjection = report.legs.some((l) => l.projection.projected.length > 0);

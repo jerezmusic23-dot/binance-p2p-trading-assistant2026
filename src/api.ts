@@ -3,8 +3,6 @@ import {
   ExecutableMatrixResponse,
   MakerMatrixResponse,
   MakerProjectionsResponse,
-  GeneralProjectionResponse,
-  MarketProjectionResponse,
   DailyProjectionResponse,
   CellSeriesResponse,
   OpportunitiesResponse,
@@ -92,27 +90,6 @@ export class ApiService {
     return requestJson<MakerProjectionsResponse>('/api/market/projections/maker');
   }
 
-  /**
-   * The whole book, read by the SAME engine as every cell.
-   *
-   * This replaced getMarketProjections(), which was served by the old
-   * ProjectionEngine and returned a 1.6-sigma band, a hand-picked session
-   * curve and a point-scored probability distribution. What comes back here
-   * is empirical: percentiles of moves the book actually made, zones it
-   * actually turned in, and a horizon measured from the observed cadence.
-   */
-  public static async getGeneralProjection(): Promise<GeneralProjectionResponse> {
-    return requestJson<GeneralProjectionResponse>('/api/market/projections/general');
-  }
-
-  /*
-   * La proyección por analogía sobre market_history.json. El servidor la
-   * cachea contra el estado de la serie, así que pedirla a menudo es barato,
-   * pero recorrer el histórico con backtest no lo es la primera vez.
-   */
-  public static async getAnalogProjection(): Promise<MarketProjectionResponse> {
-    return requestJson<MarketProjectionResponse>('/api/market/projections/analog');
-  }
 
   /*
    * La proyección de fluctuación del día en curso.

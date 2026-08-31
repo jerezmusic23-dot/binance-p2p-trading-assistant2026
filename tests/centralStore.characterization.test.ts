@@ -82,7 +82,14 @@ describe('getCurrentSnapshot before any poll', () => {
      * and the store says so rather than returning a shape full of nulls.
      */
     const { store } = await freshStore();
-    expect(store.getMarketProjection()).toEqual({ projection: null, series: [] });
+    /*
+     * `getMarketProjection()` devolvía además una proyección del mercado
+     * general construida cruzando dos convenios de nombres. Esa proyección se
+     * retiró y el accesor pasa a llamarse por lo que de verdad entrega. La
+     * pregunta sobrevive intacta: un mercado que nadie ha observado no tiene
+     * lectura, y la tienda lo dice con una lista vacía.
+     */
+    expect(store.getGeneralSeries()).toEqual([]);
   });
 });
 
@@ -564,7 +571,7 @@ describe('analysis / projections window', () => {
     const spy = vi.spyOn(StorageEngine, 'getHistory');
 
     await store.pollMarket();
-    store.getMarketProjection();
+    store.getGeneralSeries();
 
     // The projection path does not consult the global history at all.
     expect(spy).not.toHaveBeenCalled();

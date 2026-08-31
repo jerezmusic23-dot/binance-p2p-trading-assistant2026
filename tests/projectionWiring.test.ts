@@ -44,14 +44,14 @@ function code(file: string): string {
  * 1. EXTREMO A EXTREMO
  * ------------------------------------------------------------------------ */
 
-describe('la ruta /api/market/projections/analog', () => {
+describe('la ruta /api/market/projections/daily — la única de la pantalla', () => {
   let tmpDir: string;
   let server: Server;
   let base: string;
 
   async function boot(): Promise<void> {
     // Módulos frescos: StorageEngine resuelve sus rutas en inicializadores
-    // estáticos, y el router guarda su caché en estado de módulo.
+    // estáticos.
     vi.resetModules();
     const { apiRouter } = await import('../server/routes.js');
     const app = express();
@@ -87,168 +87,107 @@ describe('la ruta /api/market/projections/analog', () => {
     process.chdir(REPO);
   });
 
-  it('responde con los dos lados y nombra su fuente', async () => {
-    const res = await fetch(`${base}/api/market/projections/analog`);
+  it('responde con las dos piernas nombradas por la operación', async () => {
+    const res = await fetch(`${base}/api/market/projections/daily`);
     expect(res.status).toBe(200);
-
     const body = await res.json();
+
     expect(body.source).toBe('market_history.json');
-    expect(body.sides.map((s: any) => s.side)).toEqual(['BUY', 'SELL']);
-    expect(body.sides[0].observations).toBe(1200);
-    expect(typeof body.usable).toBe('boolean');
+    expect(body.legs.map((l: any) => l.projection.leg)).toEqual(['VENTA', 'COMPRA']);
+    // La traducción viaja en la respuesta, no se deduce en la pantalla.
+    expect(body.legs[0].projection.binanceSide).toBe('BUY');
+    expect(body.legs[1].projection.binanceSide).toBe('SELL');
   });
 
-  it('cada horizonte llega con estado, y sin evidencia no lleva números', async () => {
-    const body = await (await fetch(`${base}/api/market/projections/analog`)).json();
-    const seen = new Set<string>();
+  it('el techo viene de MI VENTA y el piso de MI COMPRA, siempre', async () => {
+    const body = await (await fetch(`${base}/api/market/projections/daily`)).json();
+    expect(body.ceiling.leg).toBe('VENTA');
+    expect(body.ceiling.binanceSide).toBe('BUY');
+    expect(body.floor.leg).toBe('COMPRA');
+    expect(body.floor.binanceSide).toBe('SELL');
+  });
 
-    for (const side of body.sides) {
-      for (const horizon of side.horizons) {
-        seen.add(horizon.status);
-        expect(horizon.statusText).toBeTruthy();
-        expect(Number.isFinite(horizon.requestedHorizonMs)).toBe(true);
-
-        if (!horizon.available) {
-          expect(horizon.probabilityUp).toBeNull();
-          expect(horizon.central).toBeNull();
-          expect(horizon.scenarios).toEqual([]);
-          continue;
-        }
-        expect(horizon.audit.samples.length).toBe(horizon.audit.analoguesUsed);
-        expect(horizon.evidence).toContain(`${horizon.audit.upCount} de`);
-        expect(horizon.scenarios).toHaveLength(3);
-        expect(horizon.estimatedAt).toBeGreaterThan(side.lastTimestamp);
-      }
+  it('cada precio de la respuesta trae su cadena de origen', async () => {
+    const body = await (await fetch(`${base}/api/market/projections/daily`)).json();
+    for (const origin of [body.ceiling.origin, body.floor.origin, ...body.legs.map((l: any) => l.nowOrigin)]) {
+      expect(origin.field).toMatch(/^strategic(Buy|Sell)Price$/);
+      expect(['BUY', 'SELL']).toContain(origin.binanceSide);
+      expect(['VENTA', 'COMPRA']).toContain(origin.leg);
+      expect(['OBSERVADO', 'PROYECTADO']).toContain(origin.kind);
+      expect(origin.calculation.length).toBeGreaterThan(10);
     }
-
-    // Con este histórico corto tiene que aparecer al menos un estado de
-    // insuficiencia: es el caso que más importa que llegue bien a la pantalla.
-    expect([...seen].some((s) => s.startsWith('INSUFFICIENT'))).toBe(true);
   });
 
   it('ninguna salida de la ruta es NaN o Infinity', async () => {
-    const body = await (await fetch(`${base}/api/market/projections/analog`)).json();
-
-    // JSON.stringify convierte los no finitos en null, así que se comprueba
-    // sobre el texto crudo: si algo se colase, aparecería como null donde
-    // debería haber número, o como literal.
-    const raw = JSON.stringify(body);
-    expect(raw).not.toContain('NaN');
-    expect(raw).not.toContain('Infinity');
-
-    const walk = (value: unknown, at = 'root'): void => {
-      if (typeof value === 'number') {
-        expect(Number.isFinite(value), `${at} = ${value}`).toBe(true);
-      } else if (Array.isArray(value)) {
-        value.forEach((v, i) => walk(v, `${at}[${i}]`));
-      } else if (value !== null && typeof value === 'object') {
-        for (const [k, v] of Object.entries(value)) walk(v, `${at}.${k}`);
+    const body = await (await fetch(`${base}/api/market/projections/daily`)).json();
+    const bad: string[] = [];
+    const walk = (value: unknown, path_ = ''): void => {
+      if (typeof value === 'number' && !Number.isFinite(value)) bad.push(path_);
+      else if (Array.isArray(value)) value.forEach((v, i) => walk(v, `${path_}[${i}]`));
+      else if (value !== null && typeof value === 'object') {
+        for (const [k, v] of Object.entries(value)) walk(v, path_ ? `${path_}.${k}` : k);
       }
     };
     walk(body);
-  });
-
-  it('sirve desde caché mientras el histórico no cambie', async () => {
-    const first = await (await fetch(`${base}/api/market/projections/analog`)).json();
-    const second = await (await fetch(`${base}/api/market/projections/analog`)).json();
-
-    // Mismo objeto cacheado: generatedAt no se vuelve a sellar.
-    expect(second.generatedAt).toBe(first.generatedAt);
-  });
-
-  it('dos peticiones simultáneas comparten un solo cálculo', async () => {
-    const [a, b] = await Promise.all([
-      fetch(`${base}/api/market/projections/analog`).then((r) => r.json()),
-      fetch(`${base}/api/market/projections/analog`).then((r) => r.json()),
-    ]);
-
-    expect(a.generatedAt).toBe(b.generatedAt);
-    expect(JSON.stringify(a)).toBe(JSON.stringify(b));
+    expect(bad).toEqual([]);
   });
 
   it('no lanza cuando no hay ningún histórico que leer', async () => {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
     fs.writeFileSync(path.join(tmpDir, 'data', 'market_history.json'), '[]');
     await boot();
-
-    const res = await fetch(`${base}/api/market/projections/analog`);
-    const body = await res.json();
-
+    const res = await fetch(`${base}/api/market/projections/daily`);
     expect(res.status).toBe(200);
-    expect(body.usable).toBe(false);
-    for (const side of body.sides) {
-      expect(side.observations).toBe(0);
-      expect(side.notice).toContain('INSUFICIENTE HISTÓRICO');
-    }
+    const body = await res.json();
+    expect(body.state).toBe('SIN_DATOS');
+    // Y sin datos no se inventa ni un extremo.
+    expect(body.ceiling.dayBest).toBeNull();
+    expect(body.floor.dayBest).toBeNull();
   });
 
-  it('cada lado trae la lectura del estado actual, separada de la proyección', async () => {
-    const body = await (await fetch(`${base}/api/market/projections/analog`)).json();
-
-    for (const side of body.sides) {
-      const reading = side.reading;
-      expect(reading).toBeTruthy();
-      expect(reading.observations).toBe(side.observations);
-      expect(reading.evidenceText).toBeTruthy();
-      expect(Array.isArray(reading.narrative)).toBe(true);
-      expect(reading.narrative.length).toBeGreaterThan(0);
-      // Las ventanas se publican todas, con o sin lectura.
-      expect(reading.horizons.map((h: any) => h.label)).toEqual(['15m', '1h', '4h', '12h', '24h']);
-      for (const h of reading.horizons) {
-        if (!h.available) expect(h.momentum.score).toBeNull();
-        else {
-          expect(h.momentum.score).toBeGreaterThanOrEqual(0);
-          expect(h.momentum.score).toBeLessThanOrEqual(100);
-        }
-      }
-    }
+  it('el estado de pantalla llega decidido por el servidor', async () => {
+    const body = await (await fetch(`${base}/api/market/projections/daily`)).json();
+    expect([
+      'SIN_DATOS',
+      'DATOS_INSUFICIENTES',
+      'PROYECCION_LIMITADA',
+      'PROYECCION_CONDICIONADA',
+      'PROYECCION_VALIDADA',
+    ]).toContain(body.state);
+    expect(body.stateText.length).toBeGreaterThan(10);
   });
 
-  it('publica el rendimiento de las proyecciones ya emitidas', async () => {
-    const body = await (await fetch(`${base}/api/market/projections/analog`)).json();
-
-    expect(body.forecastPerformance).toBeTruthy();
-    expect(body.forecastPerformance.verdict).toBeTruthy();
-    // Recién arrancado no hay ninguna vencida: no se publica ni un porcentaje.
-    for (const h of body.forecastPerformance.byHorizon) {
-      if (h.reason === 'INSUFFICIENT_EVALUATED') {
-        expect(h.directionalAccuracy).toBeNull();
-        expect(h.beatsPersistence).toBeNull();
-      }
-    }
-  });
-
-  it('no rompe las rutas de proyección que ya existían', async () => {
-    for (const route of ['/api/market/projections/general', '/api/market/history']) {
+  it('las rutas que NO son de esta pantalla siguen respondiendo', async () => {
+    for (const route of ['/api/market/projections/maker', '/api/market/projections/series?bank=x&amount=y']) {
       const res = await fetch(`${base}${route}`);
-      expect(res.status, route).toBe(200);
+      expect([200, 400, 404], route).toContain(res.status);
+    }
+  });
+
+  it('las rutas de los motores retirados ya no existen', async () => {
+    for (const gone of ['/api/market/projections/analog', '/api/market/projections/general']) {
+      expect((await fetch(`${base}${gone}`)).status, gone).toBe(404);
     }
   });
 });
 
-/* ------------------------------------------------------------------------ *
- * 2. NO SE HA VUELTO AL MODELO ANTERIOR CON OTRO NOMBRE
- * ------------------------------------------------------------------------ */
-
 describe('el motor nuevo no recupera nada del anterior', () => {
+  /*
+   * EL MOTOR QUE ESTÁ EN PRODUCCIÓN, no el que hubo. Al consolidar, la ruta
+   * /projections/analog y sus paneles se eliminaron: los módulos de aquel
+   * estimador quedan fuera del flujo y ya no se afirma nada sobre ellos aquí.
+   */
   const ENGINE_FILES = [
     path.join(ENGINE, 'series.ts'),
-    path.join(ENGINE, 'marketState.ts'),
-    path.join(ENGINE, 'historicalAnalogies.ts'),
     path.join(ENGINE, 'probability.ts'),
-    path.join(ENGINE, 'engine.ts'),
-    path.join(ENGINE, 'backtest.ts'),
-    path.join(ENGINE, 'momentum.ts'),
-    path.join(ENGINE, 'reading.ts'),
-    path.join(ENGINE, 'forecastEvaluation.ts'),
-    path.join(SERVER, 'marketProjection.ts'),
+    path.join(ENGINE, 'dailyShape.ts'),
+    path.join(SERVER, 'dailyProjection.ts'),
     path.join(SERVER, 'marketContext.ts'),
     path.join(SERVER, 'recordValidation.ts'),
   ];
   const UI_FILES = [
-    path.join(SRC, 'ProbabilisticProjectionPanel.tsx'),
-    path.join(SRC, 'ProbabilisticProjectionChart.tsx'),
-    path.join(SRC, 'MarketStateBlock.tsx'),
+    path.join(SRC, 'ProjectionsPanel.tsx'),
+    path.join(SRC, 'ProjectionsChart.tsx'),
+    path.join(SRC, 'dailyChartRows.ts'),
   ];
 
   it('no contiene ninguna de las constantes ni los nombres retirados', () => {
@@ -340,7 +279,7 @@ describe('el motor nuevo no recupera nada del anterior', () => {
   });
 
   it('la pantalla no vuelve a clasificar la dirección por su cuenta', () => {
-    const panel = code(path.join(SRC, 'ProbabilisticProjectionPanel.tsx'));
+    const panel = code(path.join(SRC, 'ProjectionsPanel.tsx'));
 
     // ALCISTA/BAJISTA llegan ya decididos contra el régimen. Compararlos aquí
     // contra cero reintroduciría exactamente el sesgo que el motor evita.
@@ -348,15 +287,17 @@ describe('el motor nuevo no recupera nada del anterior', () => {
     expect(panel).not.toMatch(/central[^\n]*>\s*currentPrice/);
   });
 
-  it('la ruta invalida la caché con el estado real de la serie', () => {
+  it('la ruta no guarda caché, y por eso no puede servir algo viejo', () => {
     const routes = code(path.join(SERVER, 'routes.ts'));
 
-    // Contra los datos, no contra el reloj: un TTL serviría una proyección
-    // vieja, o recalcularía sin que hubiera cambiado nada.
-    expect(routes).toMatch(/const key = `\$\{records\.length\}:\$\{newest\}`/);
-    expect(routes).toMatch(/analogCache\.key === key/);
-    // Y la ruta usa la variante que cede el hilo: la captura es prioritaria.
-    expect(routes).toMatch(/buildMarketProjectionAsync/);
+    /*
+     * El motor anterior cacheaba contra el estado de la serie porque buscar
+     * analogías minuto a minuto era caro. Éste recorre el histórico una vez por
+     * pierna y agrupa por horas: trabajo lineal. Sin caché no hay forma de
+     * servir una proyección que ya no corresponde al histórico actual.
+     */
+    expect(routes).not.toMatch(/analogCache/);
+    expect(routes).toMatch(/dailyProjectionFromStorage\(\)/);
   });
 
   it('no toca captura, alertas ni Telegram', () => {

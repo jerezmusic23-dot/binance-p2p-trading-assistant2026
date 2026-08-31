@@ -85,14 +85,14 @@ async function underFailure(handler: (body: { payTypes?: string[] }, call: numbe
   const snapshot = await store.pollMarket();
   const { executableMatrix, marketReference } = await store.getExecutableMatrix();
   const { result: opportunities } = await store.getOpportunities();
-  const projection = store.getMarketProjection();
+  const generalSeries = store.getGeneralSeries();
 
   const cells = Object.values(executableMatrix.cells).flatMap(
     (byAmount) => Object.values(byAmount) as ExecutableCell[]
   );
 
   store.stop();
-  return { snapshot, cells, marketReference, opportunities, projection };
+  return { snapshot, cells, marketReference, opportunities, generalSeries };
 }
 
 const statuses = (cells: ExecutableCell[]) => [...new Set(cells.map((c) => c.status))].sort();
@@ -205,7 +205,7 @@ describe('la aplicación nunca lanza: un fallo se contesta, no se propaga', () =
 
     let index = 0;
     // Una respuesta distinta en cada llamada: el peor caso mezclado.
-    const { snapshot, cells, projection } = await underFailure(() => {
+    const { snapshot, cells, generalSeries } = await underFailure(() => {
       const handler = brutal[index % brutal.length];
       index += 1;
       return handler() as Response;
@@ -232,13 +232,15 @@ describe('la aplicación nunca lanza: un fallo se contesta, no se propaga', () =
       return out;
     };
 
-    expect(nonFinite(projection, 'projection')).toEqual([]);
+    expect(nonFinite(generalSeries, 'generalSeries')).toEqual([]);
     expect(nonFinite(cells, 'cells')).toEqual([]);
 
-    // Y si hay lectura, es del libro entero y lo dice en su identidad.
-    if (projection.projection !== null) {
-      expect(projection.projection.bank).toBe('MERCADO_GENERAL');
-    }
+    /*
+     * La proyección del mercado general se retiró de aquí: cruzaba el precio de
+     * MI VENTA con la serie de MI COMPRA. Lo que queda es la serie, y lo que se
+     * comprueba es que bajo fallo no trae ni un número imposible.
+     */
+    expect(Array.isArray(generalSeries)).toBe(true);
   }, 60_000);
 });
 
