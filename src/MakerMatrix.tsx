@@ -369,10 +369,21 @@ export const MakerMatrix: React.FC = () => {
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
+  /*
+   * CARGA INICIAL vs REFRESCO EN SEGUNDO PLANO.
+   *
+   * `isLoading` sustituye la pantalla entera por "Cargando precios…", así que
+   * sólo puede activarse la PRIMERA vez: si el refresco automático de cada
+   * 45 s lo activara también, la matriz desaparecería y volvería a aparecer
+   * cada 45 segundos mientras el operador la está mirando. Se distingue por
+   * si ya hay una matriz en pantalla, no por si la llamada es forzada -
+   * el refresco automático tampoco es "forzado" (no pasa por Binance con
+   * prioridad), y aun así no debe mostrar el letrero de carga.
+   */
   const fetchMatrix = async (force = false) => {
     try {
       if (force) setIsRefreshing(true);
-      else setIsLoading(true);
+      setError(null);
       const res = await ApiService.getMakerMatrix(force);
       setMatrix(res.makerMatrix);
       setError(null);
@@ -387,6 +398,21 @@ export const MakerMatrix: React.FC = () => {
 
   useEffect(() => {
     fetchMatrix(false);
+    /*
+     * 45 s: la misma cadencia a la que el servidor ya recalcula la matriz
+     * (MATRIX_REFRESH_MS en executableMatrix.ts) y la misma que ya usan
+     * PublishPanel, MarketAnalysisPanel y MarketPulse. Pedirla más seguido
+     * que eso devolvería la misma respuesta cacheada; hacerlo aquí en vez de
+     * dejarlo en un botón manual es lo que el propietario pidió: que "mis
+     * precios para publicar" se mantenga al día sin que él tenga que
+     * refrescar. Las notificaciones de Telegram NO se tocan: siguen en su
+     * propio reloj de 30 minutos (DEFAULT_PRICE_CHANGE_INTERVAL_MS /
+     * MAKER_SUMMARY_INTERVAL_MS en el servidor), que es un negocio distinto -
+     * cuánto se le avisa al operador - del de cuán fresca está la pantalla
+     * cuando él decide mirarla.
+     */
+    const timer = setInterval(() => fetchMatrix(false), 45_000);
+    return () => clearInterval(timer);
   }, []);
 
   if (isLoading) {
