@@ -995,7 +995,12 @@ export interface DailyQuantiles {
 }
 
 export interface DailyHourProjection extends DailyQuantiles {
-  hour: number;
+  /** Horas desde el ancla. Siempre positivo y monótono; nunca envuelve al cruzar medianoche. */
+  hoursAhead: number;
+  /** Hora de reloj (0–23) de ese momento, sólo para mostrarla. */
+  hourOfDay: number;
+  /** Día calendario (Venezuela) de ese momento — distinto del ancla si cruzó medianoche. */
+  dayKey: string;
   movePct: number | null;
 }
 
@@ -1055,7 +1060,12 @@ export interface PriceOrigin {
 }
 
 export interface LegOpportunity {
-  hour: number;
+  /** Horas desde el ancla. Siempre positivo, nunca envuelve. */
+  hoursAhead: number;
+  /** Hora de reloj (0–23), sólo para mostrarla. */
+  hourOfDay: number;
+  /** Día calendario (Venezuela) de ese momento. */
+  dayKey: string;
   price: number;
   low: number;
   high: number;
@@ -1072,7 +1082,12 @@ export interface HourFavourability {
 }
 
 export interface ProjectedTurn {
-  hour: number;
+  /** Horas desde el ancla hasta el giro. Siempre positivo, nunca envuelve. */
+  hoursAhead: number;
+  /** Hora de reloj (0–23) del giro, sólo para mostrarla. */
+  hourOfDay: number;
+  /** Día calendario (Venezuela) del giro. */
+  dayKey: string;
   from: 'SUBIENDO' | 'BAJANDO';
   to: 'SUBIENDO' | 'BAJANDO';
   movePct: number;
@@ -1097,9 +1112,9 @@ export interface DailyProjectionResponse {
   generatedAt: number;
   source: 'market_history.json';
   dayKey: string;
-  startHour: number;
-  endHour: number;
   anchorHour: number;
+  /** Horas hacia adelante que cubre la proyección. Ya no hay "fin de jornada". */
+  horizonHours: number;
   legs: DailyLegReport[];
   ceiling: DailyExtreme;
   floor: DailyExtreme;
@@ -1107,7 +1122,14 @@ export interface DailyProjectionResponse {
   turn: { pct: number | null; sampleSize: number };
   turningNow: boolean;
   remainingPct: number | null;
-  watchWindow: { fromHour: number; toHour: number; movePct: number; leg: MakerLeg } | null;
+  watchWindow: {
+    fromHoursAhead: number;
+    toHoursAhead: number;
+    toHourOfDay: number;
+    toDayKey: string;
+    movePct: number;
+    leg: MakerLeg;
+  } | null;
   tier: DailyTier;
   tierText: string;
   state: ScreenState;

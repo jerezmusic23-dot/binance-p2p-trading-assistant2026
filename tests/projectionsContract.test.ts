@@ -303,8 +303,10 @@ describe('las horas favorables miden posición dentro del día', () => {
  * ══════════════════════════════════════════════════════════════════════════ */
 
 describe('la mejor ocasión sigue el criterio de la pierna', () => {
-  const q = (hour: number, central: number) => ({
-    hour,
+  const q = (hoursAhead: number, central: number) => ({
+    hoursAhead,
+    hourOfDay: (12 + hoursAhead) % 24,
+    dayKey: '2026-08-20',
     central,
     low: central - 1,
     high: central + 1,
@@ -314,22 +316,22 @@ describe('la mejor ocasión sigue el criterio de la pierna', () => {
   });
 
   it('vendiendo elige el máximo proyectado', () => {
-    const best = bestOpportunity([q(13, 940), q(14, 950), q(15, 945)], 'VENTA', 936);
-    expect(best?.hour).toBe(14);
+    const best = bestOpportunity([q(1, 940), q(2, 950), q(3, 945)], 'VENTA', 936);
+    expect(best?.hoursAhead).toBe(2);
     expect(best?.improvesOnNow).toBe(true);
     expect(best?.improvementPct).toBeCloseTo(((950 - 936) / 936) * 100, 6);
   });
 
   it('recomprando elige el mínimo proyectado', () => {
-    const best = bestOpportunity([q(13, 930), q(14, 920), q(15, 925)], 'COMPRA', 931);
-    expect(best?.hour).toBe(14);
+    const best = bestOpportunity([q(1, 930), q(2, 920), q(3, 925)], 'COMPRA', 931);
+    expect(best?.hoursAhead).toBe(2);
     expect(best?.improvesOnNow).toBe(true);
     // Bajar el precio de compra es una MEJORA: el signo se invierte por pierna.
     expect(best?.improvementPct).toBeCloseTo(((920 - 931) / 931) * 100 * -1, 6);
   });
 
   it('si nada mejora el precio de ahora, lo dice', () => {
-    const best = bestOpportunity([q(13, 930), q(14, 928)], 'VENTA', 936);
+    const best = bestOpportunity([q(1, 930), q(2, 928)], 'VENTA', 936);
     expect(best?.improvesOnNow).toBe(false);
   });
 
@@ -339,8 +341,10 @@ describe('la mejor ocasión sigue el criterio de la pierna', () => {
 });
 
 describe('el giro proyectado exige cambio de signo y tamaño', () => {
-  const p = (hour: number, movePct: number | null) => ({
-    hour,
+  const p = (hoursAhead: number, movePct: number | null) => ({
+    hoursAhead,
+    hourOfDay: (12 + hoursAhead) % 24,
+    dayKey: '2026-08-20',
     central: 900,
     low: 899,
     high: 901,
@@ -350,18 +354,18 @@ describe('el giro proyectado exige cambio de signo y tamaño', () => {
   });
 
   it('detecta el primer cambio de sentido por encima del umbral', () => {
-    const turn = projectedTurn([p(13, 0.5), p(14, -0.6), p(15, -0.4)], 0.2);
-    expect(turn?.hour).toBe(14);
+    const turn = projectedTurn([p(1, 0.5), p(2, -0.6), p(3, -0.4)], 0.2);
+    expect(turn?.hoursAhead).toBe(2);
     expect(turn?.from).toBe('SUBIENDO');
     expect(turn?.to).toBe('BAJANDO');
   });
 
   it('ignora un cambio de signo por debajo del umbral', () => {
-    expect(projectedTurn([p(13, 0.5), p(14, -0.1)], 0.2)).toBeNull();
+    expect(projectedTurn([p(1, 0.5), p(2, -0.1)], 0.2)).toBeNull();
   });
 
   it('sin umbral medido no declara ningún giro', () => {
-    expect(projectedTurn([p(13, 0.5), p(14, -0.6)], null)).toBeNull();
+    expect(projectedTurn([p(1, 0.5), p(2, -0.6)], null)).toBeNull();
   });
 });
 
@@ -487,11 +491,19 @@ describe('la API única devuelve exactamente lo que la pantalla consume', () => 
   });
 
   it('el ancla de cada pierna permite situar el horizonte de cada hora', () => {
-    // La pantalla escribe "+N h" restando dos enteros de reloj, nunca precios.
+    /*
+     * La pantalla escribe "+N h" leyendo `hoursAhead` directamente, nunca
+     * restando horas de reloj: eso rompería al cruzar medianoche. `hoursAhead`
+     * es monótono creciente desde el ancla (1, 2, 3, ...) pase o no por 00:00.
+     */
     for (const leg of report.legs) {
       expect(Number.isInteger(leg.projection.anchorHour)).toBe(true);
+      let previousHoursAhead = 0;
       for (const h of leg.projection.projected) {
-        expect(h.hour).toBeGreaterThan(leg.projection.anchorHour);
+        expect(h.hoursAhead).toBeGreaterThan(previousHoursAhead);
+        expect(h.hourOfDay).toBeGreaterThanOrEqual(0);
+        expect(h.hourOfDay).toBeLessThanOrEqual(23);
+        previousHoursAhead = h.hoursAhead;
       }
     }
   });

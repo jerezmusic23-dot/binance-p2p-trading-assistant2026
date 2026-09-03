@@ -180,6 +180,7 @@ describe('el motor nuevo no recupera nada del anterior', () => {
     path.join(ENGINE, 'series.ts'),
     path.join(ENGINE, 'probability.ts'),
     path.join(ENGINE, 'dailyShape.ts'),
+    path.join(ENGINE, 'dayIndex.ts'),
     path.join(SERVER, 'dailyProjection.ts'),
     path.join(SERVER, 'marketContext.ts'),
     path.join(SERVER, 'recordValidation.ts'),

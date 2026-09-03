@@ -175,7 +175,7 @@ const OpportunityCard: React.FC<{ leg: DailyLegReport; color: string }> = ({ leg
           </div>
           <div className="mt-1 flex items-center gap-1.5 text-[10px] text-[#848e9c]">
             <Clock size={10} />
-            hacia las {hourLabel(o.hour)}
+            hacia las {hourLabel(o.hourOfDay)}
             <span className="text-[#5e6673]">
               · {o.bandKind === 'P10_P90' ? 'P10–P90' : 'rango observado'} · {o.daysUsed} días
             </span>
@@ -230,9 +230,9 @@ const HorizonTable: React.FC<{ leg: DailyLegReport; color: string }> = ({ leg, c
         </thead>
         <tbody className="font-mono">
           {p.projected.map((h) => (
-            <tr key={h.hour} className="border-t border-[#2b2f36]">
-              <td className="py-0.5 text-[#848e9c]">+{h.hour - p.anchorHour} h</td>
-              <td className="py-0.5 text-[#848e9c]">{hourLabel(h.hour)}</td>
+            <tr key={h.hoursAhead} className="border-t border-[#2b2f36]">
+              <td className="py-0.5 text-[#848e9c]">+{h.hoursAhead} h</td>
+              <td className="py-0.5 text-[#848e9c]">{hourLabel(h.hourOfDay)}</td>
               <td className="py-0.5 text-right" style={{ color }}>{money(h.central)}</td>
               <td className="py-0.5 text-right text-[#5e6673]">
                 {money(h.low)}–{money(h.high)}
@@ -329,7 +329,7 @@ const TurnBlock: React.FC<{ report: DailyProjectionResponse }> = ({ report }) =>
             <div key={l.projection.leg} className="mt-0.5 text-[#5e6673]">
               en {l.label.toLowerCase()}, la trayectoria media de los días parecidos cambiaría de{' '}
               {l.turn!.from.toLowerCase()} a {l.turn!.to.toLowerCase()} hacia las{' '}
-              {hourLabel(l.turn!.hour)}.
+              {hourLabel(l.turn!.hourOfDay)}.
             </div>
           ))}
         </div>
@@ -399,8 +399,8 @@ export const ProjectionsPanel: React.FC = () => {
             PROYECCIÓN DEL MERCADO
           </h2>
           <div className="mt-1 text-[10px] text-[#5e6673]">
-            {hourLabel(report.startHour)} – {hourLabel(report.endHour)} · hora de Venezuela · VES ·
-            línea punteada = proyección
+            24/7 · próximas {report.horizonHours} horas desde las {hourLabel(report.anchorHour)} · hora
+            de Venezuela · VES · línea punteada = proyección
           </div>
           <div className="mt-1 text-[10px]">
             <span style={{ color: VENTA }}>MI VENTA = Binance BUY ↑ techo</span>

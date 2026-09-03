@@ -7,6 +7,12 @@
  * datos de MI COMPRA. Un precio proyectado colocado en el campo de lo real
  * trazaría una línea continua sobre el futuro y nadie lo notaría mirando el
  * gráfico.
+ *
+ * Con el motor 24/7 se añade una comprobación más: el horizonte puede cruzar
+ * medianoche, así que una misma hora de reloj puede aparecer dos veces en el
+ * mismo informe (hoy real, mañana proyectada). Las filas se emparejan por
+ * `step` —único por fila— precisamente para que esas dos ocurrencias nunca se
+ * confundan.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -24,18 +30,25 @@ const q = (central: number, low: number, high: number) => ({
 const legReport = (
   leg: 'VENTA' | 'COMPRA',
   binanceSide: 'BUY' | 'SELL',
+  anchorHour: number,
   real: { hour: number; price: number; movePct: number | null }[],
-  projected: { hour: number; central: number; movePct: number | null }[]
+  projected: { hoursAhead: number; hourOfDay: number; dayKey: string; central: number; movePct: number | null }[]
 ): DailyLegReport => ({
   projection: {
     leg,
     binanceSide,
     tier: 'PERFIL_LIMITADO',
-    anchorHour: 10,
+    anchorHour,
     anchorPrice: real.length > 0 ? real[real.length - 1].price : null,
     real: real.map((r) => ({ ...r, observations: 3 })),
     observedExtreme: real.length > 0 ? { price: real[0].price, hour: real[0].hour } : null,
-    projected: projected.map((p) => ({ ...q(p.central, p.central - 3, p.central + 3), hour: p.hour, movePct: p.movePct })),
+    projected: projected.map((p) => ({
+      ...q(p.central, p.central - 3, p.central + 3),
+      hoursAhead: p.hoursAhead,
+      hourOfDay: p.hourOfDay,
+      dayKey: p.dayKey,
+      movePct: p.movePct,
+    })),
     projectedExtreme: q(940, 937, 943),
     projectedClose: q(937, 934, 940),
     profileDays: 6,
@@ -83,26 +96,30 @@ const base = (): DailyProjectionResponse => ({
   generatedAt: Date.UTC(2026, 7, 20, 16, 30),
   source: 'market_history.json',
   dayKey: '2026-08-20',
-  startHour: 8,
-  endHour: 20,
   anchorHour: 10,
+  horizonHours: 12,
   legs: [
     legReport(
       'VENTA',
       'BUY',
+      10,
       [
         { hour: 8, price: 936, movePct: null },
         { hour: 9, price: 937, movePct: 0.107 },
         { hour: 10, price: 938, movePct: 0.107 },
       ],
       [
-        { hour: 11, central: 940, movePct: 0.21 },
-        { hour: 12, central: 941, movePct: 0.11 },
+        { hoursAhead: 1, hourOfDay: 11, dayKey: '2026-08-20', central: 940, movePct: 0.21 },
+        { hoursAhead: 2, hourOfDay: 12, dayKey: '2026-08-20', central: 941, movePct: 0.11 },
       ]
     ),
-    legReport('COMPRA', 'SELL', [{ hour: 10, price: 931, movePct: null }], [
-      { hour: 11, central: 930, movePct: -0.11 },
-    ]),
+    legReport(
+      'COMPRA',
+      'SELL',
+      10,
+      [{ hour: 10, price: 931, movePct: null }],
+      [{ hoursAhead: 1, hourOfDay: 11, dayKey: '2026-08-20', central: 930, movePct: -0.11 }]
+    ),
   ],
   ceiling: {
     leg: 'VENTA',
@@ -174,14 +191,15 @@ describe('cada serie se busca por su pierna, no por su posición', () => {
   });
 });
 
-describe('lo real y lo proyectado no se mezclan', () => {
+describe('sólo hay fila donde alguna pierna tiene dato, real o proyectado', () => {
   const rows = buildRows(base());
   const at = (hour: number) => rows.find((r) => r.hour === hour)!;
 
-  it('hay una fila por hora de la ventana, ni una más', () => {
-    expect(rows).toHaveLength(13);
-    expect(rows[0].hour).toBe(8);
-    expect(rows[rows.length - 1].hour).toBe(20);
+  it('no rellena horas que ninguna pierna observó ni proyectó', () => {
+    // venta: 8,9,10 reales + 11,12 proyectadas · compra: 10 real + 11 proyectada.
+    // Unión de pasos: -2,-1,0,1,2 → cinco filas, ni una de relleno.
+    expect(rows).toHaveLength(5);
+    expect(rows.map((r) => r.step)).toEqual([-2, -1, 0, 1, 2]);
   });
 
   it('antes del ancla sólo hay valores reales, sin banda', () => {
@@ -200,14 +218,6 @@ describe('lo real y lo proyectado no se mezclan', () => {
     expect(at(10).ventaReal).toBe(938);
     expect(at(10).ventaProjected).toBe(938); // copiado de lo real, no al revés
     expect(at(10).ventaBand).toBeUndefined();
-  });
-
-  it('las horas sin evidencia quedan vacías en vez de heredar la de al lado', () => {
-    for (const hour of [13, 14, 15, 16, 17, 18, 19, 20]) {
-      expect(at(hour).ventaReal).toBeUndefined();
-      expect(at(hour).ventaProjected).toBeUndefined();
-      expect(at(hour).ventaBand).toBeUndefined();
-    }
   });
 
   it('la venta nunca toma prestados los datos de la compra', () => {
@@ -257,5 +267,68 @@ describe('sin proyección, la gráfica sólo puede dibujar hechos', () => {
     // El ancla sigue en la serie proyectada, pero con su valor real: es el
     // único punto donde ambas coinciden y no afirma ningún futuro.
     expect(rows.filter((r) => r.ventaProjected !== undefined).map((r) => r.hour)).toEqual([10]);
+  });
+});
+
+describe('el horizonte cruza medianoche sin confundir dos horas iguales', () => {
+  /*
+   * Ancla a la 1 AM con dos horas reales previas (0 y 1 de HOY) y un
+   * horizonte que llega hasta la 1 AM de MAÑANA: la hora de reloj 0 y la hora
+   * de reloj 1 aparecen entonces DOS VECES en el mismo informe. Si las filas
+   * se emparejaran por `hour` en vez de por `step`, la fila proyectada de
+   * mañana pisaría o se confundiría con la real de hoy.
+   */
+  const report: DailyProjectionResponse = {
+    ...base(),
+    dayKey: '2026-08-20',
+    anchorHour: 1,
+    legs: [
+      legReport(
+        'VENTA',
+        'BUY',
+        1,
+        [
+          { hour: 0, price: 900, movePct: null },
+          { hour: 1, price: 901, movePct: 0.11 },
+        ],
+        [
+          { hoursAhead: 23, hourOfDay: 0, dayKey: '2026-08-21', central: 910, movePct: 0.5 },
+          { hoursAhead: 24, hourOfDay: 1, dayKey: '2026-08-21', central: 911, movePct: 0.11 },
+        ]
+      ),
+      legReport('COMPRA', 'SELL', 1, [{ hour: 1, price: 895, movePct: null }], []),
+    ],
+  };
+
+  const rows = buildRows(report);
+
+  it('produce una fila distinta por cada paso, aunque la hora de reloj se repita', () => {
+    expect(rows.map((r) => r.step)).toEqual([-1, 0, 23, 24]);
+    // La hora 0 y la hora 1 aparecen CADA UNA dos veces —hoy real, mañana
+    // proyectada—: son dos filas distintas, nunca una que pise a la otra.
+    expect(rows.filter((r) => r.hour === 0)).toHaveLength(2);
+    expect(rows.filter((r) => r.hour === 1)).toHaveLength(2);
+  });
+
+  it('la hora real de hoy y la proyectada de mañana no se mezclan', () => {
+    const todayZero = rows.find((r) => r.step === -1)!;
+    expect(todayZero.hour).toBe(0);
+    expect(todayZero.dayKey).toBe('2026-08-20');
+    expect(todayZero.ventaReal).toBe(900);
+    expect(todayZero.ventaProjected).toBeUndefined();
+
+    const tomorrowZero = rows.find((r) => r.step === 23)!;
+    expect(tomorrowZero.hour).toBe(0);
+    expect(tomorrowZero.dayKey).toBe('2026-08-21');
+    expect(tomorrowZero.ventaReal).toBeUndefined();
+    expect(tomorrowZero.ventaProjected).toBe(910);
+  });
+
+  it('el ancla (paso 0) es real, no proyección de otro día', () => {
+    const anchor = rows.find((r) => r.step === 0)!;
+    expect(anchor.hour).toBe(1);
+    expect(anchor.dayKey).toBe('2026-08-20');
+    expect(anchor.ventaReal).toBe(901);
+    expect(anchor.ventaProjected).toBe(901); // copiado de lo real, no al revés
   });
 });

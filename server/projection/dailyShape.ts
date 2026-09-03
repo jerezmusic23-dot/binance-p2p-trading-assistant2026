@@ -65,14 +65,32 @@ export {
 } from './venezuelaClock.js';
 export { InvalidInstantError, assertInstant } from './venezuelaClock.js';
 import { binomialTailProbability } from './probability.js';
+import { buildDayIndex, hourCellAhead, hourStartMs, ratiosAhead, remainingExtremeRatios } from './dayIndex.js';
+/*
+ * Reexportados por lo mismo que el reloj: quien ya resolvía el cruce de
+ * medianoche importando desde aquí sigue funcionando. `dayIndex.ts` existe
+ * para separar responsabilidades, no para mover el contrato público.
+ */
+export { buildDayIndex, hourCellAhead, hourStartMs, ratiosAhead, remainingExtremeRatios } from './dayIndex.js';
+export type { ResolvedHour, RatioSample } from './dayIndex.js';
 
 
 /**
- * Ventana del día que se dibuja. DECISIÓN DE PRESENTACIÓN, no una medición:
- * son las horas que el propietario quiere ver, y por eso es un parámetro.
+ * SIN VENTANA HORARIA. El mercado P2P no cierra, y este motor tampoco.
+ *
+ * Hasta aquí existía una ventana de presentación 08:00–20:00: `groupByDay`
+ * descartaba toda observación fuera de esas horas, así que 12 de cada 24 horas
+ * de captura real —de 20:00 a 08:00— nunca entraban en la proyección, en el
+ * backtest ni en "horas favorables". No era una medición: era una decisión de
+ * pantalla que además cortaba datos reales sin decirlo.
+ *
+ * Ahora las 24 horas cuentan. `DEFAULT_HORIZON_HOURS` sustituye a la vieja
+ * `endHour`: ya no hay "cierre de la jornada" que marque dónde termina de
+ * proyectar, así que el horizonte se expresa como CUÁNTAS HORAS ADELANTE se
+ * proyecta desde el ancla — una vuelta completa de reloj, 24 horas, igual que
+ * el "resto del día" que antes se alcanzaba desde una mañana hasta las 20:00.
  */
-export const DEFAULT_DAY_START_HOUR = 8;
-export const DEFAULT_DAY_END_HOUR = 20;
+export const DEFAULT_HORIZON_HOURS = 24;
 
 /** La operación del propietario. Nunca el lado de Binance a secas. */
 export type MakerLeg = 'VENTA' | 'COMPRA';
@@ -200,21 +218,14 @@ export interface DayShape {
 
 /**
  * Agrupa una serie en días y horas locales quedándose con el extremo de la
- * pierna. Las horas fuera de la ventana se descartan aquí, no más tarde, para
- * que el perfil y el dibujo hablen del mismo tramo del día.
+ * pierna. Las 24 horas cuentan: no hay ventana que descarte ninguna.
  */
-export function groupByDay(
-  points: readonly SeriesPoint[],
-  leg: MakerLeg,
-  startHour = DEFAULT_DAY_START_HOUR,
-  endHour = DEFAULT_DAY_END_HOUR
-): DayShape[] {
+export function groupByDay(points: readonly SeriesPoint[], leg: MakerLeg): DayShape[] {
   const days = new Map<string, DayShape>();
 
   for (const p of points) {
     if (!Number.isFinite(p.t) || !Number.isFinite(p.price) || p.price <= 0) continue;
     const hour = venezuelaHourOf(p.t);
-    if (hour < startHour || hour > endHour) continue;
 
     const key = venezuelaDayKey(p.t);
     let day = days.get(key);
@@ -234,64 +245,6 @@ export function groupByDay(
   }
 
   return [...days.values()].sort((a, b) => a.dayKey.localeCompare(b.dayKey));
-}
-
-/**
- * Cociente de precio entre dos horas del mismo día.
- *
- * Cocientes y no diferencias porque el VES tiene deriva: 3 bolívares sobre 900
- * y 3 sobre 300 no son el mismo movimiento y promediarlos deformaría el perfil.
- */
-export interface RatioSample {
-  dayKey: string;
-  ratio: number;
-}
-
-export function ratiosBetween(
-  days: readonly DayShape[],
-  anchorHour: number,
-  targetHour: number
-): RatioSample[] {
-  const out: RatioSample[] = [];
-  for (const day of days) {
-    const a = day.hours.get(anchorHour);
-    const t = day.hours.get(targetHour);
-    if (a === undefined || t === undefined) continue; // no se interpola la que falta
-    if (a.best <= 0 || t.best <= 0) continue;
-    out.push({ dayKey: day.dayKey, ratio: t.best / a.best });
-  }
-  return out;
-}
-
-/**
- * Cociente entre el EXTREMO del tramo que queda y el ancla, por día.
- *
- * Es lo que responde "¿hasta dónde llegó a subir mi venta después de esta
- * hora?". Se calcula por día y LUEGO se toman percentiles, que no es lo mismo
- * que tomar el máximo de los percentiles hora a hora: eso último sería el
- * máximo de ocho p90 distintos y exageraría el techo sistemáticamente.
- */
-export function remainingExtremeRatios(
-  days: readonly DayShape[],
-  leg: MakerLeg,
-  anchorHour: number,
-  endHour: number
-): RatioSample[] {
-  const out: RatioSample[] = [];
-  for (const day of days) {
-    const anchor = day.hours.get(anchorHour);
-    if (anchor === undefined || anchor.best <= 0) continue;
-
-    const future: number[] = [];
-    for (let h = anchorHour + 1; h <= endHour; h += 1) {
-      const cell = day.hours.get(h);
-      if (cell !== undefined) future.push(cell.best);
-    }
-    const extreme = extremeForLeg(leg, future);
-    if (extreme === null) continue;
-    out.push({ dayKey: day.dayKey, ratio: extreme / anchor.best });
-  }
-  return out;
 }
 
 export function medianOf(values: readonly number[]): number | null {
@@ -333,20 +286,42 @@ export function quantilesFrom(ratios: readonly number[], anchorPrice: number): Q
 }
 
 export interface HourProjection extends Quantiles {
-  hour: number;
+  /**
+   * Horas desde el ancla. SIEMPRE positivo y monótono — 1, 2, 3… — y nunca
+   * envuelve al cruzar medianoche, porque no es una hora de reloj: es una
+   * distancia. `p.hoursAhead - 0` es siempre correcto; una resta de horas de
+   * reloj (`hourOfDay - anchorHour`) no lo sería en cuanto la proyección
+   * pasara de 23 a 0.
+   */
+  hoursAhead: number;
+  /** Hora de reloj (0–23) de ese momento, sólo para mostrarla. */
+  hourOfDay: number;
+  /** Día calendario (Venezuela) de ese momento — distinto del ancla si cruzó medianoche. */
+  dayKey: string;
   /** Cambio del central respecto de la hora anterior de la trayectoria, en %. */
   movePct: number | null;
 }
 
 export function projectHour(
   days: readonly DayShape[],
+  index: ReadonlyMap<string, DayShape>,
+  anchorDayKey: string,
   anchorHour: number,
-  targetHour: number,
+  hoursAhead: number,
   anchorPrice: number
 ): HourProjection | null {
-  const ratios = ratiosBetween(days, anchorHour, targetHour).map((s) => s.ratio);
+  const ratios = ratiosAhead(days, index, anchorHour, hoursAhead).map((s) => s.ratio);
   const q = quantilesFrom(ratios, anchorPrice);
-  return q === null ? null : { ...q, hour: targetHour, movePct: null };
+  if (q === null) return null;
+
+  const targetMs = hourStartMs(anchorDayKey, anchorHour) + hoursAhead * 3_600_000;
+  return {
+    ...q,
+    hoursAhead,
+    hourOfDay: venezuelaHourOf(targetMs),
+    dayKey: venezuelaDayKey(targetMs),
+    movePct: null,
+  };
 }
 
 /**
@@ -450,6 +425,8 @@ export interface LegProjection {
   leg: MakerLeg;
   binanceSide: 'BUY' | 'SELL';
   tier: DailyTier;
+  /** Día calendario (Venezuela) del ancla — «hoy» para esta proyección. */
+  anchorDayKey: string;
   anchorHour: number;
   anchorPrice: number | null;
 
@@ -458,11 +435,11 @@ export interface LegProjection {
   /** Extremo YA OCURRIDO hoy: techo observado en VENTA, piso observado en COMPRA. */
   observedExtreme: { price: number; hour: number } | null;
 
-  /** Horas que quedan. Vacío si no hay evidencia. */
+  /** Horas que quedan, hasta `horizonHours` adelante. Vacío si no hay evidencia. */
   projected: HourProjection[];
   /** Extremo del tramo que queda, estimado de la distribución por día. */
   projectedExtreme: Quantiles | null;
-  /** Precio estimado al cierre de la ventana. */
+  /** Precio estimado `horizonHours` horas adelante del ancla. */
   projectedClose: Quantiles | null;
 
   profileDays: number;
@@ -481,12 +458,11 @@ export function projectLeg(
   points: readonly SeriesPoint[],
   leg: MakerLeg,
   now: number,
-  startHour = DEFAULT_DAY_START_HOUR,
-  endHour = DEFAULT_DAY_END_HOUR
+  horizonHours = DEFAULT_HORIZON_HOURS
 ): LegProjection {
-  const all = groupByDay(points, leg, startHour, endHour);
+  const all = groupByDay(points, leg);
   const todayKey = venezuelaDayKey(now);
-  return projectLegFromDays(all, leg, todayKey, venezuelaHourOf(now), startHour, endHour);
+  return projectLegFromDays(all, leg, todayKey, venezuelaHourOf(now), horizonHours);
 }
 
 /**
@@ -495,18 +471,25 @@ export function projectLeg(
  * Separado de `projectLeg` porque el backtest necesita entrar aquí con un
  * conjunto de días RECORTADO —sólo los anteriores al que evalúa— y ésa es la
  * única forma de garantizar por construcción que no hay look-ahead.
+ *
+ * `allDays` hace doble papel: son los días de los que se eligen análogos, Y
+ * son el índice contra el que `hourCellAhead` resuelve el cruce de medianoche.
+ * En el backtest, `allDays` es `[...pasado, díaDeHoyRecortado]` — así que un
+ * análogo cuyo "mañana" cae dentro del día que se está evaluando sólo puede
+ * ver la parte de ESE día que ya se recortó como visible, nunca la que vendría
+ * después del ancla. El look-ahead queda excluido por construcción, no por
+ * promesa, exactamente igual que ya ocurría dentro de un único día.
  */
 export function projectLegFromDays(
   allDays: readonly DayShape[],
   leg: MakerLeg,
   todayKey: string,
   rawAnchorHour: number,
-  startHour = DEFAULT_DAY_START_HOUR,
-  endHour = DEFAULT_DAY_END_HOUR
+  horizonHours = DEFAULT_HORIZON_HOURS
 ): LegProjection {
   const today = allDays.find((d) => d.dayKey === todayKey) ?? null;
   const previous = allDays.filter((d) => d.dayKey < todayKey);
-  const anchorHour = Math.min(Math.max(rawAnchorHour, startHour), endHour);
+  const anchorHour = Math.min(Math.max(rawAnchorHour, 0), 23);
 
   const observedHours =
     today === null
@@ -541,6 +524,7 @@ export function projectLegFromDays(
     leg,
     binanceSide: LEG_BINANCE_SIDE[leg],
     tier: real.length === 0 ? 'SIN_DATOS' : 'SOLO_HOY',
+    anchorDayKey: todayKey,
     anchorHour,
     anchorPrice,
     real,
@@ -567,10 +551,16 @@ export function projectLegFromDays(
   const selection = selectAnalogousDays(previous, anchorHour, state);
   if (selection.days.length < MIN_PROFILE_DAYS) return base;
 
+  // El índice se construye sobre TODOS los días recibidos —no sólo los
+  // análogos elegidos— porque el "mañana" de un día análogo puede ser un día
+  // que no fue seleccionado como parecido y aun así es la continuación real
+  // de esa misma sesión.
+  const index = buildDayIndex(allDays);
+
   const projected: HourProjection[] = [];
   let previousPrice = anchorPrice;
-  for (let hour = anchorHour + 1; hour <= endHour; hour += 1) {
-    const projection = projectHour(selection.days, anchorHour, hour, anchorPrice);
+  for (let hoursAhead = 1; hoursAhead <= horizonHours; hoursAhead += 1) {
+    const projection = projectHour(selection.days, index, todayKey, anchorHour, hoursAhead, anchorPrice);
     if (projection === null) continue;
     projection.movePct =
       previousPrice > 0 ? ((projection.central - previousPrice) / previousPrice) * 100 : null;
@@ -579,8 +569,10 @@ export function projectLegFromDays(
   }
   if (projected.length === 0) return base;
 
-  const extremeRatios = remainingExtremeRatios(selection.days, leg, anchorHour, endHour).map((s) => s.ratio);
-  const closeRatios = ratiosBetween(selection.days, anchorHour, endHour).map((s) => s.ratio);
+  const extremeRatios = remainingExtremeRatios(selection.days, index, leg, anchorHour, horizonHours).map(
+    (s) => s.ratio
+  );
+  const closeRatios = ratiosAhead(selection.days, index, anchorHour, horizonHours).map((s) => s.ratio);
 
   return {
     ...base,

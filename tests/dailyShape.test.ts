@@ -1,6 +1,6 @@
 /**
- * LA FORMA DEL DÍA — SEMÁNTICA MAKER Y AUSENCIA DE LOOK-AHEAD
- * ==========================================================
+ * LA FORMA DEL DÍA — SEMÁNTICA MAKER, 24/7 Y AUSENCIA DE LOOK-AHEAD
+ * =================================================================
  *
  * Las series son ARTIFICIALES y no pretenden parecerse a Binance: existen para
  * comprobar que el motor hace lo que dice.
@@ -9,21 +9,30 @@
  * que no se ve: con el libro en su estado normal —mi venta por encima de mi
  * compra— una fórmula equivocada devuelve el número correcto por casualidad y
  * sólo falla el día que las dos series se cruzan.
+ *
+ * SEGUNDO EN IMPORTANCIA: el motor ya no tiene ventana horaria 08:00–20:00.
+ * Las 24 horas cuentan, y el horizonte de proyección puede cruzar medianoche
+ * —y con él, el mes y el año— sin que la distancia temporal se equivoque. Esa
+ * garantía se prueba explícitamente más abajo, no se da por supuesta.
  */
 
 import { describe, expect, it } from 'vitest';
 import {
+  DEFAULT_HORIZON_HOURS,
   LEG_BINANCE_SIDE,
   MIN_CONDITIONED_DAYS,
   MIN_PROFILE_DAYS,
+  buildDayIndex,
   extremeForLeg,
   groupByDay,
+  hourCellAhead,
+  hourStartMs,
   isBetterForLeg,
   openToHourRatio,
   projectHour,
   projectLeg,
   projectLegFromDays,
-  ratiosBetween,
+  ratiosAhead,
   remainingExtremeRatios,
   selectAnalogousDays,
   venezuelaDayKey,
@@ -38,9 +47,10 @@ import type { SeriesPoint } from '../server/projection/series.js';
 const at = (day: number, hour: number, minute = 0): number =>
   Date.UTC(2026, 7, day, hour + 4, minute, 0);
 
+/** Un día completo, las 24 horas — ya no 8 a 20. */
 const dayPoints = (day: number, priceAt: (hour: number) => number): SeriesPoint[] => {
   const out: SeriesPoint[] = [];
-  for (let hour = 8; hour <= 20; hour += 1) {
+  for (let hour = 0; hour <= 23; hour += 1) {
     out.push({ t: at(day, hour, 5), price: priceAt(hour) });
     out.push({ t: at(day, hour, 35), price: priceAt(hour) });
   }
@@ -207,24 +217,57 @@ describe('no se inventan horas ni días', () => {
     expect(day.hours.get(12)).toBeUndefined();
   });
 
-  it('descarta lo que cae fuera de la ventana del día', () => {
-    const day = groupByDay(
-      [
-        { t: at(10, 3), price: 800 },
-        { t: at(10, 9), price: 900 },
-        { t: at(10, 22), price: 999 },
-      ],
-      'VENTA'
-    )[0];
-    expect([...day.hours.keys()]).toEqual([9]);
-  });
-
   it('un día al que le falta una de las dos horas no aporta cociente', () => {
     const days = [
       ...groupByDay(dayPoints(10, () => 900), 'VENTA'),
       ...groupByDay([{ t: at(11, 9), price: 900 }], 'VENTA'),
     ];
-    expect(ratiosBetween(days, 9, 15)).toHaveLength(1);
+    const index = buildDayIndex(days);
+    expect(ratiosAhead(days, index, 9, 6)).toHaveLength(1);
+  });
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * SIN VENTANA HORARIA: LAS 24 HORAS CUENTAN
+ * ══════════════════════════════════════════════════════════════════════════
+ *
+ * Hasta esta fase, `groupByDay` descartaba toda observación fuera de
+ * 08:00–20:00. Estas pruebas comprueban lo contrario de lo que se probaba
+ * antes: que las horas de madrugada y de noche —las que la ventana vieja
+ * tiraba— ahora se conservan y participan en la proyección igual que
+ * cualquier otra.
+ */
+describe('las 24 horas cuentan; ya no hay ventana 08:00–20:00', () => {
+  it('groupByDay conserva horas de madrugada y de noche', () => {
+    const day = groupByDay(
+      [
+        { t: at(10, 0), price: 800 }, // medianoche
+        { t: at(10, 3), price: 810 }, // madrugada — la ventana vieja la descartaba
+        { t: at(10, 9), price: 900 },
+        { t: at(10, 22), price: 999 }, // noche — la ventana vieja también la descartaba
+        { t: at(10, 23), price: 995 },
+      ],
+      'VENTA'
+    )[0];
+    expect([...day.hours.keys()].sort((a, b) => a - b)).toEqual([0, 3, 9, 22, 23]);
+  });
+
+  it('una proyección puede anclarse a medianoche o a las 23:00, no sólo entre 8 y 20', () => {
+    const points = Array.from({ length: MIN_PROFILE_DAYS + 1 }, (_, i) =>
+      dayPoints(10 + i, (h) => 900 + h)
+    ).flat();
+
+    const atMidnight = projectLeg([...points, ...dayPoints(20, (h) => (h <= 0 ? 950 : NaN))], 'VENTA', at(20, 0, 30));
+    expect(atMidnight.anchorHour).toBe(0);
+    expect(atMidnight.tier).not.toBe('SIN_DATOS');
+
+    const at23 = projectLeg([...points, ...dayPoints(20, (h) => (h <= 23 ? 950 + h : NaN))], 'VENTA', at(20, 23, 30));
+    expect(at23.anchorHour).toBe(23);
+    expect(at23.tier).not.toBe('SIN_DATOS');
+  });
+
+  it('DEFAULT_HORIZON_HOURS es 24: una vuelta completa de reloj, no "hasta las 20:00"', () => {
+    expect(DEFAULT_HORIZON_HOURS).toBe(24);
   });
 });
 
@@ -232,13 +275,14 @@ describe('el extremo del tramo restante se estima por día, no por hora', () => 
   it('usa el máximo que alcanzó cada día y luego reparte percentiles', () => {
     /*
      * Tres días que suben hasta las 15 y luego bajan. El máximo del tramo
-     * 12→20 es el de las 15 en los tres. Tomar el máximo de los percentiles
-     * hora a hora daría un número mayor que cualquier día real.
+     * 12→20 (8 horas adelante) es el de las 15 en los tres. Tomar el máximo de
+     * los percentiles hora a hora daría un número mayor que cualquier día real.
      */
     const days = [10, 11, 12].map(
       (d) => groupByDay(dayPoints(d, (h) => (h <= 15 ? 900 + (h - 8) * 2 : 914 - (h - 15) * 2)), 'VENTA')[0]
     );
-    const ratios = remainingExtremeRatios(days, 'VENTA', 12, 20).map((s) => s.ratio);
+    const index = buildDayIndex(days);
+    const ratios = remainingExtremeRatios(days, index, 'VENTA', 12, 8).map((s) => s.ratio);
     expect(ratios).toHaveLength(3);
     // A las 12 vale 908; el máximo posterior es 914 (las 15). 914/908.
     for (const r of ratios) expect(r).toBeCloseTo(914 / 908, 10);
@@ -248,7 +292,8 @@ describe('el extremo del tramo restante se estima por día, no por hora', () => 
     const days = [10, 11, 12].map(
       (d) => groupByDay(dayPoints(d, (h) => (h <= 15 ? 900 - (h - 8) * 2 : 886 + (h - 15) * 2)), 'COMPRA')[0]
     );
-    const ratios = remainingExtremeRatios(days, 'COMPRA', 12, 20).map((s) => s.ratio);
+    const index = buildDayIndex(days);
+    const ratios = remainingExtremeRatios(days, index, 'COMPRA', 12, 8).map((s) => s.ratio);
     // A las 12 vale 892; el mínimo posterior es 886.
     for (const r of ratios) expect(r).toBeCloseTo(886 / 892, 10);
   });
@@ -279,9 +324,9 @@ describe('el condicionamiento por el estado de hoy', () => {
   });
 
   it('openToHourRatio sólo mira horas anteriores o iguales al ancla', () => {
-    const day = groupByDay(dayPoints(10, (h) => 900 + (h - 8) * 3), 'VENTA')[0];
-    expect(openToHourRatio(day, 12)).toBeCloseTo(912 / 900, 10);
-    expect(openToHourRatio(day, 8)).toBeNull();
+    const day = groupByDay(dayPoints(10, (h) => 900 + h * 3), 'VENTA')[0];
+    expect(openToHourRatio(day, 12)).toBeCloseTo((900 + 36) / 900, 10);
+    expect(openToHourRatio(day, 0)).toBeNull(); // la propia apertura no tiene recorrido contra sí misma
   });
 });
 
@@ -310,19 +355,22 @@ describe('el día completo', () => {
     expect(leg.projected).toEqual([]);
   });
 
-  it('proyecta sólo las horas que quedan y parte del precio REAL de ahora', () => {
+  it('proyecta hoursAhead consecutivos (1, 2, 3…) y parte del precio REAL de ahora', () => {
     const points = [
       ...Array.from({ length: MIN_PROFILE_DAYS + 1 }, (_, i) =>
-        dayPoints(10 + i, (h) => 900 * (1 + (h - 8) * 0.01))
+        dayPoints(10 + i, (h) => 900 * (1 + h * 0.01))
       ).flat(),
       ...dayPoints(20, () => 950),
     ];
-    const leg = projectLeg(points, 'VENTA', now);
+    const leg = projectLeg(points, 'VENTA', now, 8); // horizonte corto, para una lista concisa
     expect(leg.tier).toBe('PERFIL_LIMITADO');
     expect(leg.anchorHour).toBe(12);
-    expect(leg.projected.map((p) => p.hour)).toEqual([13, 14, 15, 16, 17, 18, 19, 20]);
+    // hoursAhead es una distancia, no una hora de reloj: 1, 2, 3… nunca "13, 14…".
+    expect(leg.projected.map((p) => p.hoursAhead)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    // La hora de reloj de cada proyectado SÍ avanza 13, 14, 15… para mostrarla.
+    expect(leg.projected.map((p) => p.hourOfDay)).toEqual([13, 14, 15, 16, 17, 18, 19, 20]);
     expect(leg.real.every((r) => r.hour <= 12)).toBe(true);
-    // Ancla real 950, no la media histórica de los días anteriores (~900).
+    // Ancla real 950, no la media histórica de los días anteriores (~900 a las 12).
     expect(leg.projected[0].central).toBeGreaterThan(950);
     expect(leg.projected[0].central).toBeLessThan(1000);
   });
@@ -334,13 +382,113 @@ describe('el día completo', () => {
       ).flat(),
       ...dayPoints(20, () => 950),
     ];
-    const leg = projectLeg(points, 'VENTA', now);
+    const leg = projectLeg(points, 'VENTA', now, 8);
     for (const p of leg.projected) {
       expect(p.low).toBeLessThanOrEqual(p.central);
       expect(p.high).toBeGreaterThanOrEqual(p.central);
       // Seis días: por debajo de diez, la banda NO puede llamarse percentil.
       expect(p.bandKind).toBe('RANGO_OBSERVADO');
     }
+  });
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * CRUCE DE MEDIANOCHE. La garantía nueva de esta fase.
+ * ══════════════════════════════════════════════════════════════════════════
+ *
+ * Antes, `endHour` cortaba la proyección en 20:00: anclar a las 23:00 no
+ * habría producido ni una hora proyectada. Ahora el horizonte cruza la
+ * medianoche hacia el día calendario siguiente, y estas pruebas verifican la
+ * distancia temporal exacta —nunca `hourOfDay - anchorHour` cuando envuelve—.
+ */
+describe('el horizonte cruza medianoche sin perder la distancia temporal', () => {
+  it('hourStartMs es la inversa de venezuelaDayKey + venezuelaHourOf', () => {
+    const t = at(15, 14, 0);
+    const ms = hourStartMs(venezuelaDayKey(t), venezuelaHourOf(t));
+    expect(venezuelaDayKey(ms)).toBe(venezuelaDayKey(t));
+    expect(venezuelaHourOf(ms)).toBe(venezuelaHourOf(t));
+  });
+
+  it('hourCellAhead resuelve 23:00 + 3h como la 02:00 del día calendario SIGUIENTE', () => {
+    const points = [
+      ...dayPoints(10, (h) => 900 + h),
+      ...dayPoints(11, (h) => 1000 + h), // día siguiente, nivel distinto para poder distinguirlo
+    ];
+    const days = groupByDay(points, 'VENTA');
+    const index = buildDayIndex(days);
+
+    const target = hourCellAhead(index, '2026-08-10', 23, 3);
+    expect(target).not.toBeUndefined();
+    expect(target!.dayKey).toBe('2026-08-11'); // cruzó al día siguiente
+    expect(target!.hour).toBe(2); // 23 + 3 = 26 → 02:00
+    expect(target!.cell.best).toBe(1000 + 2); // del día 11, no del 10
+  });
+
+  it('hourCellAhead cruza fin de mes y de año igual que cualquier otro día', () => {
+    // 31 de diciembre de 2026 a las 23:00 + 2h → 1 de enero de 2027 a la 01:00.
+    const points: SeriesPoint[] = [];
+    for (let h = 20; h <= 23; h += 1) points.push({ t: Date.UTC(2026, 11, 31, h + 4, 5), price: 900 + h });
+    for (let h = 0; h <= 3; h += 1) points.push({ t: Date.UTC(2027, 0, 1, h + 4, 5), price: 1000 + h });
+
+    const days = groupByDay(points, 'VENTA');
+    const index = buildDayIndex(days);
+    const target = hourCellAhead(index, '2026-12-31', 23, 2);
+    expect(target?.dayKey).toBe('2027-01-01');
+    expect(target?.hour).toBe(1);
+    expect(target?.cell.best).toBe(1001);
+  });
+
+  it('ratiosAhead compara el ancla de un día contra el día calendario siguiente', () => {
+    const points = [
+      ...dayPoints(10, () => 900), // ancla plana a 900
+      ...dayPoints(11, (h) => (h === 2 ? 918 : 900)), // el día siguiente sube a las 02:00
+    ];
+    const days = groupByDay(points, 'VENTA');
+    const index = buildDayIndex(days);
+
+    // Ancla a las 23:00 del día 10; 3 horas adelante cae en las 02:00 del día 11.
+    const ratios = ratiosAhead(days, index, 23, 3);
+    expect(ratios).toHaveLength(1);
+    expect(ratios[0].ratio).toBeCloseTo(918 / 900, 10);
+  });
+
+  it('projectLeg produce una proyección real anclando a las 23:00, con horas del día siguiente', () => {
+    /*
+     * MIN_PROFILE_DAYS + 1 días anteriores con una forma diaria repetida, y
+     * "hoy" observado sólo hasta las 23:00. El horizonte pedido son 3 horas:
+     * deben resolverse como 00:00, 01:00, 02:00 del día calendario SIGUIENTE,
+     * nunca como "horas 24, 25, 26" ni recortadas a cero por falta de "resto
+     * del día" — ese concepto ya no existe.
+     */
+    const shape = (h: number) => 900 + Math.sin(h) * 5;
+    const points = [
+      ...Array.from({ length: MIN_PROFILE_DAYS + 1 }, (_, i) => dayPoints(10 + i, shape)).flat(),
+      ...dayPoints(20, (h) => (h <= 23 ? shape(h) + 50 : NaN)),
+    ];
+    const now = at(20, 23, 30);
+    const leg = projectLeg(points, 'VENTA', now, 3);
+
+    expect(leg.anchorHour).toBe(23);
+    expect(leg.anchorDayKey).toBe('2026-08-20');
+    expect(leg.projected).toHaveLength(3);
+    expect(leg.projected.map((p) => p.hoursAhead)).toEqual([1, 2, 3]);
+    // Las tres proyecciones caen en el día calendario SIGUIENTE, a horas 0, 1, 2.
+    for (const [i, p] of leg.projected.entries()) {
+      expect(p.dayKey).toBe('2026-08-21');
+      expect(p.hourOfDay).toBe(i);
+    }
+  });
+
+  it('el giro proyectado nombra correctamente la hora y el día cuando cruza medianoche', async () => {
+    const { projectedTurn } = await import('../server/projection/dailyOpportunity.js');
+    const projected = [
+      { central: 900, low: 899, high: 901, bandKind: 'RANGO_OBSERVADO' as const, daysUsed: 6, hoursAhead: 1, hourOfDay: 23, dayKey: '2026-08-20', movePct: 0.5 },
+      { central: 895, low: 894, high: 896, bandKind: 'RANGO_OBSERVADO' as const, daysUsed: 6, hoursAhead: 2, hourOfDay: 0, dayKey: '2026-08-21', movePct: -0.6 },
+    ];
+    const turn = projectedTurn(projected, 0.2);
+    expect(turn?.hoursAhead).toBe(2);
+    expect(turn?.hourOfDay).toBe(0);
+    expect(turn?.dayKey).toBe('2026-08-21');
   });
 });
 
@@ -352,12 +500,12 @@ describe('el backtest no puede ver el futuro', () => {
   const buildDays = (count: number, priceAt: (d: number, h: number) => number): DayShape[] => {
     const points: SeriesPoint[] = [];
     for (let d = 0; d < count; d += 1) {
-      for (let h = 8; h <= 20; h += 1) points.push({ t: at(1 + d, h, 10), price: priceAt(d, h) });
+      for (let h = 0; h <= 23; h += 1) points.push({ t: at(1 + d, h, 10), price: priceAt(d, h) });
     }
     return groupByDay(points, 'VENTA');
   };
 
-  const shape = (d: number, h: number) => (900 + d * 4) * (1 + (h - 8) * 0.003);
+  const shape = (d: number, h: number) => (900 + d * 4) * (1 + h * 0.003);
 
   it('añadir un día POSTERIOR no cambia la evaluación de los días anteriores', () => {
     /*
@@ -370,7 +518,7 @@ describe('el backtest no puede ver el futuro', () => {
     const before = backtestLeg(base, 'VENTA');
 
     // Un décimo día con un comportamiento radicalmente distinto.
-    const extended = buildDays(10, (d, h) => (d === 9 ? 2000 - (h - 8) * 50 : shape(d, h)));
+    const extended = buildDays(10, (d, h) => (d === 9 ? 2000 - h * 50 : shape(d, h)));
     const after = backtestLeg(extended, 'VENTA');
 
     // Los días evaluados aumentan en uno, pero lo ya juzgado no se mueve.
@@ -393,17 +541,17 @@ describe('el backtest no puede ver el futuro', () => {
     const past = buildDays(8, shape);
 
     const todayEarly: SeriesPoint[] = [];
-    for (let h = 8; h <= 12; h += 1) todayEarly.push({ t: at(20, h, 10), price: 950 + h });
+    for (let h = 0; h <= 12; h += 1) todayEarly.push({ t: at(20, h, 10), price: 950 + h });
 
     const withCalmAfternoon = [...todayEarly];
-    for (let h = 13; h <= 20; h += 1) withCalmAfternoon.push({ t: at(20, h, 10), price: 962 });
+    for (let h = 13; h <= 23; h += 1) withCalmAfternoon.push({ t: at(20, h, 10), price: 962 });
 
     const withWildAfternoon = [...todayEarly];
-    for (let h = 13; h <= 20; h += 1) withWildAfternoon.push({ t: at(20, h, 10), price: 5000 });
+    for (let h = 13; h <= 23; h += 1) withWildAfternoon.push({ t: at(20, h, 10), price: 5000 });
 
     const project = (todayPoints: SeriesPoint[]) => {
       const today = groupByDay(todayPoints, 'VENTA')[0];
-      return projectLegFromDays([...past, today], 'VENTA', today.dayKey, 12);
+      return projectLegFromDays([...past, today], 'VENTA', today.dayKey, 12, 4);
     };
 
     const calm = project(withCalmAfternoon);
@@ -419,13 +567,40 @@ describe('el backtest no puede ver el futuro', () => {
   it('lo observado que se publica llega sólo hasta el ancla', () => {
     const past = buildDays(8, shape);
     const points: SeriesPoint[] = [];
-    for (let h = 8; h <= 20; h += 1) points.push({ t: at(20, h, 10), price: h === 18 ? 9999 : 950 });
+    for (let h = 0; h <= 23; h += 1) points.push({ t: at(20, h, 10), price: h === 18 ? 9999 : 950 });
     const today = groupByDay(points, 'VENTA')[0];
 
-    const projection = projectLegFromDays([...past, today], 'VENTA', today.dayKey, 12);
+    const projection = projectLegFromDays([...past, today], 'VENTA', today.dayKey, 12, 4);
     expect(projection.real.every((r) => r.hour <= 12)).toBe(true);
     // El pico de las 18 todavía no ha ocurrido: no puede ser el techo observado.
     expect(projection.observedExtreme?.price).toBe(950);
+  });
+
+  it('un análogo que cruza medianoche hacia el día evaluado no ve más allá del ancla de ESE día', () => {
+    /*
+     * El "mañana" de un día análogo puede ser, literalmente, el día que se
+     * está evaluando. Si el ancla de ese día es las 23:00, el análogo puede
+     * cruzar hacia sus primeras horas — pero JAMÁS hacia una hora posterior al
+     * ancla del día evaluado, porque ese día entra recortado
+     * (`visibleToday`), no completo.
+     */
+    const past = buildDays(8, shape); // días 1..8, formas normales
+    // "Hoy" (sería el día 9) sólo se observa hasta las 23:00 con un valor centinela.
+    const todayPoints: SeriesPoint[] = [];
+    for (let h = 0; h <= 23; h += 1) {
+      todayPoints.push({ t: at(9, h, 10), price: h === 23 ? 12345 : 900 });
+    }
+    const today = groupByDay(todayPoints, 'VENTA')[0];
+
+    // Ancla a las 22: el modelo NO puede saber que a las 23 el precio es 12345.
+    const projection = projectLegFromDays([...past, today], 'VENTA', today.dayKey, 22, 4);
+    // Si algún análogo (día 8, anclado también cerca de medianoche) leyera el
+    // "mañana" y ese mañana resultara ser el propio día 9 más allá del ancla,
+    // 12345 aparecería en la banda proyectada. No debe hacerlo.
+    for (const p of projection.projected) {
+      expect(p.central).toBeLessThan(2000);
+      expect(p.high).toBeLessThan(2000);
+    }
   });
 });
 
@@ -433,13 +608,13 @@ describe('el backtest mide lo que dice medir', () => {
   const buildDays = (count: number, priceAt: (d: number, h: number) => number): DayShape[] => {
     const points: SeriesPoint[] = [];
     for (let d = 0; d < count; d += 1) {
-      for (let h = 8; h <= 20; h += 1) points.push({ t: at(1 + d, h, 10), price: priceAt(d, h) });
+      for (let h = 0; h <= 23; h += 1) points.push({ t: at(1 + d, h, 10), price: priceAt(d, h) });
     }
     return groupByDay(points, 'VENTA');
   };
 
   it('un día es un caso, no un caso por cada ancla', () => {
-    const days = buildDays(12, (d, h) => (900 + d * 3) * (1 + (h - 8) * 0.002));
+    const days = buildDays(12, (d, h) => (900 + d * 3) * (1 + h * 0.002));
     const r = backtestLeg(days, 'VENTA');
     expect(r.modelWins + r.persistenceWins + r.ties).toBeLessThanOrEqual(r.days);
     // Cada día aporta muchas anclas, y ninguna de ellas cuenta como caso.
@@ -447,8 +622,8 @@ describe('el backtest mide lo que dice medir', () => {
   });
 
   it('con una forma diaria repetida el modelo bate a la persistencia', () => {
-    const shape = (h: number) => 1 + (h <= 14 ? (h - 8) * 0.01 : 0.06 - (h - 14) * 0.01);
-    const r = backtestLeg(buildDays(14, (d, h) => (900 + d * 5) * shape(h)), 'VENTA');
+    const shape = (h: number) => 1 + (h <= 14 ? h * 0.01 : 0.14 - (h - 14) * 0.01);
+    const r = backtestLeg(buildDays(14, (d, h) => (900 + d * 5) * shape(h)), 'VENTA', 6);
     expect(r.days).toBeGreaterThan(0);
     expect(r.modelWins).toBe(r.days);
     expect(r.beatsPersistence).toBe(true);
@@ -485,21 +660,36 @@ describe('el backtest mide lo que dice medir', () => {
   });
 
   it('la cobertura está entre 0 y 1 y la dirección no supera sus casos', () => {
-    const r = backtestLeg(buildDays(12, (d, h) => (900 + d * 3) * (1 + (h - 8) * 0.004)), 'VENTA');
+    const r = backtestLeg(buildDays(12, (d, h) => (900 + d * 3) * (1 + h * 0.004)), 'VENTA');
     if (r.coverage !== null) {
       expect(r.coverage).toBeGreaterThanOrEqual(0);
       expect(r.coverage).toBeLessThanOrEqual(1);
     }
     expect(r.directionHits).toBeLessThanOrEqual(r.directionTotal);
   });
+
+  it('un ancla a las 23:00 se evalúa contra el cierre del día calendario siguiente', () => {
+    /*
+     * Antes, `endHour=20` significaba que anclar a las 21, 22 o 23 nunca
+     * producía ni una ancla evaluable en el backtest (el bucle se detenía en
+     * `anchor < endHour`). Ahora el bucle recorre las 24 horas y el "cierre"
+     * se busca cruzando medianoche cuando hace falta.
+     */
+    const shape = (h: number) => 1 + h * 0.001;
+    const days = buildDays(14, (d, h) => (900 + d * 2) * shape(h));
+    const r = backtestLeg(days, 'VENTA', 4);
+    // Con 24 horas de ancla por día en vez de 12, hay más anclas evaluadas.
+    expect(r.anchors).toBeGreaterThan(0);
+    expect(r.days).toBeGreaterThan(0);
+  });
 });
 
 describe('el umbral de giro se mide, no se elige', () => {
   it('sale de los cambios de hora a hora observados', () => {
-    const days = groupByDay(dayPoints(10, (h) => 900 * 1.01 ** (h - 8)), 'VENTA');
+    const days = groupByDay(dayPoints(10, (h) => 900 * 1.005 ** h), 'VENTA');
     const threshold = turnThreshold(days);
-    expect(threshold.pct).toBeCloseTo(1, 6);
-    expect(threshold.sampleSize).toBe(12);
+    expect(threshold.pct).toBeCloseTo(0.5, 6);
+    expect(threshold.sampleSize).toBe(23);
   });
 
   it('sin muestra no hay umbral inventado', () => {
@@ -521,6 +711,6 @@ describe('el umbral de giro se mide, no se elige', () => {
 
 describe('projectHour', () => {
   it('sin ningún día que la haya visto, no existe', () => {
-    expect(projectHour([], 9, 15, 900)).toBeNull();
+    expect(projectHour([], new Map(), '2026-08-10', 9, 6, 900)).toBeNull();
   });
 });

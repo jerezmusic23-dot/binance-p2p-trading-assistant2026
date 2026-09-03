@@ -37,7 +37,7 @@ import {
   YAxis,
 } from 'recharts';
 import { DailyProjectionResponse } from './types';
-import { buildRows, hourLabel, type DailyChartRow } from './dailyChartRows';
+import { buildRows, type DailyChartRow } from './dailyChartRows';
 
 /* MI VENTA va arriba (techo) y MI COMPRA abajo (piso). El color no decide
    nada: lo decide el campo del que sale cada serie. */
@@ -60,7 +60,7 @@ const TooltipBox: React.FC<{ active?: boolean; payload?: any[]; label?: string }
   return (
     <div className="bg-[#181a20] border border-[#2b2f36] rounded px-3 py-2 text-[11px]">
       <div className="text-[#eaecef] font-semibold mb-1">
-        {label}
+        {row.label}
         <span className={`ml-2 text-[9px] ${projected ? 'text-[#848e9c]' : 'text-[#02c076]'}`}>
           {projected ? 'PROYECCIÓN' : 'OCURRIÓ'}
         </span>
@@ -93,9 +93,17 @@ interface Props {
 
 export const ProjectionsChart: React.FC<Props> = ({ report }) => {
   const rows = buildRows(report);
-  const anchorLabel = hourLabel(report.anchorHour);
   const hasProjection = report.legs.some((l) => l.projection.projected.length > 0);
   const threshold = report.turn.pct;
+  /*
+   * El eje X se emparienta por `step` (número único por fila), no por la
+   * etiqueta de hora: con el horizonte cruzando medianoche, una misma hora de
+   * reloj —por ejemplo la 1 AM— puede repetirse hoy y mañana, y una
+   * `ReferenceArea` o `ReferenceLine` que buscara esa etiqueta por texto no
+   * sabría a cuál de las dos filas se refiere. `step` no se repite nunca.
+   */
+  const tickLabel = (step: number) => rows.find((r) => r.step === step)?.label ?? String(step);
+  const lastStep = rows.length > 0 ? rows[rows.length - 1].step : 0;
 
   return (
     <div>
@@ -103,7 +111,12 @@ export const ProjectionsChart: React.FC<Props> = ({ report }) => {
         <ResponsiveContainer>
           <ComposedChart data={rows} margin={{ top: 16, right: 16, bottom: 0, left: 0 }}>
             <CartesianGrid stroke={GRID} strokeDasharray="2 4" vertical={false} />
-            <XAxis dataKey="label" tick={{ fill: MUTED, fontSize: 10 }} stroke={GRID} />
+            <XAxis
+              dataKey="step"
+              tick={{ fill: MUTED, fontSize: 10 }}
+              stroke={GRID}
+              tickFormatter={tickLabel}
+            />
             <YAxis
               tick={{ fill: MUTED, fontSize: 10 }}
               stroke={GRID}
@@ -115,19 +128,14 @@ export const ProjectionsChart: React.FC<Props> = ({ report }) => {
 
             {/* El futuro va tintado: se ve de un vistazo dónde deja de haber hechos. */}
             {hasProjection && (
-              <ReferenceArea
-                x1={anchorLabel}
-                x2={hourLabel(report.endHour)}
-                fill="#ffffff"
-                fillOpacity={0.03}
-              />
+              <ReferenceArea x1={0} x2={lastStep} fill="#ffffff" fillOpacity={0.03} />
             )}
 
             {/* La ventana que merece vigilancia, si el servidor pudo señalar una. */}
             {report.watchWindow && (
               <ReferenceArea
-                x1={hourLabel(report.watchWindow.fromHour)}
-                x2={hourLabel(report.watchWindow.toHour)}
+                x1={report.watchWindow.fromHoursAhead}
+                x2={report.watchWindow.toHoursAhead}
                 fill={VENTA_COLOR}
                 fillOpacity={0.07}
                 label={{ value: 'MIRAR AQUÍ', position: 'insideTop', fill: MUTED, fontSize: 9 }}
@@ -187,7 +195,7 @@ export const ProjectionsChart: React.FC<Props> = ({ report }) => {
             />
 
             <ReferenceLine
-              x={anchorLabel}
+              x={0}
               stroke="#eaecef"
               strokeDasharray="4 4"
               label={{ value: 'AHORA', position: 'top', fill: '#eaecef', fontSize: 9 }}
@@ -214,7 +222,12 @@ export const ProjectionsChart: React.FC<Props> = ({ report }) => {
         <ResponsiveContainer>
           <ComposedChart data={rows} margin={{ top: 4, right: 16, bottom: 0, left: 0 }}>
             <CartesianGrid stroke={GRID} strokeDasharray="2 4" vertical={false} />
-            <XAxis dataKey="label" tick={{ fill: MUTED, fontSize: 10 }} stroke={GRID} />
+            <XAxis
+              dataKey="step"
+              tick={{ fill: MUTED, fontSize: 10 }}
+              stroke={GRID}
+              tickFormatter={tickLabel}
+            />
             <YAxis
               tick={{ fill: MUTED, fontSize: 9 }}
               stroke={GRID}
@@ -232,7 +245,7 @@ export const ProjectionsChart: React.FC<Props> = ({ report }) => {
             <Bar dataKey="movePct" isAnimationActive={false}>
               {rows.map((row) => (
                 <Cell
-                  key={row.hour}
+                  key={row.step}
                   fill={(row.movePct ?? 0) >= 0 ? VENTA_COLOR : COMPRA_COLOR}
                   /* Hueco = todavía no ha ocurrido. Misma regla que los puntos. */
                   fillOpacity={row.moveIsReal ? 0.85 : 0.35}

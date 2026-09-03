@@ -216,8 +216,9 @@ describe('con días suficientes', () => {
     expect(report.maxSpread).not.toBeNull();
     // Mi venta por encima de mi compra: el margen del maker es positivo.
     expect(report.maxSpread!.spreadPct).toBeGreaterThan(0);
-    expect(report.maxSpread!.hour).toBeGreaterThanOrEqual(report.startHour);
-    expect(report.maxSpread!.hour).toBeLessThanOrEqual(report.endHour);
+    // Ya no hay ventana horaria: cualquier hora de reloj válida (0–23) es legítima.
+    expect(report.maxSpread!.hour).toBeGreaterThanOrEqual(0);
+    expect(report.maxSpread!.hour).toBeLessThanOrEqual(23);
   });
 
   it('publica qué variables usa y cuáles no, con el motivo', () => {
@@ -320,5 +321,39 @@ describe('cuánto queda por venir', () => {
 
   it('las horas proyectadas sin movimiento medible no cuentan', () => {
     expect(remainingShare([{ price: 900 }, { price: 909 }], [{ movePct: null }])).toBeCloseTo(0, 6);
+  });
+});
+
+describe('el informe ya no tiene ventana horaria', () => {
+  it('DailyProjectionReport expone horizonHours, no startHour/endHour', () => {
+    const report = buildDailyProjection([], NOW);
+    expect(report).toHaveProperty('horizonHours');
+    expect(report).not.toHaveProperty('startHour');
+    expect(report).not.toHaveProperty('endHour');
+    expect(report.horizonHours).toBeGreaterThan(0);
+  });
+
+  it('produce un informe válido anclado a las 23:00, cruzando medianoche', () => {
+    const shape = (h: number) => 1 + (h <= 14 ? h * 0.003 : 0.042 - (h - 14) * 0.003);
+    const fullDay = (d: number, buyLvl: number, sellLvl: number) => {
+      const out: HistoryRecord[] = [];
+      for (let h = 0; h <= 23; h += 1) {
+        out.push(record(at(d, h, 10), buyLvl * shape(h), sellLvl * shape(h)));
+      }
+      return out;
+    };
+    const records = [
+      ...Array.from({ length: MIN_PROFILE_DAYS + 1 }, (_, i) => fullDay(10 + i, 936, 931)).flat(),
+      ...fullDay(20, 950, 945),
+    ];
+    const report = buildDailyProjection(records, at(20, 23, 30));
+    expect(report.anchorHour).toBe(23);
+    expect(report.tier).not.toBe('SIN_DATOS');
+    for (const leg of report.legs) {
+      expect(leg.projection.projected.length).toBeGreaterThan(0);
+      // Las primeras horas proyectadas caen ya en el día calendario siguiente.
+      expect(leg.projection.projected[0].dayKey).toBe('2026-08-21');
+      expect(leg.projection.projected[0].hourOfDay).toBe(0);
+    }
   });
 });

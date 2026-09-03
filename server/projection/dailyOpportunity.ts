@@ -12,8 +12,6 @@
  */
 
 import {
-  DEFAULT_DAY_END_HOUR,
-  DEFAULT_DAY_START_HOUR,
   MIN_PROFILE_DAYS,
   isBetterForLeg,
   medianOf,
@@ -50,16 +48,11 @@ export interface HourFavourability {
   daysUsed: number;
 }
 
-export function favourableHours(
-  days: readonly DayShape[],
-  leg: MakerLeg,
-  startHour = DEFAULT_DAY_START_HOUR,
-  endHour = DEFAULT_DAY_END_HOUR
-): HourFavourability[] {
+export function favourableHours(days: readonly DayShape[], leg: MakerLeg): HourFavourability[] {
   const totals = new Map<number, { sum: number; days: number }>();
 
   for (const day of days) {
-    const cells = [...day.hours.values()].filter((c) => c.hour >= startHour && c.hour <= endHour);
+    const cells = [...day.hours.values()];
     // Con una sola hora no hay "posición dentro del día" que medir.
     if (cells.length < 2) continue;
 
@@ -91,7 +84,12 @@ export function favourableHours(
  * ════════════════════════════════════════════════════════════════════════ */
 
 export interface LegOpportunity {
-  hour: number;
+  /** Horas desde el ancla. Siempre positivo, nunca envuelve. */
+  hoursAhead: number;
+  /** Hora de reloj (0–23), sólo para mostrarla. */
+  hourOfDay: number;
+  /** Día calendario (Venezuela) de ese momento. */
+  dayKey: string;
   price: number;
   low: number;
   high: number;
@@ -128,7 +126,9 @@ export function bestOpportunity(
       : null;
 
   return {
-    hour: best.hour,
+    hoursAhead: best.hoursAhead,
+    hourOfDay: best.hourOfDay,
+    dayKey: best.dayKey,
     price: best.central,
     low: best.low,
     high: best.high,
@@ -144,8 +144,12 @@ export function bestOpportunity(
  * ════════════════════════════════════════════════════════════════════════ */
 
 export interface ProjectedTurn {
-  /** Hora en la que la trayectoria proyectada cambia de sentido. */
-  hour: number;
+  /** Horas desde el ancla hasta el giro. Siempre positivo, nunca envuelve. */
+  hoursAhead: number;
+  /** Hora de reloj (0–23) del giro, sólo para mostrarla. */
+  hourOfDay: number;
+  /** Día calendario (Venezuela) del giro. */
+  dayKey: string;
   from: 'SUBIENDO' | 'BAJANDO';
   to: 'SUBIENDO' | 'BAJANDO';
   /** Movimiento de la hora del giro, en %. */
@@ -176,7 +180,9 @@ export function projectedTurn(
     if (Math.abs(current) <= thresholdPct) continue;
 
     return {
-      hour: projected[i].hour,
+      hoursAhead: projected[i].hoursAhead,
+      hourOfDay: projected[i].hourOfDay,
+      dayKey: projected[i].dayKey,
       from: previous > 0 ? 'SUBIENDO' : 'BAJANDO',
       to: current > 0 ? 'SUBIENDO' : 'BAJANDO',
       movePct: current,

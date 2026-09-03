@@ -10,10 +10,11 @@
 
 import { binomialTailProbability } from './probability.js';
 import {
-  DEFAULT_DAY_END_HOUR,
-  DEFAULT_DAY_START_HOUR,
+  DEFAULT_HORIZON_HOURS,
   MIN_PROFILE_DAYS,
+  buildDayIndex,
   extremeForLeg,
+  hourCellAhead,
   projectLegFromDays,
   type DailyEvidenceLevel,
   type DayShape,
@@ -72,10 +73,18 @@ const mean = (xs: readonly number[]): number | null =>
 export function backtestLeg(
   days: readonly DayShape[],
   leg: MakerLeg,
-  startHour = DEFAULT_DAY_START_HOUR,
-  endHour = DEFAULT_DAY_END_HOUR
+  horizonHours = DEFAULT_HORIZON_HOURS
 ): LegBacktest {
   const ordered = [...days].sort((a, b) => a.dayKey.localeCompare(b.dayKey));
+  /*
+   * ÍNDICE COMPLETO, SIN RECORTAR. Se usa SÓLO para leer qué ocurrió de verdad
+   * —el cierre real, el extremo real— nunca para decidir la proyección. La
+   * proyección de cada ancla sigue recibiendo únicamente `[...past,
+   * visibleToday]`, así que el modelo jamás ve estos datos; el backtest los
+   * necesita para poder puntuar la predicción contra la realidad, que es lo
+   * que un backtest hace por definición.
+   */
+  const groundTruth = buildDayIndex(ordered);
 
   const closeModel: number[] = [];
   const closePersistence: number[] = [];
@@ -101,13 +110,15 @@ export function backtestLeg(
     const dayModelErrors: number[] = [];
     const dayPersistenceErrors: number[] = [];
 
-    for (let anchor = startHour; anchor < endHour; anchor += 1) {
+    for (let anchor = 0; anchor <= 23; anchor += 1) {
       const anchorCell = actual.hours.get(anchor);
       if (anchorCell === undefined || anchorCell.best <= 0) continue;
 
       /*
        * El día evaluado se recorta hasta el ancla antes de proyectar: el motor
-       * no puede ver ni una hora posterior de su propio día.
+       * no puede ver ni una hora posterior de su propio día — ni, por el mismo
+       * motivo, ninguna hora del día SIGUIENTE que un análogo cruzando
+       * medianoche pudiera intentar leer.
        */
       const visibleToday: DayShape = {
         dayKey: actual.dayKey,
@@ -120,15 +131,15 @@ export function backtestLeg(
         leg,
         actual.dayKey,
         anchor,
-        startHour,
-        endHour
+        horizonHours
       );
       if (projection.projected.length === 0) continue;
       anchors += 1;
 
-      // ── Cierre ──
-      const closeCell = actual.hours.get(endHour);
-      if (closeCell !== undefined && projection.projectedClose !== null) {
+      // ── Cierre: horizonHours horas después del ancla, lo que REALMENTE pasó ──
+      const closeTarget = hourCellAhead(groundTruth, actual.dayKey, anchor, horizonHours);
+      if (closeTarget !== undefined && projection.projectedClose !== null) {
+        const closeCell = closeTarget.cell;
         const modelError = Math.abs(projection.projectedClose.central - closeCell.best);
         const persistenceError = Math.abs(anchorCell.best - closeCell.best);
         closeModel.push(modelError);
@@ -150,11 +161,11 @@ export function backtestLeg(
         }
       }
 
-      // ── Extremo del tramo restante ──
+      // ── Extremo del tramo restante, lo que REALMENTE pasó ──
       const futureValues: number[] = [];
-      for (let h = anchor + 1; h <= endHour; h += 1) {
-        const cell = actual.hours.get(h);
-        if (cell !== undefined) futureValues.push(cell.best);
+      for (let k = 1; k <= horizonHours; k += 1) {
+        const target = hourCellAhead(groundTruth, actual.dayKey, anchor, k);
+        if (target !== undefined) futureValues.push(target.cell.best);
       }
       const realExtreme = extremeForLeg(leg, futureValues);
       if (realExtreme !== null && projection.projectedExtreme !== null) {

@@ -38,8 +38,7 @@
 import { StorageEngine } from './storage.js';
 import type { HistoryRecord } from './types.js';
 import {
-  DEFAULT_DAY_END_HOUR,
-  DEFAULT_DAY_START_HOUR,
+  DEFAULT_HORIZON_HOURS,
   LEG_BINANCE_SIDE,
   LEG_LABEL,
   MIN_PROFILE_DAYS,
@@ -190,10 +189,11 @@ export interface DailyLegReport {
 export interface DailyProjectionReport {
   generatedAt: number;
   source: 'market_history.json';
+  /** Día calendario (Venezuela) del ancla. */
   dayKey: string;
-  startHour: number;
-  endHour: number;
   anchorHour: number;
+  /** Horas hacia adelante que cubre la proyección. Ya no hay "fin de jornada". */
+  horizonHours: number;
 
   /** Siempre dos entradas: VENTA primero, COMPRA después. */
   legs: DailyLegReport[];
@@ -205,7 +205,14 @@ export interface DailyProjectionReport {
   turn: TurnThreshold;
   turningNow: boolean;
   remainingPct: number | null;
-  watchWindow: { fromHour: number; toHour: number; movePct: number; leg: MakerLeg } | null;
+  watchWindow: {
+    fromHoursAhead: number;
+    toHoursAhead: number;
+    toHourOfDay: number;
+    toDayKey: string;
+    movePct: number;
+    leg: MakerLeg;
+  } | null;
 
   /** El peor nivel de las dos piernas: la pantalla no puede prometer más. */
   tier: DailyTier;
@@ -331,8 +338,7 @@ function summariseLeg(
   projection: LegProjection,
   points: readonly SeriesPoint[],
   turn: TurnThreshold,
-  startHour: number,
-  endHour: number
+  horizonHours: number
 ): DailyMarketSummary {
   const close = projection.projectedClose;
   const anchor = projection.anchorPrice;
@@ -353,7 +359,7 @@ function summariseLeg(
     direction,
     speed: speedFor(
       changePct,
-      historicalDayMoves(points, projection.leg, projection.anchorHour, startHour, endHour)
+      historicalDayMoves(points, projection.leg, projection.anchorHour, horizonHours)
     ),
     changePct,
   };
@@ -429,8 +435,7 @@ export function screenState(tier: DailyTier, legs: readonly DailyLegReport[]): S
 export function buildDailyProjection(
   records: readonly HistoryRecord[],
   now: number,
-  startHour = DEFAULT_DAY_START_HOUR,
-  endHour = DEFAULT_DAY_END_HOUR
+  horizonHours = DEFAULT_HORIZON_HOURS
 ): DailyProjectionReport {
   /*
    * ═══ POR QUÉ ESTO FALLA EN VEZ DE DEGRADAR ═══
@@ -452,12 +457,12 @@ export function buildDailyProjection(
   const ventaSeries = extractLegSeries(records, 'VENTA');
   const compraSeries = extractLegSeries(records, 'COMPRA');
 
-  const venta = projectLeg(ventaSeries.points, 'VENTA', now, startHour, endHour);
-  const compra = projectLeg(compraSeries.points, 'COMPRA', now, startHour, endHour);
+  const venta = projectLeg(ventaSeries.points, 'VENTA', now, horizonHours);
+  const compra = projectLeg(compraSeries.points, 'COMPRA', now, horizonHours);
 
   const todayKey = venezuelaDayKey(now);
-  const ventaDays = groupByDay(ventaSeries.points, 'VENTA', startHour, endHour);
-  const compraDays = groupByDay(compraSeries.points, 'COMPRA', startHour, endHour);
+  const ventaDays = groupByDay(ventaSeries.points, 'VENTA');
+  const compraDays = groupByDay(compraSeries.points, 'COMPRA');
   const previousVenta = ventaDays.filter((d) => d.dayKey < todayKey);
   const previousCompra = compraDays.filter((d) => d.dayKey < todayKey);
 
@@ -465,8 +470,8 @@ export function buildDailyProjection(
    * El backtest recorre SÓLO los días anteriores a hoy. El de hoy está a medias
    * y evaluarlo compararía una proyección contra media jornada.
    */
-  const ventaBacktest = backtestLeg(previousVenta, 'VENTA', startHour, endHour);
-  const compraBacktest = backtestLeg(previousCompra, 'COMPRA', startHour, endHour);
+  const ventaBacktest = backtestLeg(previousVenta, 'VENTA', horizonHours);
+  const compraBacktest = backtestLeg(previousCompra, 'COMPRA', horizonHours);
 
   /*
    * El umbral de giro se mide sobre MI VENTA. Es una sola cifra en pantalla y
@@ -490,7 +495,7 @@ export function buildDailyProjection(
       evidenceText: DAILY_EVIDENCE_TEXT[evidence],
       label: LEG_LABEL[projection.leg],
       extraction,
-      market: summariseLeg(projection, points, turn, startHour, endHour),
+      market: summariseLeg(projection, points, turn, horizonHours),
       now: projection.anchorPrice,
       nowOrigin: {
         field: FIELD_FOR_LEG[projection.leg],
@@ -504,7 +509,7 @@ export function buildDailyProjection(
         daysUsed: null,
       },
       opportunity: bestOpportunity(projection.projected, projection.leg, projection.anchorPrice),
-      favourableHours: favourableHours(previousDays, projection.leg, startHour, endHour),
+      favourableHours: favourableHours(previousDays, projection.leg),
       turn: projectedTurn(projection.projected, turnThresholdFor.pct),
     };
   };
@@ -517,15 +522,22 @@ export function buildDailyProjection(
   // La ventana a vigilar sale de la pierna con el mayor movimiento esperado.
   let watchWindow: DailyProjectionReport['watchWindow'] = null;
   for (const leg of [venta, compra]) {
-    let previousHour = leg.anchorHour;
+    let previousHoursAhead = 0; // el ancla mismo: 0 horas adelante
     for (const p of leg.projected) {
       if (
         p.movePct !== null &&
         (watchWindow === null || Math.abs(p.movePct) > Math.abs(watchWindow.movePct))
       ) {
-        watchWindow = { fromHour: previousHour, toHour: p.hour, movePct: p.movePct, leg: leg.leg };
+        watchWindow = {
+          fromHoursAhead: previousHoursAhead,
+          toHoursAhead: p.hoursAhead,
+          toHourOfDay: p.hourOfDay,
+          toDayKey: p.dayKey,
+          movePct: p.movePct,
+          leg: leg.leg,
+        };
       }
-      previousHour = p.hour;
+      previousHoursAhead = p.hoursAhead;
     }
   }
 
@@ -535,9 +547,8 @@ export function buildDailyProjection(
     generatedAt: now,
     source: 'market_history.json',
     dayKey: todayKey,
-    startHour,
-    endHour,
     anchorHour: venta.anchorHour,
+    horizonHours,
     legs,
     // TECHO sólo de VENTA, PISO sólo de COMPRA. Nunca se comparan entre sí.
     ceiling: extremeOfLeg(venta),

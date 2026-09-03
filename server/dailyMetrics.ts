@@ -10,7 +10,9 @@
 
 import {
   MIN_PROFILE_DAYS,
+  buildDayIndex,
   groupByDay,
+  hourCellAhead,
   type LegProjection,
   type MakerLeg,
 } from './projection/dailyShape.js';
@@ -26,8 +28,18 @@ export interface HourSpread {
   observed: boolean;
 }
 
-/** Trayectoria de una pierna: horas reales y después proyectadas. */
+/**
+ * Trayectoria de una pierna: horas reales y después proyectadas.
+ *
+ * `step` es la clave de emparejamiento entre VENTA y COMPRA —y entre lo real y
+ * lo proyectado—: horas relativas al ancla, negativo en el pasado, positivo en
+ * el futuro. Nunca envuelve, porque lo real vive dentro de un único día (el de
+ * hoy, que todavía no ha cruzado medianoche) y lo proyectado ya trae
+ * `hoursAhead` resuelto por timestamp. `hour` se conserva sólo para mostrar la
+ * hora de reloj.
+ */
 export interface PathPoint {
+  step: number;
   hour: number;
   price: number;
   observed: boolean;
@@ -36,25 +48,30 @@ export interface PathPoint {
 /** Trayectoria completa de una pierna: lo real primero, lo proyectado después. */
 export function fullPath(p: LegProjection): PathPoint[] {
   return [
-    ...p.real.map((r) => ({ hour: r.hour, price: r.price, observed: true })),
-    ...p.projected.map((x) => ({ hour: x.hour, price: x.central, observed: false })),
+    ...p.real.map((r) => ({ step: r.hour - p.anchorHour, hour: r.hour, price: r.price, observed: true })),
+    ...p.projected.map((x) => ({ step: x.hoursAhead, hour: x.hourOfDay, price: x.central, observed: false })),
   ];
 }
 
-/** Recorridos absolutos ancla→cierre observados en los días del histórico. */
+/**
+ * Recorridos absolutos ancla→`horizonHours` observados en los días del
+ * histórico. Cruza medianoche vía `hourCellAhead`, igual que la proyección.
+ */
 export function historicalDayMoves(
   points: readonly SeriesPoint[],
   leg: MakerLeg,
   anchorHour: number,
-  startHour: number,
-  endHour: number
+  horizonHours: number
 ): number[] {
+  const days = groupByDay(points, leg);
+  const index = buildDayIndex(days);
   const moves: number[] = [];
-  for (const day of groupByDay(points, leg, startHour, endHour)) {
+  for (const day of days) {
     const from = day.hours.get(anchorHour);
-    const to = day.hours.get(endHour);
-    if (from === undefined || to === undefined || from.best <= 0) continue;
-    moves.push(Math.abs((to.best - from.best) / from.best) * 100);
+    if (from === undefined || from.best <= 0) continue;
+    const to = hourCellAhead(index, day.dayKey, anchorHour, horizonHours);
+    if (to === undefined) continue;
+    moves.push(Math.abs((to.cell.best - from.best) / from.best) * 100);
   }
   return moves;
 }
@@ -68,11 +85,19 @@ export function historicalDayMoves(
  * seguir siendo distinguible de una ganancia.
  */
 export function maxSpreadOf(venta: LegProjection, compra: LegProjection): HourSpread | null {
-  const compraByHour = new Map(fullPath(compra).map((p) => [p.hour, p]));
+  /*
+   * Se empareja por `step` (horas relativas al ancla común), no por `hour`
+   * (hora de reloj). Las dos piernas comparten el mismo ancla y el mismo
+   * horizonte, así que el mismo `step` es siempre el mismo instante real para
+   * ambas — cosa que `hour` ya NO garantiza en cuanto la proyección cruza
+   * medianoche y una hora de reloj como la 1 AM puede repetirse en dos días
+   * calendario distintos del mismo horizonte.
+   */
+  const compraByStep = new Map(fullPath(compra).map((p) => [p.step, p]));
   let best: HourSpread | null = null;
 
   for (const v of fullPath(venta)) {
-    const c = compraByHour.get(v.hour);
+    const c = compraByStep.get(v.step);
     if (c === undefined || c.price <= 0) continue;
     const spreadPct = ((v.price - c.price) / c.price) * 100;
     if (best === null || Math.abs(spreadPct) > Math.abs(best.spreadPct)) {
