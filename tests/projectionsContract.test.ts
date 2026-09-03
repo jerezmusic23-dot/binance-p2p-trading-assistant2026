@@ -558,6 +558,31 @@ describe('no quedan consumidores de los motores retirados', () => {
   });
 });
 
+describe('la pantalla no lee como una orden de operación', () => {
+  const panel = fs.readFileSync(path.join(process.cwd(), 'src/ProjectionsPanel.tsx'), 'utf-8');
+
+  it('no queda el rótulo ambiguo "PRÓXIMA VENTA/COMPRA PROYECTADA"', () => {
+    // Podía leerse como una instrucción ("vende ahora"), no como una zona de
+    // referencia. Sólo puede sobrevivir dentro de un comentario que explique
+    // por qué se retiró - nunca como texto que el operador vaya a leer.
+    const codeOnly = panel.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+    expect(codeOnly).not.toMatch(/PRÓXIMA VENTA PROYECTADA/);
+    expect(codeOnly).not.toMatch(/PRÓXIMA COMPRA PROYECTADA/);
+  });
+
+  it('avisa explícitamente que no es una operación ejecutable y remite a la Matriz Multi Filtro', () => {
+    // El texto fuente parte en dos líneas dentro del JSX (se normaliza al
+    // renderizar), así que la búsqueda tolera el espacio en blanco entre ellas.
+    expect(panel).toMatch(/no significan?\s+que exista una\s+operación ejecutable/i);
+    expect(panel).toContain('Matriz Multi Filtro');
+  });
+
+  it('mueve lo técnico (P10/P50/P90, backtest, evidencia) a un acordeón de detalles', () => {
+    expect(panel).toContain('Ver detalles del modelo');
+    expect(panel).toMatch(/<details/);
+  });
+});
+
 /* ══════════════════════════════════════════════════════════════════════════
  * 10. UN RELOJ ROTO SE DENUNCIA, NO SE DISFRAZA DE "SIN DATOS"
  * ══════════════════════════════════════════════════════════════════════════ */

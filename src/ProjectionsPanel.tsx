@@ -2,19 +2,15 @@
  * PROYECCIÓN DEL MERCADO — LA ÚNICA PANTALLA
  * ==========================================
  *
- * Nueve bloques, en el orden en que se decide publicar un anuncio:
+ * Reordenada para que se lea sin saber lo que es un percentil:
  *
- *   1. Estado actual          ¿a qué precio estoy?
- *   2. MI VENTA               ¿cuándo y a cuánto podría vender?
- *   3. MI COMPRA              ¿cuándo y a cuánto podría recomprar?
- *   4. Proyección por horizontes  ¿qué se espera hora a hora?
- *   5. Techo y piso           ¿hasta dónde puede llegar el día?
- *   6. Horarios favorables    ¿a qué horas ha convenido cada operación?
- *   7. Giro de mercado        ¿está cambiando algo?
- *   8. Evidencia / backtest   ¿por qué el sistema cree eso?
- *   9. Suficiencia de datos   ¿puede el sistema afirmar esto?
- *
- * Un precio no se repite en dos bloques salvo que aporte algo distinto.
+ *   1. Precio actual         ¿a qué precio estoy AHORA?
+ *   2. ¿Qué espera el modelo?  próximas horas, en una frase, con su zona
+ *   3. Gráfica                lo observado y lo proyectado, sin mezclarse
+ *   4. MI VENTA / MI COMPRA   con la semántica y el aviso de que no es una
+ *                             operación ejecutable
+ *   5. Ver detalles del modelo (todo lo técnico, en un acordeón):
+ *      horizontes, techo/piso, horarios favorables, giro, evidencia
  *
  * ═══ UNA SOLA SEMÁNTICA, ESCRITA EN CADA RÓTULO ═══
  *
@@ -23,8 +19,16 @@
  *
  * ═══ UN SOLO MOTOR ═══
  *
- * Aquí había tres paneles sobre tres motores. Quedan uno y uno. Todo lo que se
- * ve viene de /api/market/projections/daily; este componente no calcula nada.
+ * Todo lo que se ve viene de /api/market/projections/daily; este componente
+ * no calcula nada — ni un precio, ni una banda, ni una dirección.
+ *
+ * ═══ ESTO NO ES UNA ORDEN DE OPERACIÓN ═══
+ *
+ * Esta pantalla proyecta un PRECIO. Que una operación sea realmente
+ * ejecutable —que exista un anuncio, con liquidez, a ese precio— lo
+ * responde otra pantalla: la Matriz Multi Filtro. Mezclar las dos habría
+ * sido leer "PRÓXIMA VENTA PROYECTADA" como si fuera una instrucción, así
+ * que ese lenguaje se retiró: aquí sólo hay zonas de referencia.
  *
  * ═══ NINGÚN NÚMERO SIN ORIGEN ═══
  *
@@ -45,6 +49,7 @@ import {
   ArrowUpToLine,
   CalendarClock,
   Clock,
+  Info,
   RefreshCw,
   RotateCcw,
 } from 'lucide-react';
@@ -94,7 +99,7 @@ const originText = (o: PriceOrigin): string =>
   `${o.kind} · ${o.leg} (Binance ${o.binanceSide}) · campo ${o.field} · ${o.calculation}` +
   (o.daysUsed !== null ? ` · ${o.daysUsed} días` : '');
 
-/* ── AHORA: el precio de cada pierna ─────────────────────────────────── */
+/* ── 1. PRECIO ACTUAL ─────────────────────────────────────────────────── */
 const NowCard: React.FC<{ leg: DailyLegReport; color: string }> = ({ leg, color }) => (
   <div className="flex-1 min-w-[190px] rounded border border-[#2b2f36] bg-[#181a20] p-3">
     <div className="text-[9px] uppercase tracking-wider text-[#5e6673]">
@@ -110,7 +115,7 @@ const NowCard: React.FC<{ leg: DailyLegReport; color: string }> = ({ leg, color 
   </div>
 );
 
-/* ── HOY: techo y piso, cada uno de SU pierna ────────────────────────── */
+/* ── 5. HOY: techo y piso, cada uno de SU pierna (detalles) ──────────── */
 const ExtremeCard: React.FC<{
   title: string;
   extreme: DailyExtreme;
@@ -144,8 +149,8 @@ const ExtremeCard: React.FC<{
   </div>
 );
 
-/* ── PRÓXIMA OPERACIÓN PROYECTADA ────────────────────────────────────── */
-const OpportunityCard: React.FC<{ leg: DailyLegReport; color: string }> = ({ leg, color }) => {
+/* ── 2. ¿QUÉ ESPERA EL MODELO? — zona proyectada, en lenguaje llano ──── */
+const ProjectedZoneCard: React.FC<{ leg: DailyLegReport; color: string }> = ({ leg, color }) => {
   const o = leg.opportunity;
   const isSale = leg.projection.leg === 'VENTA';
   const b = leg.backtest;
@@ -154,7 +159,7 @@ const OpportunityCard: React.FC<{ leg: DailyLegReport; color: string }> = ({ leg
     <div className="flex-1 min-w-[300px] rounded border border-[#2b2f36] bg-[#181a20] p-3">
       <div className="flex items-baseline justify-between">
         <span className="text-[11px] font-bold tracking-wide" style={{ color }}>
-          {isSale ? 'PRÓXIMA VENTA PROYECTADA' : 'PRÓXIMA COMPRA PROYECTADA'}
+          {isSale ? 'ZONA PROYECTADA PARA MI VENTA' : 'ZONA PROYECTADA PARA MI COMPRA'}
         </span>
         <span className="text-[9px] text-[#5e6673]">Binance {leg.projection.binanceSide}</span>
       </div>
@@ -169,16 +174,12 @@ const OpportunityCard: React.FC<{ leg: DailyLegReport; color: string }> = ({ leg
             <span className="font-mono text-xl font-semibold" style={{ color }}>
               {money(o.low)} – {money(o.high)}
             </span>
-            <span className="text-[10px] text-[#848e9c]">
-              zona · central {money(o.price)}
-            </span>
+            <span className="text-[10px] text-[#848e9c]">estimación central {money(o.price)}</span>
           </div>
           <div className="mt-1 flex items-center gap-1.5 text-[10px] text-[#848e9c]">
             <Clock size={10} />
             hacia las {hourLabel(o.hourOfDay)}
-            <span className="text-[#5e6673]">
-              · {o.bandKind === 'P10_P90' ? 'P10–P90' : 'rango observado'} · {o.daysUsed} días
-            </span>
+            <span className="text-[#5e6673]">· {o.daysUsed} días de evidencia</span>
           </div>
           <div className="mt-1 text-[10px]">
             {o.improvesOnNow ? (
@@ -203,16 +204,11 @@ const OpportunityCard: React.FC<{ leg: DailyLegReport; color: string }> = ({ leg
   );
 };
 
-/* ── 4. PROYECCIÓN POR HORIZONTES ────────────────────────────────────── */
+/* ── 5. PROYECCIÓN POR HORIZONTES (detalles) ─────────────────────────── */
 const HorizonTable: React.FC<{ leg: DailyLegReport; color: string }> = ({ leg, color }) => {
   const p = leg.projection;
   if (p.projected.length === 0) return null;
 
-  /*
-   * `hora − ancla` es aritmética de RELOJ sobre dos enteros, no de mercado:
-   * ningún precio se recalcula aquí. Los precios, la banda y los días llegan
-   * ya decididos del servidor.
-   */
   return (
     <div className="flex-1 min-w-[300px]">
       <div className="mb-1 text-[10px] font-semibold" style={{ color }}>
@@ -229,6 +225,12 @@ const HorizonTable: React.FC<{ leg: DailyLegReport; color: string }> = ({ leg, c
           </tr>
         </thead>
         <tbody className="font-mono">
+          {/*
+            `h.hoursAhead` viene resuelto del servidor: SIEMPRE positivo y
+            monótono, aunque el horizonte cruce medianoche. No se resta nada
+            aquí - restar horas de reloj es justo lo que se rompía al pasar
+            de 23 a 0.
+          */}
           {p.projected.map((h) => (
             <tr key={h.hoursAhead} className="border-t border-[#2b2f36]">
               <td className="py-0.5 text-[#848e9c]">+{h.hoursAhead} h</td>
@@ -246,7 +248,7 @@ const HorizonTable: React.FC<{ leg: DailyLegReport; color: string }> = ({ leg, c
   );
 };
 
-/* ── 6. HORARIOS HISTÓRICAMENTE FAVORABLES ───────────────────────────── */
+/* ── 5. HORARIOS HISTÓRICAMENTE FAVORABLES (detalles) ────────────────── */
 const FavourableHours: React.FC<{ leg: DailyLegReport; color: string }> = ({ leg, color }) => {
   const isSale = leg.projection.leg === 'VENTA';
   if (leg.favourableHours.length === 0) {
@@ -283,7 +285,7 @@ const FavourableHours: React.FC<{ leg: DailyLegReport; color: string }> = ({ leg
   );
 };
 
-/* ── 7. GIRO DE MERCADO ──────────────────────────────────────────────── */
+/* ── 5. GIRO DE MERCADO (detalles) ───────────────────────────────────── */
 /**
  * Dos cosas distintas, y se dicen por separado.
  *
@@ -422,13 +424,14 @@ export const ProjectionsPanel: React.FC = () => {
         </div>
       </div>
 
-      {/* ── 1. ESTADO ACTUAL ─────────────────────────────────────────── */}
+      {/* ── 1. PRECIO ACTUAL ─────────────────────────────────────────── */}
+      <div className="mb-1 text-[9px] uppercase tracking-wider text-[#5e6673]">Precio actual</div>
       <div className="mb-4 flex flex-wrap gap-3">
         {venta && <NowCard leg={venta} color={VENTA} />}
         {compra && <NowCard leg={compra} color={COMPRA} />}
       </div>
 
-      {/* ── 9. SUFICIENCIA DE DATOS (arriba cuando bloquea todo lo demás) ── */}
+      {/* ── SUFICIENCIA DE DATOS (arriba cuando bloquea todo lo demás) ──── */}
       {!drawable && (
         <div className="mb-4 rounded border border-[#2b2f36] bg-[#181a20] p-4">
           <div className="mb-1 text-sm font-semibold text-[#f0b90b]">
@@ -456,13 +459,25 @@ export const ProjectionsPanel: React.FC = () => {
         </div>
       )}
 
-      {/* ── 2 y 3. MI VENTA / MI COMPRA ──────────────────────────────── */}
-      <div className="mb-4 flex flex-wrap gap-3">
-        {venta && <OpportunityCard leg={venta} color={VENTA} />}
-        {compra && <OpportunityCard leg={compra} color={COMPRA} />}
-      </div>
+      {/* ── 2. ¿QUÉ ESPERA EL MODELO? ─────────────────────────────────── */}
+      {drawable && (
+        <>
+          <div className="mb-1 flex items-center gap-1.5 text-[9px] uppercase tracking-wider text-[#5e6673]">
+            <Info size={11} /> ¿Qué espera el modelo? · próximas horas
+          </div>
+          <div className="mb-2 text-[10px] leading-relaxed text-[#848e9c]">
+            El rango representa dónde el modelo estima que podría moverse el precio. La estimación
+            central es el valor más representativo. No es un precio garantizado ni una orden de
+            operación.
+          </div>
+          <div className="mb-4 flex flex-wrap gap-3">
+            {venta && <ProjectedZoneCard leg={venta} color={VENTA} />}
+            {compra && <ProjectedZoneCard leg={compra} color={COMPRA} />}
+          </div>
+        </>
+      )}
 
-      {/* ── GRÁFICA: real y proyectado, sin confundirse ──────────────── */}
+      {/* ── 3. GRÁFICA: real y proyectado, sin confundirse ────────────── */}
       <ProjectionsChart report={report} />
       <div className="mt-3 flex flex-wrap gap-4 text-[10px] text-[#848e9c]">
         <span className="flex items-center gap-1">
@@ -476,58 +491,81 @@ export const ProjectionsPanel: React.FC = () => {
         </span>
       </div>
 
-      {/* ── 4. PROYECCIÓN POR HORIZONTES ─────────────────────────────── */}
-      {drawable && (
-        <div className="mt-4 border-t border-[#2b2f36] pt-3">
+      {/* ── 4. MI VENTA / MI COMPRA: semántica y aviso de no-ejecutabilidad ── */}
+      <div className="mt-4 rounded border border-[#2b2f36] bg-[#181a20] p-3 text-[10px] leading-relaxed">
+        <div>
+          <strong style={{ color: VENTA }}>MI VENTA</strong>
+          <span className="text-[#848e9c]"> = anuncio Binance BUY (yo vendo USDT) · </span>
+          <strong style={{ color: COMPRA }}>MI COMPRA</strong>
+          <span className="text-[#848e9c]"> = anuncio Binance SELL (yo recompro USDT).</span>
+        </div>
+        <div className="mt-1.5 text-[#5e6673]">
+          Estos son precios de referencia para tu estrategia. No significan que exista una
+          operación ejecutable. Para comprobar una operación real utiliza la Matriz Multi Filtro.
+        </div>
+      </div>
+
+      {/* ── 5. VER DETALLES DEL MODELO ───────────────────────────────── */}
+      <details className="mt-4 border-t border-[#2b2f36] pt-3">
+        <summary className="cursor-pointer text-[10px] font-semibold text-[#848e9c]">
+          Ver detalles del modelo
+        </summary>
+
+        <div className="mt-3 text-[10px] leading-relaxed text-[#5e6673]">
+          <strong className="text-[#848e9c]">Cómo leer el rango:</strong>{' '}
+          la estimación central es la mediana de los días parecidos (lo que antes se llamaba
+          «P50»); el borde bajo de la banda es el escenario bajo («P10»): sólo el 10% de los días
+          parecidos quedó por debajo. El borde alto es el escenario alto («P90»): sólo el 10%
+          quedó por encima. Con pocos días la banda es el rango observado, no un percentil.
+        </div>
+
+        {/* ── PROYECCIÓN POR HORIZONTES ─────────────────────────────── */}
+        {drawable && (
+          <div className="mt-3">
+            <div className="mb-2 text-[9px] uppercase tracking-wider text-[#5e6673]">
+              Proyección por horizontes
+            </div>
+            <div className="flex flex-wrap gap-6">
+              {venta && <HorizonTable leg={venta} color={VENTA} />}
+              {compra && <HorizonTable leg={compra} color={COMPRA} />}
+            </div>
+          </div>
+        )}
+
+        {/* ── TECHO Y PISO ───────────────────────────────────────────── */}
+        <div className="mt-4 flex flex-wrap gap-3">
+          <ExtremeCard
+            title="Techo del día · mi venta"
+            extreme={report.ceiling}
+            color={VENTA}
+            icon={<ArrowUpToLine size={11} />}
+          />
+          <ExtremeCard
+            title="Piso del día · mi compra"
+            extreme={report.floor}
+            color={COMPRA}
+            icon={<ArrowDownToLine size={11} />}
+          />
+        </div>
+
+        {/* ── HORARIOS FAVORABLES ────────────────────────────────────── */}
+        <div className="mt-4 rounded border border-[#2b2f36] bg-[#181a20] p-3">
           <div className="mb-2 text-[9px] uppercase tracking-wider text-[#5e6673]">
-            Proyección por horizontes
+            Horarios históricamente favorables
           </div>
           <div className="flex flex-wrap gap-6">
-            {venta && <HorizonTable leg={venta} color={VENTA} />}
-            {compra && <HorizonTable leg={compra} color={COMPRA} />}
+            {venta && <FavourableHours leg={venta} color={VENTA} />}
+            {compra && <FavourableHours leg={compra} color={COMPRA} />}
           </div>
         </div>
-      )}
 
-      {/* ── 5. TECHO Y PISO ──────────────────────────────────────────── */}
-      <div className="mt-4 flex flex-wrap gap-3">
-        <ExtremeCard
-          title="Techo del día · mi venta"
-          extreme={report.ceiling}
-          color={VENTA}
-          icon={<ArrowUpToLine size={11} />}
-        />
-        <ExtremeCard
-          title="Piso del día · mi compra"
-          extreme={report.floor}
-          color={COMPRA}
-          icon={<ArrowDownToLine size={11} />}
-        />
-      </div>
-
-      {/* ── 6. HORARIOS FAVORABLES ───────────────────────────────────── */}
-      <div className="mt-4 rounded border border-[#2b2f36] bg-[#181a20] p-3">
-        <div className="mb-2 text-[9px] uppercase tracking-wider text-[#5e6673]">
-          Horarios históricamente favorables
+        {/* ── GIRO ───────────────────────────────────────────────────── */}
+        <div className="mt-3">
+          <TurnBlock report={report} />
         </div>
-        <div className="flex flex-wrap gap-6">
-          {venta && <FavourableHours leg={venta} color={VENTA} />}
-          {compra && <FavourableHours leg={compra} color={COMPRA} />}
-        </div>
-      </div>
 
-      {/* ── 7. GIRO ──────────────────────────────────────────────────── */}
-      <div className="mt-3">
-        <TurnBlock report={report} />
-      </div>
-
-      {/* ── D. EVIDENCIA Y TRAZABILIDAD ──────────────────────────────── */}
-      {/* ── 8. EVIDENCIA Y TRAZABILIDAD ──────────────────────────────── */}
-      <details className="mt-4 border-t border-[#2b2f36] pt-3">
-        <summary className="cursor-pointer text-[10px] text-[#848e9c]">
-          Evidencia: de dónde sale cada número
-        </summary>
-        <div className="mt-2 text-[10px] leading-relaxed text-[#5e6673]">
+        {/* ── EVIDENCIA Y TRAZABILIDAD ───────────────────────────────── */}
+        <div className="mt-4 border-t border-[#2b2f36] pt-3 text-[10px] leading-relaxed text-[#5e6673]">
           <div className="mb-1 text-[#848e9c]">Cadena de cada precio:</div>
           <ul className="ml-4 list-disc">
             <li>techo del día → {originText(report.ceiling.origin)}</li>
