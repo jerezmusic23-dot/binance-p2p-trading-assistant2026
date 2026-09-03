@@ -28,11 +28,9 @@ describe('maxSpreadOf', () => {
 
     const result = maxSpreadOf(venta, compra);
 
-    expect(result).toEqual({
-      hour: 10,
-      spreadPct: 0.19999999999999574,
-      observed: true,
-    });
+    expect(result?.hour).toBe(10);
+    expect(result?.spreadPct).toBeCloseTo(0.2, 10);
+    expect(result?.observed).toBe(true);
   });
 
   it('returns a negative spread when every aligned hour is a loss', () => {
