@@ -26,6 +26,7 @@ import {
   AmountFilterKey,
 } from './types';
 import { ApiService } from './api';
+import { filterMatrixView } from './bankMatrixFilter';
 import {
   Building2,
   RefreshCw,
@@ -111,6 +112,89 @@ const fmtSpread = (v: number | null) =>
 
 const fmtUsdt = (v: number | null) =>
   v === null ? 'no verificable' : `${v.toFixed(2)} USDT`;
+
+/**
+ * LA RESPUESTA A UNA OPERACIÓN CONCRETA.
+ *
+ * Aparece cuando el Filtro Global ya eligió un banco Y un monto: la matriz
+ * completa deja de ser la pregunta y la celda señalada pasa a serlo. Responde
+ * exactamente lo que el operador necesita antes de publicar - ¿puedo operar?,
+ * ¿a qué precio entro/salgo?, ¿cuánto gano?, ¿qué liquidez hay?, ¿qué anuncio
+ * de Binance lo permite? - y si no puede operar, POR QUÉ, en una frase humana,
+ * nunca en un guion o un cero disfrazado de precio.
+ */
+const OperationDetailCard: React.FC<{ cell: ExecutableCell }> = ({ cell }) => {
+  const style = STATUS_STYLE[cell.status];
+  const op = cell.opportunity;
+  const executable = cell.status === 'EXECUTABLE' && op !== null;
+
+  return (
+    <div
+      className={`rounded-lg border p-4 ${
+        executable ? 'border-[#02c076]/50 bg-[#02c076]/5' : 'border-[#2b2f36] bg-[#181a20]'
+      }`}
+    >
+      <div className="flex items-center justify-between flex-wrap gap-2 mb-2.5">
+        <div className="text-sm font-bold text-[#e0e0e0] flex items-center gap-2">
+          <Building2 className="w-4 h-4 text-[#FCD535]" />
+          {cell.bankDisplayName} · {cell.amountVes.toLocaleString('es-VE')} VES
+        </div>
+        <span
+          className={`flex items-center gap-1 text-[10px] font-bold uppercase px-2 py-0.5 rounded border ${style.className}`}
+        >
+          <style.Icon className="w-3 h-3" />
+          {style.label}
+        </span>
+      </div>
+
+      <div className="text-[12px] mb-2">
+        ¿Puedo operar?{' '}
+        {executable ? (
+          <strong className="text-[#02c076]">Sí</strong>
+        ) : (
+          <strong className="text-[#f6465d]">No</strong>
+        )}
+      </div>
+
+      {executable ? (
+        <div className="grid gap-1.5 text-[12px] sm:grid-cols-2">
+          <div>
+            <span className="text-[#848e9c]">Precio de entrada (MI COMPRA)</span>
+            <div className="font-mono text-[13px] text-[#e0e0e0]">
+              {op.arbitrageBuyPrice.toFixed(2)} VES
+              <span className="ml-1.5 text-[9px] text-[#5e6673]">anuncio {op.buyAdvNo}</span>
+            </div>
+          </div>
+          <div>
+            <span className="text-[#848e9c]">Precio de salida (MI VENTA)</span>
+            <div className="font-mono text-[13px] text-[#e0e0e0]">
+              {op.arbitrageSellPrice.toFixed(2)} VES
+              <span className="ml-1.5 text-[9px] text-[#5e6673]">anuncio {op.sellAdvNo}</span>
+            </div>
+          </div>
+          <div>
+            <span className="text-[#848e9c]">Margen</span>
+            <div className="font-mono text-[13px] text-[#02c076]">
+              {op.marginVes.toFixed(2)} VES ({op.marginPct >= 0 ? '+' : ''}
+              {op.marginPct.toFixed(2)}%)
+            </div>
+          </div>
+          <div>
+            <span className="text-[#848e9c]">Liquidez disponible</span>
+            <div className="font-mono text-[13px] text-[#e0e0e0]">{fmtUsdt(op.availableUsdt)}</div>
+          </div>
+          <div className="sm:col-span-2 text-[9px] text-[#5e6673]">
+            Margen bruto: no descuenta comisiones, transferencias, slippage ni tiempo de ejecución.
+          </div>
+        </div>
+      ) : (
+        <div className="text-[12px] text-[#848e9c] leading-relaxed">
+          {cell.reason ?? 'Sin motivo adicional registrado.'}
+        </div>
+      )}
+    </div>
+  );
+};
 
 const CellView: React.FC<{ cell: ExecutableCell; onSelect?: () => void }> = ({
   cell,
@@ -252,6 +336,21 @@ export const BankMatrix: React.FC<BankMatrixProps> = ({
     .flatMap((row) => Object.values(row))
     .filter((c) => c.status === 'EXECUTABLE').length;
 
+  /*
+   * EL FILTRO GLOBAL DEBE FILTRAR LA MATRIZ, NO SÓLO ANOTARLA.
+   *
+   * `activeGlobalFilter` viajaba hasta aquí y sólo se usaba en la frase del
+   * pie de página: la tabla seguía dibujando todos los bancos y todos los
+   * montos aunque el operador ya hubiera elegido uno. `filterMatrixView`
+   * reduce de verdad las filas y columnas visibles - nunca los datos de la
+   * celda, que siguen viniendo tal cual del servidor - y vive fuera de este
+   * componente precisamente para poder probarse sin renderizar nada.
+   */
+  const { visibleBanks, visibleAmounts, bankUnavailable, singleCell } = filterMatrixView(
+    matrix,
+    activeGlobalFilter
+  );
+
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between flex-wrap gap-2">
@@ -303,6 +402,33 @@ export const BankMatrix: React.FC<BankMatrixProps> = ({
         </div>
       )}
 
+      {/*
+        Con banco Y monto ya elegidos, la pregunta deja de ser "¿qué banco me
+        conviene?" y pasa a ser "¿puedo hacer ESTA operación?". La tarjeta
+        contesta eso directamente; la tabla de abajo, reducida a esa misma
+        celda, sigue disponible para que la respuesta nunca dependa de un
+        cálculo que el operador no puede ver.
+      */}
+      {singleCell !== null && (
+        <OperationDetailCard cell={singleCell} />
+      )}
+
+      {!bankUnavailable && visibleBanks.length === 1 && visibleAmounts.length === 1 && singleCell === null && (
+        <div className="text-[11px] text-[#848e9c] border border-[#2b2f36] rounded px-3 py-2">
+          ¿Puedo operar? <strong className="text-[#f6465d]">No</strong>. Todavía no hay datos
+          capturados de {matrix.bankDisplayNames[visibleBanks[0]] ?? visibleBanks[0]} para{' '}
+          {visibleAmounts[0]}: la matriz recorre los bancos y montos por turnos y a éste todavía no
+          le ha tocado.
+        </div>
+      )}
+
+      {bankUnavailable && (
+        <div className="text-[11px] text-[#f0b90b] border border-[#f0b90b]/30 rounded px-3 py-2">
+          El banco «{activeGlobalFilter?.bankDisplayName}» no está disponible en esta matriz: no
+          hay ninguna columna capturada para él.
+        </div>
+      )}
+
       <div className="overflow-x-auto">
         <table className="w-full border-separate border-spacing-1">
           <thead>
@@ -310,7 +436,7 @@ export const BankMatrix: React.FC<BankMatrixProps> = ({
               <th className="text-left text-[10px] uppercase text-[#848e9c] font-semibold px-2">
                 Banco
               </th>
-              {matrix.amountKeys.map((amt) => (
+              {visibleAmounts.map((amt) => (
                 <th
                   key={amt}
                   className="text-center text-[10px] uppercase text-[#848e9c] font-semibold min-w-[110px]"
@@ -321,12 +447,12 @@ export const BankMatrix: React.FC<BankMatrixProps> = ({
             </tr>
           </thead>
           <tbody>
-            {matrix.bankOrder.map((bank) => (
+            {visibleBanks.map((bank) => (
               <tr key={bank}>
                 <td className="text-[11px] font-semibold text-[#e0e0e0] px-2 whitespace-nowrap">
                   {matrix.bankDisplayNames[bank] ?? bank}
                 </td>
-                {matrix.amountKeys.map((amt) => {
+                {visibleAmounts.map((amt) => {
                   const cell = matrix.cells[bank]?.[amt];
                   if (cell === undefined) {
                     return (

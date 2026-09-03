@@ -160,9 +160,13 @@ describe('TEST 10 - BankMatrix consumes the executable matrix and nothing else',
 
   it('shows bank, amount, both prices, spread and liquidity per cell', () => {
     const matrix = read(SRC, 'BankMatrix.tsx');
+    // `amountKeys` selects visible columns from `bankMatrixFilter.ts` now -
+    // extracted so the Filtro Global's row/column reduction can be tested
+    // without rendering a component, same as `dailyChartRows.ts`.
+    const filter = read(SRC, 'bankMatrixFilter.ts');
 
     expect(matrix).toMatch(/bankDisplayNames/);
-    expect(matrix).toMatch(/amountKeys/);
+    expect(matrix + filter).toMatch(/amountKeys/);
     // Economics first: the column says what the user does, not what the API calls it.
     expect(matrix).toMatch(/MI COMPRA/);
     expect(matrix).toMatch(/MI VENTA/);

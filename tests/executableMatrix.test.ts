@@ -299,6 +299,46 @@ describe('TEST 5 - no ad', () => {
     expect(failed.status).toBe('ERROR');
     expect(failed.reason).toMatch(/falló/i);
   });
+
+  it('names the minimum limit when that is the ONLY reason no ad qualifies', () => {
+    // 20K requerido; los anuncios exigen al menos 25K: por debajo del mínimo.
+    const cell = cellFor(
+      [ad({ price: 944, minAmountVes: 25_000 })],
+      [ad({ price: 960, minAmountVes: 25_000 })]
+    );
+
+    expect(cell.status).toBe('NO_AD');
+    expect(cell.reason).toMatch(/ningún anuncio verificado/i);
+    expect(cell.reason).toMatch(/límite mínimo.*no permite este monto/i);
+  });
+
+  it('names the maximum limit when that is the ONLY reason no ad qualifies', () => {
+    const cell = cellFor(
+      [ad({ price: 944, maxAmountVes: 5_000 })],
+      [ad({ price: 960, maxAmountVes: 5_000 })]
+    );
+
+    expect(cell.status).toBe('NO_AD');
+    expect(cell.reason).toMatch(/ningún anuncio verificado/i);
+    expect(cell.reason).toMatch(/límite máximo.*no permite este monto/i);
+  });
+
+  it('stays generic when the rejections are mixed, instead of naming only one', () => {
+    // Un anuncio rechazado por mínimo, otro por banco no verificado: ninguno
+    // de los dos motivos explica el libro entero, así que no se elige uno.
+    const cell = cellFor(
+      [
+        ad({ price: 944, minAmountVes: 25_000 }),
+        ad({ price: 946, paymentOptions: [{ payType: 'OtroBanco', tradeMethodName: 'OtroBanco' }] }),
+      ],
+      [ad({ price: 960, minAmountVes: 25_000 })]
+    );
+
+    expect(cell.status).toBe('NO_AD');
+    expect(cell.reason).toMatch(/ningún anuncio verificado/i);
+    expect(cell.reason).not.toMatch(/límite mínimo/i);
+    expect(cell.reason).not.toMatch(/límite máximo/i);
+  });
 });
 
 describe('TEST 7 - stale', () => {

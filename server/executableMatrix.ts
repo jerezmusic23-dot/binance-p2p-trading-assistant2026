@@ -136,6 +136,27 @@ const STATUS_REASONS: Record<CellStatus, (bank: string, amountVes: number) => st
 };
 
 /**
+ * Detalle adicional para NO_AD, cuando el motivo es inequívoco.
+ *
+ * `STATUS_REASONS.NO_AD` dice "ningún anuncio acepta este monto" pero no dice
+ * POR QUÉ, y "por qué" es justo lo que la Matriz Multi Filtro tiene que poder
+ * responder. Sólo se añade cuando UN solo tipo de rechazo explica todos los
+ * anuncios evaluados: con varios motivos mezclados, señalar sólo uno mentiría
+ * sobre los demás, así que se prefiere el mensaje genérico a uno parcial.
+ */
+function noAdDetail(rejections: Record<string, number>): string | null {
+  const SPECIFIC: Record<string, string> = {
+    AMOUNT_BELOW_MIN:
+      'El límite mínimo de esos anuncios no permite este monto: piden más de lo solicitado.',
+    AMOUNT_ABOVE_MAX:
+      'El límite máximo de esos anuncios no permite este monto: aceptan menos de lo solicitado.',
+  };
+  const nonZero = Object.entries(rejections).filter(([, count]) => count > 0);
+  if (nonZero.length !== 1) return null;
+  return SPECIFIC[nonZero[0][0]] ?? null;
+}
+
+/**
  * One BANK x AMOUNT cell.
  *
  * `failed` marks a bank whose Binance query threw. That is not an empty book
@@ -250,7 +271,14 @@ export function buildCell(params: {
         ? null
         : status === 'NO_OPPORTUNITY' && cell.noPairReason !== null
           ? cell.noPairReason
-          : STATUS_REASONS[status](bankDisplayName, cell.amountVes),
+          : status === 'NO_AD'
+            ? STATUS_REASONS.NO_AD(bankDisplayName, cell.amountVes) +
+              (() => {
+                // La misma regla que decidió `status`: el lado nulo que lo causó.
+                const detail = noAdDetail(buy === null ? cell.buyRejections : cell.sellRejections);
+                return detail === null ? '' : ` ${detail}`;
+              })()
+            : STATUS_REASONS[status](bankDisplayName, cell.amountVes),
     buy,
     sell,
     spreadPct: cell.spreadPct,
