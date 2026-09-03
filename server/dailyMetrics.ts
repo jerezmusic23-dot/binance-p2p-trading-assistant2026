@@ -66,6 +66,10 @@ export function historicalDayMoves(
  * compra de las 14 daría un margen que nunca estuvo disponible. El signo se
  * conserva — vender por debajo de donde se recompra es una pérdida y tiene que
  * seguir siendo distinguible de una ganancia.
+ *
+ * IMPORTANTE: "mayor" es el mayor valor SIGNADO, no el mayor valor absoluto.
+ * Un -8% nunca puede ganar frente a un +0.2%. Usar Math.abs aquí convertiría
+ * una pérdida grande en el supuesto "mejor margen" del día.
  */
 export function maxSpreadOf(venta: LegProjection, compra: LegProjection): HourSpread | null {
   const compraByHour = new Map(fullPath(compra).map((p) => [p.hour, p]));
@@ -75,7 +79,7 @@ export function maxSpreadOf(venta: LegProjection, compra: LegProjection): HourSp
     const c = compraByHour.get(v.hour);
     if (c === undefined || c.price <= 0) continue;
     const spreadPct = ((v.price - c.price) / c.price) * 100;
-    if (best === null || Math.abs(spreadPct) > Math.abs(best.spreadPct)) {
+    if (best === null || spreadPct > best.spreadPct) {
       best = { hour: v.hour, spreadPct, observed: v.observed && c.observed };
     }
   }
