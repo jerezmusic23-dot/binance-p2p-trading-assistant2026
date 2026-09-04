@@ -1456,17 +1456,19 @@ export class CentralMarketStore {
     this.lastSignals = evaluated.signals;
 
     /*
-     * MARKET SIGNALS ARE UI/API ONLY. Telegram is deliberately maker-only.
-     *
-     * `notifyMarketSignals` used to forward these to Telegram; the propietario
-     * decided against that (server/telegramNotifier.ts, commit d78c74c) and
-     * the method is now a permanent no-op. Calling a no-op here would only
-     * pretend a delivery path exists, so it is not called - `lastSignals`
-     * still feeds getProjections() for the API/UI (Análisis de Mercado /
-     * Market Pulse), which is the only consumer left.
+     * MARKET SIGNALS AND MAKER ALERTS ARE TWO DIFFERENT VOICES, AND BOTH MUST
+     * REACH TELEGRAM. `lastSignals` still feeds getProjections() for the
+     * API/UI (Análisis de Mercado / Market Pulse), but that is no longer the
+     * only consumer: `notifyMarketSignals` (server/telegramNotifier.ts)
+     * forwards 📈 PROYECCIÓN DE MERCADO / 🚀 RUPTURA / 🔄 CAMBIO DE TENDENCIA
+     * on its own dedup/cooldown floors, entirely independent from the maker
+     * summary's own 30-minute cadence.
      */
     if (evaluated.signals.length > 0) {
       this.eventCounters.signalsDerived += evaluated.signals.length;
+      TelegramNotifier.getInstance()
+        .notifyMarketSignals(evaluated.signals, Date.now())
+        .catch((err) => console.warn('[CentralStore] notifyMarketSignals failed:', err));
     }
   }
 

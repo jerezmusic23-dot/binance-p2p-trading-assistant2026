@@ -2,15 +2,31 @@ import { TelegramSystemAlert } from './types.js';
 import type { MakerAlert } from './makerAlerts.js';
 import type { MarketSignal } from './signalEngine.js';
 import type { MakerMatrix, MakerMatrixCell } from './makerMatrix.js';
-import type { PriceChangeDigest } from './alertScheduler.js';
+import {
+  PRIORITY_ORDER,
+  priorityOf,
+  readSignalInterval,
+  type AlertPriority,
+  type PriceChangeDigest,
+} from './alertScheduler.js';
 
 /**
- * Telegram is deliberately a maker-facing transport. Market/taker signals stay in the API/UI.
+ * Telegram carries exactly TWO independent voices, and only two:
+ *
+ *   1. SEÑALES DE MERCADO (notifyMarketSignals) - 📈 PROYECCIÓN DE MERCADO,
+ *      🚀 RUPTURA, 🔄 CAMBIO DE TENDENCIA. Fed by signalEngine, which reads
+ *      only the per-cell maker series. Never a prediction dressed as an
+ *      order: every message says so.
+ *   2. ALERTAS MAKER (notifyMakerAlerts / notifyPriceChangeDigest) - the
+ *      30-minute summary and the grouped price-change digest, both about
+ *      what to PUBLISH, never about a market level crossing a number.
  *
  * 🟢 ALERTA DE PRECIO / 🔴 ALERTA P2P / ⚠️ ALTA VOLATILIDAD USED TO LIVE HERE, as
  * formatAlertMessage + notifyAlert reacting to a user AlertRule. Deleted, not
  * renamed or downgraded: a market level crossing a number was never a maker
- * decision, and the operator asked for the whole class gone for good.
+ * decision, and the operator asked for the whole class gone for good. The
+ * taker/arbitrage lifecycle announcement (OPORTUNIDAD DE ARBITRAJE) is gone
+ * the same way, for the same reason: this operator is a maker.
  */
 export const DEFAULT_ALERT_COOLDOWN_MS = 300_000;
 export const DEFAULT_TIMEOUT_MS = 5_000;
@@ -188,18 +204,80 @@ export function formatPriceChangeDigestMessage(digest: PriceChangeDigest): strin
   return lines.join('\n');
 }
 
-/** Kept for UI/test compatibility; this formatter is never sent by Telegram. */
-export function formatMarketSignalMessage(signal: MarketSignal, _priority: string, timestamp: number): string {
-  const price = signal.currentPrice === null ? 'no verificable' : escapeHtml(signal.currentPrice.toFixed(2));
-  return [
-    '📈 <b>PROYECCIÓN DE MERCADO</b>', '',
+/**
+ * 📈 PROYECCIÓN DE MERCADO / 🚀 RUPTURA / 🔄 CAMBIO DE TENDENCIA.
+ *
+ * A signal explains itself or it does not go out. Every message carries the
+ * evidence that produced it, the number of observations behind that evidence,
+ * and - loudly - the difference between what the price IS and what the series
+ * suggests it might do.
+ *
+ * NOT AN INSTRUCTION. There is no "publica a", no "compra ahora" y no target.
+ * The operator is told what the data shows and decides for themselves.
+ */
+export function formatMarketSignalMessage(
+  signal: MarketSignal,
+  priority: AlertPriority,
+  timestamp: number
+): string {
+  const n = (value: number | null): string =>
+    value === null ? 'no verificable' : escapeHtml(value.toFixed(2));
+
+  const heading =
+    signal.kind === 'TREND_CHANGE'
+      ? signal.status === 'CONFIRMED'
+        ? '🔄 <b>CAMBIO DE TENDENCIA</b>'
+        : '⚠️ <b>POSIBLE CAMBIO DE TENDENCIA</b>'
+      : signal.kind === 'BREAKOUT_UP' || signal.kind === 'BREAKOUT_DOWN'
+        ? '🚀 <b>RUPTURA</b>'
+        : '📈 <b>PROYECCIÓN DE MERCADO</b>';
+
+  const statusLine =
+    signal.status === 'CONFIRMED'
+      ? 'Estado: <b>CONFIRMADA</b>'
+      : 'Estado: <b>SEÑAL PARCIAL · AVISO TEMPRANO</b>';
+
+  const lines = [
+    heading, '',
     `🏦 ${escapeHtml(signal.bankDisplayName)} · ${escapeHtml(signal.amountKey)}`,
     `${signal.side === 'BUY' ? '🟢' : '🔵'} ${escapeHtml(signal.sideLabel)}`, '',
     escapeHtml(signal.headline), '',
-    `ACTUAL (precio para publicar): <b>${price} VES</b>`,
-    '', '<b>Evidencia</b>', ...signal.evidence.map((line) => `· ${escapeHtml(line)}`), '',
-    'Una proyección no es un precio de Binance.', '', `Hora: ${formatVenezuelaClock(timestamp)}`,
-  ].join('\n');
+    statusLine,
+    `Prioridad: <b>${escapeHtml(priority)}</b>`,
+    `Confianza: <b>${escapeHtml(signal.confidence)}</b> · Muestras: <b>${escapeHtml(String(signal.sampleSize))}</b>`,
+    '',
+    /*
+     * ACTUAL first and labelled, then PROYECTADO labelled separately. A band
+     * rendered beside a live price with the same wording is how somebody ends
+     * up publishing an ad at a number Binance never quoted.
+     */
+    `ACTUAL (precio para publicar): <b>${n(signal.currentPrice)} VES</b>`,
+    signal.projectedLow !== null && signal.projectedHigh !== null
+      ? `PROYECTADO (rango observado): <b>${n(signal.projectedLow)} – ${n(signal.projectedHigh)} VES</b>`
+      : 'PROYECTADO: no verificable con el histórico disponible',
+  ];
+
+  if (signal.watchStartHour !== null && signal.watchEndHour !== null) {
+    lines.push(
+      '',
+      `MIRAR: <b>${escapeHtml(String(signal.watchStartHour).padStart(2, '0'))}:00 – ${escapeHtml(
+        String(signal.watchEndHour).padStart(2, '0')
+      )}:00</b> (hora de Venezuela)`
+    );
+  }
+
+  lines.push(
+    '',
+    '<b>Evidencia</b>',
+    ...signal.evidence.map((line) => `· ${escapeHtml(line)}`),
+    '',
+    'No es una orden automática ni una operación garantizada.',
+    'Una proyección no es un precio de Binance.',
+    '',
+    `Hora: ${formatVenezuelaClock(timestamp)}`
+  );
+
+  return lines.join('\n');
 }
 
 export function formatSystemAlertMessage(alert: TelegramSystemAlert): string {
@@ -246,12 +324,89 @@ export class TelegramNotifier {
   }
 
   /**
-   * Intentionally inert. Telegram is maker-only. Projection/trend signals are
-   * still computed and exposed through the API/UI, but can never reach the
-   * Telegram transport through this compatibility method.
+   * 📈 PROYECCIÓN DE MERCADO / 🚀 RUPTURA / 🔄 CAMBIO DE TENDENCIA.
+   *
+   * Independent of the maker summary voice (notifyMakerAlerts /
+   * notifyPriceChangeDigest): both read from the same maker matrix, but this
+   * one announces the SIGNAL an analista would want to see, not the price
+   * itself. INFO never reaches Telegram - it exists for the API/UI only.
+   *
+   * Three throttles, all keyed off lastSentAt (the same map the maker digest
+   * and system alerts already share, so `prune` covers everything):
+   *   - per-signal dedup: `signal:${identity}:${status}` - a live condition is
+   *     "touched" every sweep it is still true, so it never re-announces
+   *     itself while nothing changed, but a genuine status transition
+   *     (EARLY_WARNING -> CONFIRMED) is a new key and always gets through.
+   *   - per-cell floor: `signal:cell:${bank}:${amountKey}` (or
+   *     `signal:critical:${bank}:${amountKey}` for CRITICAL) - the same
+   *     bank/amount cannot re-alert faster than the configured interval,
+   *     whichever kind fires next.
+   *   - global floor: `signal:any` (`signal:any:critical` for CRITICAL, at
+   *     half the interval) - the whole matrix cannot flood Telegram even if
+   *     every cell has a different signal at the same instant.
+   * Signals are sorted by priority first, so when several compete for the
+   * same floor in one sweep the most urgent one is the one that wins it.
    */
-  public async notifyMarketSignals(signals: readonly MarketSignal[], _timestamp: number): Promise<TelegramResult[]> {
-    return signals.map(() => ({ outcome: 'UNCHANGED' as const, detail: 'Market signals are UI/API only; Telegram is maker-only.' }));
+  public async notifyMarketSignals(signals: readonly MarketSignal[], timestamp: number): Promise<TelegramResult[]> {
+    if (!this.config) return signals.map(() => ({ outcome: 'DISABLED' as const }));
+    const now = timestamp || Date.now();
+    const { intervalMs } = readSignalInterval();
+    const results: TelegramResult[] = [];
+
+    const ordered = [...signals]
+      .map((signal, index) => ({ signal, index, priority: priorityOf(signal) }))
+      .sort((a, b) => PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority] || a.index - b.index);
+
+    const outcomeByIndex = new Map<number, TelegramResult>();
+    for (const { signal, index, priority } of ordered) {
+      try {
+        if (priority === 'INFO') {
+          outcomeByIndex.set(index, { outcome: 'UNCHANGED' });
+          continue;
+        }
+
+        const dedupKey = `signal:${signal.identity}:${signal.status}`;
+        if (this.lastSentAt.has(dedupKey)) {
+          this.lastSentAt.set(dedupKey, now);
+          outcomeByIndex.set(index, { outcome: 'UNCHANGED' });
+          continue;
+        }
+
+        const critical = priority === 'CRITICAL';
+        const cellKey = critical
+          ? `signal:critical:${signal.bank}:${signal.amountKey}`
+          : `signal:cell:${signal.bank}:${signal.amountKey}`;
+        // CRITICAL checks its own, tighter global key so a confirmed break can
+        // jump ahead of the ordinary floor; everything else shares one key,
+        // so a CRITICAL send still holds that shared floor shut for whatever
+        // non-critical signal loses the priority sort in the same sweep.
+        const globalCheckKey = critical ? 'signal:any:critical' : 'signal:any';
+        const floorMs = critical ? Math.floor(intervalMs / 2) : intervalMs;
+
+        const lastCell = this.lastSentAt.get(cellKey);
+        if (lastCell !== undefined && now - lastCell < floorMs) {
+          outcomeByIndex.set(index, { outcome: 'COOLDOWN' });
+          continue;
+        }
+        const lastGlobal = this.lastSentAt.get(globalCheckKey);
+        if (lastGlobal !== undefined && now - lastGlobal < floorMs) {
+          outcomeByIndex.set(index, { outcome: 'COOLDOWN' });
+          continue;
+        }
+
+        this.lastSentAt.set(dedupKey, now);
+        this.lastSentAt.set(cellKey, now);
+        this.lastSentAt.set('signal:any', now);
+        if (critical) this.lastSentAt.set('signal:any:critical', now);
+        this.prune(now);
+        outcomeByIndex.set(index, await this.send(formatMarketSignalMessage(signal, priority, now)));
+      } catch (err) {
+        outcomeByIndex.set(index, { outcome: 'NETWORK_ERROR', detail: this.describe(err) });
+      }
+    }
+
+    for (let i = 0; i < signals.length; i += 1) results.push(outcomeByIndex.get(i)!);
+    return results;
   }
 
   private async send(text: string): Promise<TelegramResult> {
