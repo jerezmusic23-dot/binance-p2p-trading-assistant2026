@@ -278,17 +278,148 @@ describe('priorities', () => {
   });
 });
 
-/*
- * "SIGNAL THROTTLING, AS MEASURED" USED TO LIVE HERE.
- *
- * It protected the cooldown/dedup/priority-queue logic inside
- * notifyMarketSignals: per-cell cooldowns, a shared global floor, CRITICAL
- * jumping the queue ahead of everything else. server/telegramNotifier.ts
- * commit d78c74c ("fix: keep Telegram strictly maker-facing") deleted that
- * whole mechanism - notifyMarketSignals is now a permanent no-op, so there is
- * nothing left to throttle. tests/telegramMakerOnly.test.ts holds the new
- * contract shut: it never sends, regardless of kind, status or repetition.
+/**
+ * A minimal, valid MarketSignal. Overrides let each test change only what it
+ * is testing (kind/status for priority, bank/amountKey for the per-cell
+ * floor).
  */
+function signal(overrides: Partial<MarketSignal> = {}): MarketSignal {
+  return {
+    kind: 'TREND_CHANGE',
+    status: 'CONFIRMED',
+    bank: 'BANESCO',
+    bankDisplayName: 'Banesco',
+    amountKey: '10K',
+    amountVes: 10_000,
+    side: 'BUY',
+    sideLabel: 'MI COMPRA DE USDT',
+    headline: 'cambio de tendencia',
+    evidence: ['x'],
+    confidence: 'MEDIUM',
+    sampleSize: 30,
+    currentPrice: 940,
+    projectedLow: 939,
+    projectedHigh: 941,
+    watchStartHour: null,
+    watchEndHour: null,
+    identity: 'TREND_CHANGE:BANESCO:10K:BUY:1',
+    ...overrides,
+  } as MarketSignal;
+}
+
+function telegramNotifierWithFetch(cooldownMs = 0) {
+  const fetchMock = vi.fn(async () => new Response('{"ok":true}', { status: 200 }));
+  vi.stubGlobal('fetch', fetchMock);
+  const notifier = new TelegramNotifier({
+    botToken: '1234567890:TEST-TOKEN-NOT-REAL',
+    chatId: '-1000000000000',
+    cooldownMs,
+    timeoutMs: 1000,
+  });
+  return { notifier, fetchMock };
+}
+
+describe('signal throttling, as measured', () => {
+  it('sends a new signal and never calls Math.abs-style inversion on its content', async () => {
+    const { notifier, fetchMock } = telegramNotifierWithFetch();
+    const results = await notifier.notifyMarketSignals([signal()], T0);
+    expect(results[0].outcome).toBe('SENT');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('the same identity+status does not re-announce while nothing changed', async () => {
+    const { notifier } = telegramNotifierWithFetch();
+    const first = await notifier.notifyMarketSignals([signal()], T0);
+    expect(first[0].outcome).toBe('SENT');
+
+    const second = await notifier.notifyMarketSignals([signal()], T0 + 1_000);
+    expect(second[0].outcome).toBe('UNCHANGED');
+  });
+
+  it('a real status transition (EARLY_WARNING -> CONFIRMED) is a new key and gets through', async () => {
+    const { notifier } = telegramNotifierWithFetch();
+    const early = signal({ status: 'EARLY_WARNING', identity: 'TREND_CHANGE:BANESCO:10K:BUY:1' });
+    const first = await notifier.notifyMarketSignals([early], T0);
+    expect(first[0].outcome).toBe('SENT');
+
+    const confirmed = signal({ status: 'CONFIRMED', identity: 'TREND_CHANGE:BANESCO:10K:BUY:1' });
+    const second = await notifier.notifyMarketSignals([confirmed], T0 + DEFAULT_SIGNAL_INTERVAL_MS + 1);
+    expect(second[0].outcome).toBe('SENT');
+  });
+
+  it('a different signal on the SAME bank/amount waits for the per-cell floor', async () => {
+    const { notifier } = telegramNotifierWithFetch();
+    const first = await notifier.notifyMarketSignals(
+      [signal({ identity: 'TREND_CHANGE:BANESCO:10K:BUY:1' })],
+      T0
+    );
+    expect(first[0].outcome).toBe('SENT');
+
+    const second = await notifier.notifyMarketSignals(
+      [signal({ kind: 'EXHAUSTION', status: 'EARLY_WARNING', identity: 'EXHAUSTION:BANESCO:10K:BUY:2' })],
+      T0 + 1_000
+    );
+    expect(second[0].outcome).toBe('COOLDOWN');
+
+    const afterFloor = await notifier.notifyMarketSignals(
+      [signal({ kind: 'EXHAUSTION', status: 'EARLY_WARNING', identity: 'EXHAUSTION:BANESCO:10K:BUY:2' })],
+      T0 + DEFAULT_SIGNAL_INTERVAL_MS + 1
+    );
+    expect(afterFloor[0].outcome).toBe('SENT');
+  });
+
+  it('a different bank altogether is not held back by another cell\'s floor', async () => {
+    const { notifier } = telegramNotifierWithFetch();
+    await notifier.notifyMarketSignals(
+      [signal({ bank: 'BANESCO', identity: 'TREND_CHANGE:BANESCO:10K:BUY:1' })],
+      T0
+    );
+
+    // The global floor still applies across the whole matrix at the same instant.
+    const otherBank = await notifier.notifyMarketSignals(
+      [signal({ bank: 'MERCANTIL', identity: 'TREND_CHANGE:MERCANTIL:10K:BUY:1' })],
+      T0 + 1_000
+    );
+    expect(otherBank[0].outcome).toBe('COOLDOWN');
+  });
+
+  it('a CONFIRMED breakout is CRITICAL and jumps the global floor at half the interval', async () => {
+    const { notifier } = telegramNotifierWithFetch();
+    await notifier.notifyMarketSignals(
+      [signal({ kind: 'TREND_CHANGE', status: 'CONFIRMED', bank: 'BANESCO', identity: 'TREND_CHANGE:BANESCO:10K:BUY:1' })],
+      T0
+    );
+
+    const halfFloor = T0 + Math.floor(DEFAULT_SIGNAL_INTERVAL_MS / 2) + 1;
+    const breakout = await notifier.notifyMarketSignals(
+      [
+        signal({
+          kind: 'BREAKOUT_UP',
+          status: 'CONFIRMED',
+          bank: 'MERCANTIL',
+          identity: 'BREAKOUT_UP:MERCANTIL:10K:BUY:1',
+        }),
+      ],
+      halfFloor
+    );
+    expect(breakout[0].outcome).toBe('SENT');
+  });
+
+  it('when several signals compete for the same floor in one sweep, priority decides who wins it', async () => {
+    const { notifier } = telegramNotifierWithFetch();
+    const results = await notifier.notifyMarketSignals(
+      [
+        signal({ kind: 'EXHAUSTION', status: 'EARLY_WARNING', bank: 'BNC', identity: 'EXHAUSTION:BNC:10K:BUY:1' }),
+        signal({ kind: 'BREAKOUT_UP', status: 'CONFIRMED', bank: 'PROVINCIAL', identity: 'BREAKOUT_UP:PROVINCIAL:10K:BUY:1' }),
+      ],
+      T0
+    );
+    // BREAKOUT_UP/CONFIRMED is CRITICAL and was queued second, but wins the
+    // shared global floor because it is sorted ahead by priority.
+    expect(results[1].outcome).toBe('SENT');
+    expect(results[0].outcome).toBe('COOLDOWN');
+  });
+});
 
 describe('el intervalo de señales es propio, no el cooldown genérico', () => {
   it('defaults to 30 minutes and floors at 15', () => {
