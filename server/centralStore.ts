@@ -1396,9 +1396,9 @@ export class CentralMarketStore {
          * `evaluateSignals` runs once below over whatever landed in
          * `projections` - a bank/amount whose own series or current price
          * makes `projectCell` throw used to take every OTHER cell's reading
-         * down with it, so a single bad cell could mean 📈 PROYECCIÓN DE
-         * MERCADO, 🚀 RUPTURA and 🔄 CAMBIO DE TENDENCIA went silent for the
-         * WHOLE matrix that tick, not just for the one cell at fault.
+         * down with it, so a single bad cell could blank out the whole
+         * matrix's signals for that tick (still API/UI-only - see the note
+         * by evaluateSignals below), not just the one cell at fault.
          */
         try {
           const pair = cell.recommendation?.recommended ?? null;
@@ -1456,14 +1456,17 @@ export class CentralMarketStore {
     this.lastSignals = evaluated.signals;
 
     /*
-     * Signals reach Telegram through the SAME notifier as the maker summary,
-     * so the one-voice rule from the maker phase still holds: nothing here
-     * introduces a second emitter, and the notifier deduplicates by what a
-     * signal says rather than by when it was derived.
+     * MARKET SIGNALS ARE UI/API ONLY. Telegram is deliberately maker-only.
+     *
+     * `notifyMarketSignals` used to forward these to Telegram; the propietario
+     * decided against that (server/telegramNotifier.ts, commit d78c74c) and
+     * the method is now a permanent no-op. Calling a no-op here would only
+     * pretend a delivery path exists, so it is not called - `lastSignals`
+     * still feeds getProjections() for the API/UI (Análisis de Mercado /
+     * Market Pulse), which is the only consumer left.
      */
     if (evaluated.signals.length > 0) {
       this.eventCounters.signalsDerived += evaluated.signals.length;
-      void TelegramNotifier.getInstance().notifyMarketSignals(evaluated.signals, Date.now());
     }
   }
 
@@ -1710,9 +1713,10 @@ export class CentralMarketStore {
        * share one try/catch with the market-signal step running last: a
        * throw anywhere in the maker-alert half (matrix build, evaluation, the
        * two `notify` calls) silently skipped persistence AND signal
-       * evaluation for that whole tick, so 📈 PROYECCIÓN DE MERCADO,
-       * 🚀 RUPTURA and 🔄 CAMBIO DE TENDENCIA could stop reaching Telegram
-       * while the maker summary - built earlier in the same try - kept going.
+       * evaluation for that whole tick - losing the historical record and the
+       * Análisis de Mercado / Market Pulse reading, even though neither one
+       * has anything to do with why the maker half failed - while the maker
+       * summary, built earlier in the same try, kept going regardless.
        * Separate try/catches make each half's failures independently visible
        * and stop one from silently taking the other down with it.
        */

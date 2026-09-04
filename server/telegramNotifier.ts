@@ -4,7 +4,14 @@ import type { MarketSignal } from './signalEngine.js';
 import type { MakerMatrix, MakerMatrixCell } from './makerMatrix.js';
 import type { PriceChangeDigest } from './alertScheduler.js';
 
-/** Telegram is deliberately a maker-facing transport. Market/taker signals stay in the API/UI. */
+/**
+ * Telegram is deliberately a maker-facing transport. Market/taker signals stay in the API/UI.
+ *
+ * 🟢 ALERTA DE PRECIO / 🔴 ALERTA P2P / ⚠️ ALTA VOLATILIDAD USED TO LIVE HERE, as
+ * formatAlertMessage + notifyAlert reacting to a user AlertRule. Deleted, not
+ * renamed or downgraded: a market level crossing a number was never a maker
+ * decision, and the operator asked for the whole class gone for good.
+ */
 export const DEFAULT_ALERT_COOLDOWN_MS = 300_000;
 export const DEFAULT_TIMEOUT_MS = 5_000;
 export const DEFAULT_SYSTEM_ALERT_COOLDOWN_MS = 900_000;

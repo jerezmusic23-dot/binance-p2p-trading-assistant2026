@@ -141,17 +141,24 @@ describe('the taker vocabulary cannot return to Telegram through the new modules
   });
 
   it('the projection message speaks the maker vocabulary only', () => {
+    /*
+     * formatMarketSignalMessage is DEAD CODE as of commit d78c74c ("fix: keep
+     * Telegram strictly maker-facing"): notifyMarketSignals never calls it any
+     * more, Telegram is maker-only. It stayed in the file, simplified, rather
+     * than deleted - the assertion below still guards it in case it is ever
+     * wired back up, without requiring the fuller PROYECTADO/MIRAR fields the
+     * pre-d78c74c version had, since those no longer exist.
+     */
     const notifier = read(SERVER, 'telegramNotifier.ts');
     const message = notifier.slice(
       notifier.indexOf('export function formatMarketSignalMessage'),
       notifier.indexOf('export function formatSystemAlertMessage')
     );
 
-    expect(message.length).toBeGreaterThan(500);
+    expect(message.length).toBeGreaterThan(200);
     expect(message).not.toMatch(/ARBITRAJE|EXECUTABLE|Binance ASK|Binance BID/);
-    expect(message).toMatch(/PROYECTADO/);
     expect(message).toMatch(/ACTUAL/);
-    expect(message).toMatch(/No es una orden automática/);
+    expect(message).toMatch(/no es un precio de Binance/);
   });
 
   it('the analysis screen separates ACTUAL from PROYECTADO in words', () => {

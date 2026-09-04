@@ -122,10 +122,16 @@ describe('NO_OPPORTUNITY cannot produce a Telegram message either', () => {
 
   it('the maker emitter decides on maker types only', () => {
     const notifier = read('telegramNotifier.ts');
-    // The only market-shaped imports are the maker ones.
+    /*
+     * The only market-shaped imports are the maker ones. `makerRecommendation.js`
+     * is no longer imported directly since commit d78c74c simplified the
+     * message builders (they now read what they need off MakerMatrixCell,
+     * imported from makerMatrix.js) - dropping an import the file no longer
+     * needs is not a regression, so this only checks that nothing TAKER-shaped
+     * was added in its place.
+     */
     expect(notifier).toMatch(/import type \{ MakerAlert \} from '\.\/makerAlerts\.js';/);
     expect(notifier).toMatch(/from '\.\/makerMatrix\.js'/);
-    expect(notifier).toMatch(/from '\.\/makerRecommendation\.js'/);
     expect(notifier).not.toMatch(/from '\.\/opportunityEngine\.js'/);
     expect(notifier).not.toMatch(/from '\.\/executability\.js'/);
     expect(notifier).not.toMatch(/from '\.\/arbitrageSides\.js'/);
