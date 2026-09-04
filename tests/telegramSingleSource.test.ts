@@ -178,7 +178,40 @@ describe('two emitters can never speak at once', () => {
   it('the maker emitter is driven from one place only', () => {
     const store = code('centralStore.ts');
     expect(store.match(/this\.announceMakerAlerts\(\)/g)).toHaveLength(1);
-    expect(store).toMatch(/private announceMakerAlerts\(\): void \{/);
+    /*
+     * Returns the matrix it built instead of `void` so the market-signal
+     * step can run over the SAME capture in its own try/catch (see below) -
+     * a throw inside announceMakerAlerts must not be able to take
+     * persistObservations/refreshProjections down with it.
+     */
+    expect(store).toMatch(/private announceMakerAlerts\(\): MakerMatrix \| null \{/);
+  });
+
+  it('market signals run in a try/catch separate from the maker alert build', () => {
+    /*
+     * The defect this pins: persistObservations and refreshProjections used
+     * to sit at the tail of announceMakerAlerts' own try/catch, so a throw
+     * anywhere earlier in that method (building the maker matrix, evaluating
+     * maker alerts, either notify call) silently skipped BOTH persistence and
+     * signal evaluation for the whole tick - while the maker summary, sent
+     * earlier in the same try, kept arriving. 📈 PROYECCIÓN DE MERCADO,
+     * 🚀 RUPTURA and 🔄 CAMBIO DE TENDENCIA could go silent with nothing in
+     * the logs to say why.
+     */
+    const store = code('centralStore.ts');
+    expect(store).toMatch(/private refreshMarketSignals\(matrix: MakerMatrix\): void \{/);
+    expect(store).toMatch(
+      /const makerMatrix = this\.announceMakerAlerts\(\);\s*\n\s*if \(makerMatrix !== null\) this\.refreshMarketSignals\(makerMatrix\);/
+    );
+
+    const method = store.slice(
+      store.indexOf('private refreshMarketSignals'),
+      store.indexOf('private persistObservations')
+    );
+    // Two independent try/catches, not one shared try wrapping both calls.
+    expect(method.match(/try \{/g)).toHaveLength(2);
+    expect(method).toMatch(/this\.persistObservations\(matrix\);/);
+    expect(method).toMatch(/this\.refreshProjections\(matrix\);/);
   });
 });
 

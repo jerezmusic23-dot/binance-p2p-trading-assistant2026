@@ -1153,7 +1153,7 @@ export class CentralMarketStore {
    * cells and the opportunity engine are all already computed by this point,
    * and a Telegram outage is not a reason to lose them.
    */
-  private announceMakerAlerts(): void {
+  private announceMakerAlerts(): MakerMatrix | null {
     try {
       const bankOrder = Object.keys(BANK_CODE_MAP);
       const bankDisplayNames: Record<string, string> = {};
@@ -1219,15 +1219,35 @@ export class CentralMarketStore {
         void TelegramNotifier.getInstance().notifyPriceChangeDigest(released.digest);
       }
 
-      /*
-       * PERSISTENCE, then ANALYSIS - in that order, and both over the matrix
-       * already in hand. Zero additional requests to Binance: the book was
-       * captured by the sweep that just finished.
-       */
-      this.persistObservations(matrix);
-      this.refreshProjections(matrix);
+      return matrix;
     } catch (err) {
       console.warn('[CentralStore] Maker alert evaluation failed:', err);
+      return null;
+    }
+  }
+
+  /**
+   * SEÑALES DE MERCADO: proyección, ruptura y cambio de tendencia.
+   *
+   * Deliberadamente separado de `announceMakerAlerts` y con SU PROPIO
+   * try/catch para cada paso. Persistencia y análisis solían vivir al final
+   * del try/catch de `announceMakerAlerts`: un fallo en construir la matriz
+   * maker o en `evaluateMakerAlerts` abortaba en silencio esta mitad entera,
+   * así que el histórico dejaba de escribirse y ninguna señal se evaluaba
+   * para ese tick, mientras el resumen maker -enviado ANTES del punto de
+   * fallo- seguía llegando. Ambas mitades leen el mismo `matrix` capturado
+   * una sola vez; ninguna repite trabajo ni vuelve a preguntarle a Binance.
+   */
+  private refreshMarketSignals(matrix: MakerMatrix): void {
+    try {
+      this.persistObservations(matrix);
+    } catch (err) {
+      console.warn('[CentralStore] persistObservations failed:', err);
+    }
+    try {
+      this.refreshProjections(matrix);
+    } catch (err) {
+      console.warn('[CentralStore] refreshProjections failed:', err);
     }
   }
 
@@ -1245,61 +1265,74 @@ export class CentralMarketStore {
         const cell = matrix.cells[bank]?.[amountKey];
         if (cell === undefined || cell.capturedAt === 0) continue;
 
-        const rec = cell.recommendation;
-        const pair = rec?.recommended ?? null;
+        /*
+         * ONE CELL'S FAILURE MUST NOT SILENCE THE OTHER 41.
+         *
+         * A single malformed cell throwing here used to abort this entire
+         * double loop - no more history for ANY bank or amount that tick, and
+         * (before refreshProjections got its own try/catch too) no signal
+         * evaluation either. Same idiom the ad-fetch loop already uses per
+         * bank a few methods up: isolate, log which cell, keep going.
+         */
+        try {
+          const rec = cell.recommendation;
+          const pair = rec?.recommended ?? null;
 
-        const observation: HistoricalObservation = {
-          timestamp: cell.capturedAt,
-          bank,
-          amountKey,
-          amountVes: cell.amountVes,
+          const observation: HistoricalObservation = {
+            timestamp: cell.capturedAt,
+            bank,
+            amountKey,
+            amountVes: cell.amountVes,
 
-          buyLeaderPrice: rec?.buyAnalysis.leaderPrice ?? null,
-          buyRecommendedPrice: pair?.buy.price ?? null,
-          sellLeaderPrice: rec?.sellAnalysis.leaderPrice ?? null,
-          sellRecommendedPrice: pair?.sell.price ?? null,
+            buyLeaderPrice: rec?.buyAnalysis.leaderPrice ?? null,
+            buyRecommendedPrice: pair?.buy.price ?? null,
+            sellLeaderPrice: rec?.sellAnalysis.leaderPrice ?? null,
+            sellRecommendedPrice: pair?.sell.price ?? null,
 
-          // Filled in by the store against the previous observation.
-          buySpreadVsPrevious: null,
-          sellSpreadVsPrevious: null,
+            // Filled in by the store against the previous observation.
+            buySpreadVsPrevious: null,
+            sellSpreadVsPrevious: null,
 
-          grossSpreadVes: pair?.grossMarginVes ?? null,
-          grossSpreadPct: pair?.grossMarginPct ?? null,
+            grossSpreadVes: pair?.grossMarginVes ?? null,
+            grossSpreadPct: pair?.grossMarginPct ?? null,
 
-          buyPosition: pair?.buy.position ?? null,
-          sellPosition: pair?.sell.position ?? null,
+            buyPosition: pair?.buy.position ?? null,
+            sellPosition: pair?.sell.position ?? null,
 
-          buyAvailableUsdt: pair?.buy.queueAheadUsdt ?? null,
-          sellAvailableUsdt: pair?.sell.queueAheadUsdt ?? null,
+            buyAvailableUsdt: pair?.buy.queueAheadUsdt ?? null,
+            sellAvailableUsdt: pair?.sell.queueAheadUsdt ?? null,
 
-          buyCompetitorCount: rec?.buyAnalysis.competitors ?? 0,
-          sellCompetitorCount: rec?.sellAnalysis.competitors ?? 0,
+            buyCompetitorCount: rec?.buyAnalysis.competitors ?? 0,
+            sellCompetitorCount: rec?.sellAnalysis.competitors ?? 0,
 
-          marketStatus: cell.status,
+            marketStatus: cell.status,
 
-          tick: rec?.buyAnalysis.tick ?? null,
-          tickProvenance: rec?.buyAnalysis.tickProvenance ?? 'NOT_VERIFIABLE',
+            tick: rec?.buyAnalysis.tick ?? null,
+            tickProvenance: rec?.buyAnalysis.tickProvenance ?? 'NOT_VERIFIABLE',
 
-          /*
-           * PROVENANCE SURVIVES A CELL WITH NO PROFITABLE PAIR.
-           *
-           * It used to be dropped whenever `recommended` was null, which threw
-           * away the leading ads of every cell that happened to have no
-           * positive margin that minute - precisely the observations somebody
-           * auditing a flat or inverted stretch would want. The leaders are
-           * known whether or not a pair pays, so they are recorded.
-           */
-          provenance:
-            rec === null
-              ? null
-              : {
-                  buy: CentralMarketStore.leaderAd(rec.buyAnalysis, 'SELL'),
-                  sell: CentralMarketStore.leaderAd(rec.sellAnalysis, 'BUY'),
-                  capturedAt: cell.capturedAt,
-                },
-        };
+            /*
+             * PROVENANCE SURVIVES A CELL WITH NO PROFITABLE PAIR.
+             *
+             * It used to be dropped whenever `recommended` was null, which threw
+             * away the leading ads of every cell that happened to have no
+             * positive margin that minute - precisely the observations somebody
+             * auditing a flat or inverted stretch would want. The leaders are
+             * known whether or not a pair pays, so they are recorded.
+             */
+            provenance:
+              rec === null
+                ? null
+                : {
+                    buy: CentralMarketStore.leaderAd(rec.buyAnalysis, 'SELL'),
+                    sell: CentralMarketStore.leaderAd(rec.sellAnalysis, 'BUY'),
+                    capturedAt: cell.capturedAt,
+                  },
+          };
 
-        HistoricalMarketStore.record(observation, cell.capturedAt);
+          HistoricalMarketStore.record(observation, cell.capturedAt);
+        } catch (err) {
+          console.warn(`[CentralStore] persistObservations: ${bank}/${amountKey} failed:`, err);
+        }
       }
     }
   }
@@ -1357,19 +1390,33 @@ export class CentralMarketStore {
         const cell = matrix.cells[bank]?.[amountKey];
         if (cell === undefined) continue;
 
-        const pair = cell.recommendation?.recommended ?? null;
-        projections.push(
-          projectCell({
-            bank,
-            bankDisplayName: cell.bankDisplayName,
-            amountKey,
-            amountVes: cell.amountVes,
-            series: HistoricalMarketStore.load(bank, amountKey),
-            currentBuyPrice: pair?.buy.price ?? null,
-            currentSellPrice: pair?.sell.price ?? null,
-            generalSeries,
-          })
-        );
+        /*
+         * ONE CELL'S FAILURE MUST NOT SILENCE THE OTHER 41.
+         *
+         * `evaluateSignals` runs once below over whatever landed in
+         * `projections` - a bank/amount whose own series or current price
+         * makes `projectCell` throw used to take every OTHER cell's reading
+         * down with it, so a single bad cell could mean 📈 PROYECCIÓN DE
+         * MERCADO, 🚀 RUPTURA and 🔄 CAMBIO DE TENDENCIA went silent for the
+         * WHOLE matrix that tick, not just for the one cell at fault.
+         */
+        try {
+          const pair = cell.recommendation?.recommended ?? null;
+          projections.push(
+            projectCell({
+              bank,
+              bankDisplayName: cell.bankDisplayName,
+              amountKey,
+              amountVes: cell.amountVes,
+              series: HistoricalMarketStore.load(bank, amountKey),
+              currentBuyPrice: pair?.buy.price ?? null,
+              currentSellPrice: pair?.sell.price ?? null,
+              generalSeries,
+            })
+          );
+        } catch (err) {
+          console.warn(`[CentralStore] refreshProjections: ${bank}/${amountKey} failed:`, err);
+        }
       }
     }
 
@@ -1656,8 +1703,21 @@ export class CentralMarketStore {
        * Announced BEFORE the opportunity lifecycle in wall-clock terms only
        * because this is where the book has just landed; the two are
        * independent, answer different questions and share no state.
+       *
+       * `announceMakerAlerts` hands back the matrix it built so
+       * `refreshMarketSignals` can run over the SAME capture without asking
+       * Binance again - and, crucially, in its OWN try/catch. The two used to
+       * share one try/catch with the market-signal step running last: a
+       * throw anywhere in the maker-alert half (matrix build, evaluation, the
+       * two `notify` calls) silently skipped persistence AND signal
+       * evaluation for that whole tick, so 📈 PROYECCIÓN DE MERCADO,
+       * 🚀 RUPTURA and 🔄 CAMBIO DE TENDENCIA could stop reaching Telegram
+       * while the maker summary - built earlier in the same try - kept going.
+       * Separate try/catches make each half's failures independently visible
+       * and stop one from silently taking the other down with it.
        */
-      this.announceMakerAlerts();
+      const makerMatrix = this.announceMakerAlerts();
+      if (makerMatrix !== null) this.refreshMarketSignals(makerMatrix);
     } catch (err) {
       console.error('[CentralStore] Error refreshing bank matrix:', err);
     } finally {
