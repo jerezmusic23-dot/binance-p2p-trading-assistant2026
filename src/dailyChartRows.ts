@@ -11,9 +11,9 @@
  * Binance a secas, para que un cruce de líneas se lea mal en voz alta antes de
  * llegar a producción.
  *
- * No inventa horas. Una hora que nadie observó y que no se proyectó sale con
- * los campos ausentes, y la gráfica —con `connectNulls` desactivado— deja el
- * hueco a la vista en vez de trazar una recta por encima.
+ * El contrato de producción es 24/7. Cuando el servidor no tiene evidencia
+ * para una hora futura, la hora sigue existiendo como fila con los campos de
+ * precio ausentes: el hueco es visible y no se inventa ninguna cifra.
  *
  * ═══ POR QUÉ LAS FILAS SE EMPAREJAN POR `step` Y NO POR `hour` ═══
  *
@@ -71,6 +71,15 @@ export function buildRows(report: DailyProjectionResponse): DailyChartRow[] {
     for (const p of leg.projected) steps.add(p.hoursAhead);
   }
 
+  // The production contract is a 24-hour horizon. Keep every future step in
+  // the chart even when one or both legs have insufficient evidence for that
+  // hour. An absent price means "not verifiable", never a synthetic value.
+  if (report.horizonHours === 24) {
+    for (let hoursAhead = 1; hoursAhead <= 24; hoursAhead += 1) {
+      steps.add(hoursAhead);
+    }
+  }
+
   const rows = [...steps]
     .sort((a, b) => a - b)
     .map((step): DailyChartRow => {
@@ -84,8 +93,14 @@ export function buildRows(report: DailyProjectionResponse): DailyChartRow[] {
         compraReal?.hour ??
         ventaProjected?.hourOfDay ??
         compraProjected?.hourOfDay ??
-        anchorHour;
-      const dayKey = ventaProjected?.dayKey ?? compraProjected?.dayKey ?? anchorDayKey;
+        ((anchorHour + step) % 24 + 24) % 24;
+      const dayOffset = Math.floor((anchorHour + step) / 24);
+      const anchorDate = new Date(`${anchorDayKey}T00:00:00Z`);
+      anchorDate.setUTCDate(anchorDate.getUTCDate() + dayOffset);
+      const dayKey =
+        ventaProjected?.dayKey ??
+        compraProjected?.dayKey ??
+        anchorDate.toISOString().slice(0, 10);
 
       const row: DailyChartRow = { step, hour, dayKey, label: hourLabel(hour) };
 
