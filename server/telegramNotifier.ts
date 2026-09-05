@@ -204,39 +204,14 @@ export function formatPriceChangeDigestMessage(digest: PriceChangeDigest): strin
   return lines.join('\n');
 }
 
-/**
- * 📈 PROYECCIÓN DE MERCADO / 🚀 RUPTURA / 🔄 CAMBIO DE TENDENCIA.
- *
- * A signal explains itself or it does not go out. Every message carries the
- * evidence that produced it, the number of observations behind that evidence,
- * and - loudly - the difference between what the price IS and what the series
- * suggests it might do.
- *
- * NOT AN INSTRUCTION. There is no "publica a", no "compra ahora" y no target.
- * The operator is told what the data shows and decides for themselves.
- */
-export function formatMarketSignalMessage(
-  signal: MarketSignal,
-  priority: AlertPriority,
-  timestamp: number
-): string {
+export function formatMarketSignalMessage(signal: MarketSignal, priority: AlertPriority, timestamp: number): string {
   const n = (value: number | null): string =>
     value === null ? 'no verificable' : escapeHtml(value.toFixed(2));
-
   const heading =
     signal.kind === 'TREND_CHANGE'
-      ? signal.status === 'CONFIRMED'
-        ? '🔄 <b>CAMBIO DE TENDENCIA</b>'
-        : '⚠️ <b>POSIBLE CAMBIO DE TENDENCIA</b>'
-      : signal.kind === 'BREAKOUT_UP' || signal.kind === 'BREAKOUT_DOWN'
-        ? '🚀 <b>RUPTURA</b>'
-        : '📈 <b>PROYECCIÓN DE MERCADO</b>';
-
-  const statusLine =
-    signal.status === 'CONFIRMED'
-      ? 'Estado: <b>CONFIRMADA</b>'
-      : 'Estado: <b>SEÑAL PARCIAL · AVISO TEMPRANO</b>';
-
+      ? signal.status === 'CONFIRMED' ? '🔄 <b>CAMBIO DE TENDENCIA</b>' : '⚠️ <b>POSIBLE CAMBIO DE TENDENCIA</b>'
+      : signal.kind === 'BREAKOUT_UP' || signal.kind === 'BREAKOUT_DOWN' ? '🚀 <b>RUPTURA</b>' : '📈 <b>PROYECCIÓN DE MERCADO</b>';
+  const statusLine = signal.status === 'CONFIRMED' ? 'Estado: <b>CONFIRMADA</b>' : 'Estado: <b>SEÑAL PARCIAL · AVISO TEMPRANO</b>';
   const lines = [
     heading, '',
     `🏦 ${escapeHtml(signal.bankDisplayName)} · ${escapeHtml(signal.amountKey)}`,
@@ -244,39 +219,16 @@ export function formatMarketSignalMessage(
     escapeHtml(signal.headline), '',
     statusLine,
     `Prioridad: <b>${escapeHtml(priority)}</b>`,
-    `Confianza: <b>${escapeHtml(signal.confidence)}</b> · Muestras: <b>${escapeHtml(String(signal.sampleSize))}</b>`,
-    '',
-    /*
-     * ACTUAL first and labelled, then PROYECTADO labelled separately. A band
-     * rendered beside a live price with the same wording is how somebody ends
-     * up publishing an ad at a number Binance never quoted.
-     */
+    `Confianza: <b>${escapeHtml(signal.confidence)}</b> · Muestras: <b>${escapeHtml(String(signal.sampleSize))}</b>`, '',
     `ACTUAL (precio para publicar): <b>${n(signal.currentPrice)} VES</b>`,
     signal.projectedLow !== null && signal.projectedHigh !== null
       ? `PROYECTADO (rango observado): <b>${n(signal.projectedLow)} – ${n(signal.projectedHigh)} VES</b>`
       : 'PROYECTADO: no verificable con el histórico disponible',
   ];
-
   if (signal.watchStartHour !== null && signal.watchEndHour !== null) {
-    lines.push(
-      '',
-      `MIRAR: <b>${escapeHtml(String(signal.watchStartHour).padStart(2, '0'))}:00 – ${escapeHtml(
-        String(signal.watchEndHour).padStart(2, '0')
-      )}:00</b> (hora de Venezuela)`
-    );
+    lines.push('', `MIRAR: <b>${escapeHtml(String(signal.watchStartHour).padStart(2, '0'))}:00 – ${escapeHtml(String(signal.watchEndHour).padStart(2, '0'))}:00</b> (hora de Venezuela)`);
   }
-
-  lines.push(
-    '',
-    '<b>Evidencia</b>',
-    ...signal.evidence.map((line) => `· ${escapeHtml(line)}`),
-    '',
-    'No es una orden automática ni una operación garantizada.',
-    'Una proyección no es un precio de Binance.',
-    '',
-    `Hora: ${formatVenezuelaClock(timestamp)}`
-  );
-
+  lines.push('', '<b>Evidencia</b>', ...signal.evidence.map((line) => `· ${escapeHtml(line)}`), '', 'No es una orden automática ni una operación garantizada.', 'Una proyección no es un precio de Binance.', '', `Hora: ${formatVenezuelaClock(timestamp)}`);
   return lines.join('\n');
 }
 
@@ -303,7 +255,6 @@ export class TelegramNotifier {
   private startupLogged = false;
 
   constructor(private readonly config: TelegramConfig | null) {}
-
   public static getInstance(): TelegramNotifier {
     if (!TelegramNotifier.instance) {
       TelegramNotifier.instance = new TelegramNotifier(readTelegramConfig());
@@ -311,11 +262,9 @@ export class TelegramNotifier {
     }
     return TelegramNotifier.instance;
   }
-
   public static resetInstance(): void { TelegramNotifier.instance = null; }
   public resetState(): void { this.lastSentAt.clear(); this.lastSystemState.clear(); }
   public isEnabled(): boolean { return this.config !== null; }
-
   public logStartupStatus(): void {
     if (this.startupLogged) return;
     this.startupLogged = true;
@@ -323,41 +272,15 @@ export class TelegramNotifier {
     else console.log(`[Telegram] Notifications enabled (cooldown ${this.config.cooldownMs}ms, timeout ${this.config.timeoutMs}ms).`);
   }
 
-  /**
-   * 📈 PROYECCIÓN DE MERCADO / 🚀 RUPTURA / 🔄 CAMBIO DE TENDENCIA.
-   *
-   * Independent of the maker summary voice (notifyMakerAlerts /
-   * notifyPriceChangeDigest): both read from the same maker matrix, but this
-   * one announces the SIGNAL an analista would want to see, not the price
-   * itself. INFO never reaches Telegram - it exists for the API/UI only.
-   *
-   * Three throttles, all keyed off lastSentAt (the same map the maker digest
-   * and system alerts already share, so `prune` covers everything):
-   *   - per-signal dedup: `signal:${identity}:${status}` - a live condition is
-   *     "touched" every sweep it is still true, so it never re-announces
-   *     itself while nothing changed, but a genuine status transition
-   *     (EARLY_WARNING -> CONFIRMED) is a new key and always gets through.
-   *   - per-cell floor: `signal:cell:${bank}:${amountKey}` (or
-   *     `signal:critical:${bank}:${amountKey}` for CRITICAL) - the same
-   *     bank/amount cannot re-alert faster than the configured interval,
-   *     whichever kind fires next.
-   *   - global floor: `signal:any` (`signal:any:critical` for CRITICAL, at
-   *     half the interval) - the whole matrix cannot flood Telegram even if
-   *     every cell has a different signal at the same instant.
-   * Signals are sorted by priority first, so when several compete for the
-   * same floor in one sweep the most urgent one is the one that wins it.
-   */
   public async notifyMarketSignals(signals: readonly MarketSignal[], timestamp: number): Promise<TelegramResult[]> {
     if (!this.config) return signals.map(() => ({ outcome: 'DISABLED' as const }));
     const now = timestamp || Date.now();
     const { intervalMs } = readSignalInterval();
-    const results: TelegramResult[] = [];
-
     const ordered = [...signals]
       .map((signal, index) => ({ signal, index, priority: priorityOf(signal) }))
       .sort((a, b) => PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority] || a.index - b.index);
-
     const outcomeByIndex = new Map<number, TelegramResult>();
+
     for (const { signal, index, priority } of ordered) {
       try {
         if (priority === 'INFO') {
@@ -367,7 +290,6 @@ export class TelegramNotifier {
 
         const dedupKey = `signal:${signal.identity}:${signal.status}`;
         if (this.lastSentAt.has(dedupKey)) {
-          this.lastSentAt.set(dedupKey, now);
           outcomeByIndex.set(index, { outcome: 'UNCHANGED' });
           continue;
         }
@@ -376,13 +298,8 @@ export class TelegramNotifier {
         const cellKey = critical
           ? `signal:critical:${signal.bank}:${signal.amountKey}`
           : `signal:cell:${signal.bank}:${signal.amountKey}`;
-        // CRITICAL checks its own, tighter global key so a confirmed break can
-        // jump ahead of the ordinary floor; everything else shares one key,
-        // so a CRITICAL send still holds that shared floor shut for whatever
-        // non-critical signal loses the priority sort in the same sweep.
         const globalCheckKey = critical ? 'signal:any:critical' : 'signal:any';
         const floorMs = critical ? Math.floor(intervalMs / 2) : intervalMs;
-
         const lastCell = this.lastSentAt.get(cellKey);
         if (lastCell !== undefined && now - lastCell < floorMs) {
           outcomeByIndex.set(index, { outcome: 'COOLDOWN' });
@@ -394,19 +311,23 @@ export class TelegramNotifier {
           continue;
         }
 
-        this.lastSentAt.set(dedupKey, now);
-        this.lastSentAt.set(cellKey, now);
-        this.lastSentAt.set('signal:any', now);
-        if (critical) this.lastSentAt.set('signal:any:critical', now);
-        this.prune(now);
-        outcomeByIndex.set(index, await this.send(formatMarketSignalMessage(signal, priority, now)));
+        const result = await this.send(formatMarketSignalMessage(signal, priority, now));
+        outcomeByIndex.set(index, result);
+        // IMPORTANT: throttles advance only after Telegram accepted the message.
+        // A timeout/HTTP/network failure must remain retryable on the next sweep.
+        if (result.outcome === 'SENT') {
+          this.lastSentAt.set(dedupKey, now);
+          this.lastSentAt.set(cellKey, now);
+          this.lastSentAt.set('signal:any', now);
+          if (critical) this.lastSentAt.set('signal:any:critical', now);
+          this.prune(now);
+        }
       } catch (err) {
         outcomeByIndex.set(index, { outcome: 'NETWORK_ERROR', detail: this.describe(err) });
       }
     }
 
-    for (let i = 0; i < signals.length; i += 1) results.push(outcomeByIndex.get(i)!);
-    return results;
+    return signals.map((_, i) => outcomeByIndex.get(i)!);
   }
 
   private async send(text: string): Promise<TelegramResult> {
@@ -448,10 +369,13 @@ export class TelegramNotifier {
       const previous = this.lastSentAt.get(key);
       const cooldownMs = Math.max(this.config.cooldownMs, DEFAULT_SYSTEM_ALERT_COOLDOWN_MS);
       if (previous !== undefined && now - previous < cooldownMs) return { outcome: 'COOLDOWN' };
-      this.lastSystemState.set(key, alert.state);
-      this.lastSentAt.set(key, now);
-      this.prune(now);
-      return await this.send(formatSystemAlertMessage(alert));
+      const result = await this.send(formatSystemAlertMessage(alert));
+      if (result.outcome === 'SENT') {
+        this.lastSystemState.set(key, alert.state);
+        this.lastSentAt.set(key, now);
+        this.prune(now);
+      }
+      return result;
     } catch (err) {
       const detail = this.describe(err);
       return { outcome: 'NETWORK_ERROR', detail };
@@ -475,9 +399,12 @@ export class TelegramNotifier {
     try {
       if (!this.config) return { outcome: 'DISABLED' };
       if (digest.changes.length === 0) return { outcome: 'UNCHANGED' };
-      this.lastSentAt.set('maker:digest', digest.releasedAt);
-      this.prune(digest.releasedAt);
-      return await this.send(formatPriceChangeDigestMessage(digest));
+      const result = await this.send(formatPriceChangeDigestMessage(digest));
+      if (result.outcome === 'SENT') {
+        this.lastSentAt.set('maker:digest', digest.releasedAt);
+        this.prune(digest.releasedAt);
+      }
+      return result;
     } catch (err) { return { outcome: 'NETWORK_ERROR', detail: this.describe(err) }; }
   }
 
