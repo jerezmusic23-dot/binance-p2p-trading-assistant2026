@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { AlertTriangle, ArrowDownRight, ArrowRight, ArrowUpRight, Building2, CheckCircle2, Clock, Droplet, HelpCircle, Info, RefreshCw, XCircle } from 'lucide-react';
+import { AlertTriangle, ArrowRight, Building2, CheckCircle2, Clock, Droplet, HelpCircle, Info, RefreshCw, XCircle } from 'lucide-react';
 import type { AmountFilterKey, BankFilterKey, CellStatus, ExecutableCell, ExecutableMatrix, GlobalFilterState, MarketReference } from './types';
 import { ApiService } from './api';
 import { filterMatrixView } from './bankMatrixFilter';
@@ -31,8 +31,8 @@ function Cell({ cell, onSelect }: { cell: ExecutableCell; onSelect: () => void }
     <button type="button" onClick={onSelect} title={cell.reason ?? undefined} className={`w-full min-w-[155px] rounded-md border px-2.5 py-2 text-left ${s.className}`}>
       <div className="flex items-center gap-1.5 text-[9px] font-bold uppercase tracking-wide"><s.Icon className="h-3 w-3" />{s.label}</div>
       <div className="mt-1.5 space-y-0.5 font-mono text-[10px]">
-        <div className="flex justify-between gap-2"><span className="text-[#848e9c]">MI COMPRA · BID</span><span>{cell.buy ? cell.buy.price.toFixed(2) : '—'}</span></div>
-        <div className="flex justify-between gap-2"><span className="text-[#848e9c]">MI VENTA · ASK</span><span>{cell.sell ? cell.sell.price.toFixed(2) : '—'}</span></div>
+        <div className="flex justify-between gap-2"><span className="text-[#848e9c]">MI COMPRA · ASK</span><span>{cell.buy ? cell.buy.price.toFixed(2) : '—'}</span></div>
+        <div className="flex justify-between gap-2"><span className="text-[#848e9c]">MI VENTA · BID</span><span>{cell.sell ? cell.sell.price.toFixed(2) : '—'}</span></div>
         <div className="flex justify-between gap-2 border-t border-current/10 pt-0.5"><span className="text-[#848e9c]">Margen</span><span>{pct(cell.spreadPct)}</span></div>
         <div className="flex justify-between gap-2"><span className="text-[#848e9c]">Liquidez</span><span>{cell.availableUsdt == null ? 'n/v' : cell.availableUsdt.toFixed(0)}</span></div>
       </div>
@@ -50,10 +50,11 @@ function FlowCard({ cell, onNavigateTab }: { cell: ExecutableCell; onNavigateTab
         <span className={`rounded border px-2 py-0.5 text-[10px] font-bold ${STATUS[cell.status].className}`}>{STATUS[cell.status].label}</span>
       </div>
       <div className="mt-3 grid gap-2 md:grid-cols-4 text-[11px]">
-        <div className="rounded border border-[#2b2f36] p-2"><div className="text-[#5e6673]">1 · ENTRADA</div><div className="font-bold text-[#02c076]">MI COMPRA</div><div className="text-[#848e9c]">Binance SELL / BID · yo compro USDT</div><div className="font-mono text-[#e0e0e0]">{executable ? money(op!.arbitrageBuyPrice) : 'no disponible'}</div></div>
-        <div className="rounded border border-[#2b2f36] p-2"><div className="text-[#5e6673]">2 · SALIDA</div><div className="font-bold text-[#FCD535]">MI VENTA</div><div className="text-[#848e9c]">Binance BUY / ASK · yo vendo USDT</div><div className="font-mono text-[#e0e0e0]">{executable ? money(op!.arbitrageSellPrice) : 'no disponible'}</div></div>
-        <div className="rounded border border-[#2b2f36] p-2"><div className="text-[#5e6673]">3 · RESULTADO</div><div className={`font-bold ${executable ? 'text-[#02c076]' : 'text-[#f6465d]'}`}>{executable ? 'MARGEN POSITIVO' : 'NO OPERAR'}</div><div className="text-[#848e9c]">{cell.reason ?? 'Ambas piernas y liquidez verificadas.'}</div><div className="font-mono text-[#e0e0e0]">{executable ? `${op!.marginVes.toFixed(2)} VES · ${pct(op!.marginPct)}` : '—'}</div></div>
-        <div className="rounded border border-[#2b2f36] p-2"><div className="text-[#5e6673]">4 · SIGUIENTE</div><div className="font-bold text-[#e0e0e0]">PUBLICACIÓN / ANÁLISIS</div><div className="text-[#848e9c]">La matriz responde ejecución; Proyección responde contexto.</div><div className="mt-1 flex gap-2"><button type="button" onClick={() => onNavigateTab?.('projections')} className="text-[#FCD535] underline">Proyección</button><button type="button" onClick={() => onNavigateTab?.('orderbook')} className="text-[#FCD535] underline">Libro</button></div></div>
+        <div className="rounded border border-[#2b2f36] p-2"><div className="text-[#5e6673]">1 · ENTRADA / ARBITRAJE BUY</div><div className="font-bold text-[#02c076]">MI COMPRA</div><div className="text-[#848e9c]">ASK · anuncio que VENDE USDT · tradeType=BUY</div><div className="font-mono text-[#e0e0e0]">{executable ? money(op!.arbitrageBuyPrice) : 'no disponible'}</div></div>
+        <ArrowRight className="hidden md:block self-center text-[#5e6673]" />
+        <div className="rounded border border-[#2b2f36] p-2"><div className="text-[#5e6673]">2 · SALIDA / ARBITRAJE SELL</div><div className="font-bold text-[#FCD535]">MI VENTA</div><div className="text-[#848e9c]">BID · anuncio que COMPRA USDT · tradeType=SELL</div><div className="font-mono text-[#e0e0e0]">{executable ? money(op!.arbitrageSellPrice) : 'no disponible'}</div></div>
+        <div className="rounded border border-[#2b2f36] p-2"><div className="text-[#5e6673]">3 · DECISIÓN</div><div className={`font-bold ${executable ? 'text-[#02c076]' : 'text-[#f6465d]'}`}>{executable ? 'MARGEN POSITIVO' : 'NO OPERAR'}</div><div className="text-[#848e9c]">{cell.reason ?? 'Ambas piernas, banco, monto y liquidez están verificadas.'}</div><div className="font-mono text-[#e0e0e0]">{executable ? `${op!.marginVes.toFixed(2)} VES · ${pct(op!.marginPct)}` : '—'}</div></div>
+        <div className="rounded border border-[#2b2f36] p-2"><div className="text-[#5e6673]">4 · CONTEXTO</div><div className="font-bold text-[#e0e0e0]">PROYECCIÓN + LIBRO</div><div className="text-[#848e9c]">La matriz confirma si existe operación; la proyección estima el contexto futuro.</div><div className="mt-1 flex gap-2"><button type="button" onClick={() => onNavigateTab?.('projections')} className="text-[#FCD535] underline">Proyección</button><button type="button" onClick={() => onNavigateTab?.('orderbook')} className="text-[#FCD535] underline">Libro</button></div></div>
       </div>
       {executable && <div className="mt-3 grid gap-2 text-[11px] sm:grid-cols-3"><div><span className="text-[#5e6673]">Anuncio entrada:</span> <span className="font-mono">#{op!.buyAdvNo}</span></div><div><span className="text-[#5e6673]">Anuncio salida:</span> <span className="font-mono">#{op!.sellAdvNo}</span></div><div><span className="text-[#5e6673]">Liquidez común:</span> <span className="font-mono">{usdt(op!.availableUsdt)}</span></div></div>}
     </div>
@@ -95,8 +96,16 @@ export const BankMatrix: React.FC<BankMatrixProps> = ({ activeGlobalFilter, onSe
   return (
     <div className="space-y-4">
       <section className="rounded-lg border border-[#2b2f36] bg-[#111417] p-4">
-        <div className="flex items-start gap-3"><Building2 className="mt-0.5 h-5 w-5 text-[#FCD535]" /><div><h2 className="text-sm font-bold text-[#e0e0e0]">MATRIZ MULTIFILTRO · FLUJO DE OPERACIÓN</h2><p className="mt-1 text-[11px] leading-relaxed text-[#848e9c]">La matriz no es otra cotización: es el punto donde el bot cruza <b className="text-[#e0e0e0]">BANCO + MONTO + DOS PIERNAS + LIQUIDEZ</b>. El flujo correcto es <b className="text-[#02c076]">MI COMPRA → MI VENTA → MARGEN</b>.</p></div></div>
-        <div className="mt-3 grid gap-2 md:grid-cols-4 text-[10px]"><div className="rounded border border-[#2b2f36] p-2"><b>1. Binance SELL / BID</b><br/><span className="text-[#848e9c]">anuncio que vende USDT → MI COMPRA.</span></div><ArrowRight className="hidden md:block self-center text-[#5e6673]" /><div className="rounded border border-[#2b2f36] p-2"><b>2. Binance BUY / ASK</b><br/><span className="text-[#848e9c]">anuncio que compra USDT → MI VENTA.</span></div><ArrowRight className="hidden md:block self-center text-[#5e6673]" /><div className="rounded border border-[#2b2f36] p-2"><b>3. OPORTUNIDAD</b><br/><span className="text-[#848e9c]">MI VENTA − MI COMPRA &gt; 0 y ambas piernas son ejecutables.</span></div><ArrowRight className="hidden md:block self-center text-[#5e6673]" /><div className="rounded border border-[#2b2f36] p-2"><b>4. CONTEXTO</b><br/><span className="text-[#848e9c]">Proyección y análisis dicen qué está haciendo el mercado; no sustituyen los anuncios.</span></div></div>
+        <div className="flex items-start gap-3"><Building2 className="mt-0.5 h-5 w-5 text-[#FCD535]" /><div><h2 className="text-sm font-bold text-[#e0e0e0]">MATRIZ MULTIFILTRO · FLUJO COMPLETO</h2><p className="mt-1 text-[11px] leading-relaxed text-[#848e9c]">Primero elegimos <b className="text-[#e0e0e0]">BANCO + MONTO</b>. Después el bot comprueba dos anuncios reales compatibles. En arbitraje: <b className="text-[#02c076]">MI COMPRA = ASK</b> y <b className="text-[#FCD535]">MI VENTA = BID</b>. Sólo si VENTA − COMPRA &gt; 0 y ambas piernas tienen liquidez existe una oportunidad.</p></div></div>
+        <div className="mt-3 grid gap-2 md:grid-cols-4 text-[10px]">
+          <div className="rounded border border-[#2b2f36] p-2"><b>1 · FUENTE</b><br/><span className="text-[#848e9c]">Binance P2P devuelve anuncios por lado y monto.</span></div>
+          <ArrowRight className="hidden md:block self-center text-[#5e6673]" />
+          <div className="rounded border border-[#2b2f36] p-2"><b>2 · FILTRO</b><br/><span className="text-[#848e9c]">Banco verificado + monto aceptado + volumen publicado.</span></div>
+          <ArrowRight className="hidden md:block self-center text-[#5e6673]" />
+          <div className="rounded border border-[#2b2f36] p-2"><b>3 · PAR</b><br/><span className="text-[#848e9c]">Se buscan conjuntamente las dos piernas; no se mezclan anuncios incompatibles.</span></div>
+          <ArrowRight className="hidden md:block self-center text-[#5e6673]" />
+          <div className="rounded border border-[#2b2f36] p-2"><b>4 · DECISIÓN</b><br/><span className="text-[#848e9c]">Margen positivo → ejecutable. Cualquier fallo → motivo humano.</span></div>
+        </div>
       </section>
 
       <div className="flex flex-wrap items-center justify-between gap-2 rounded border border-[#2b2f36] bg-[#181a20] p-3 text-[11px]">
