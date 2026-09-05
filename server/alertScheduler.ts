@@ -6,8 +6,6 @@ export const PRIORITY_ORDER: Record<AlertPriority, number> = { CRITICAL: 0, IMPO
 
 export const DEFAULT_PRICE_CHANGE_INTERVAL_MS = 30 * 60 * 1000;
 export const MIN_PRICE_CHANGE_INTERVAL_MS = 15 * 60 * 1000;
-
-/** Market-analysis Telegram signals: five minutes for timely context. */
 export const DEFAULT_SIGNAL_INTERVAL_MS = 5 * 60 * 1000;
 export const MIN_SIGNAL_INTERVAL_MS = 5 * 60 * 1000;
 
@@ -95,13 +93,13 @@ export function releasePriceChangeDigest(
   const revertedCells = pending.length - changes.length;
   if (changes.length === 0) return { digest: null, state: { pending: {}, lastReleasedAt: state.lastReleasedAt } };
   changes.sort((a, b) => a.bankDisplayName.localeCompare(b.bankDisplayName) || a.amountVes - b.amountVes);
-  return {
-    digest: { changes, revertedCells, releasedAt: nowMs, nextReleaseAt: nowMs + intervalMs },
-    state: { pending: {}, lastReleasedAt: nowMs },
-  };
+  return { digest: { changes, revertedCells, releasedAt: nowMs, nextReleaseAt: nowMs + intervalMs }, state: { pending: {}, lastReleasedAt: nowMs } };
 }
 
-export function priorityOf(signal: { kind: string; status: 'EARLY_WARNING' | 'CONFIRMED' }): AlertPriority {
+export function priorityOf(signal: { kind: string; status: 'EARLY_WARNING' | 'CONFIRMED'; bank?: string }): AlertPriority {
+  // Telegram market-analysis alerts are intentionally restricted to these two banks.
+  // The signal remains available to the interface; INFO is the notifier's non-delivery class.
+  if (signal.bank !== undefined && signal.bank !== 'MERCANTIL' && signal.bank !== 'BANCAMIGA') return 'INFO';
   const confirmed = signal.status === 'CONFIRMED';
   switch (signal.kind) {
     case 'BREAKOUT_UP':
