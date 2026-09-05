@@ -10,16 +10,17 @@ const config = {
 };
 
 const signal: MarketSignal = {
-  kind: 'PROJECTION',
+  kind: 'BREAKOUT_UP',
   identity: 'retry-cell',
   status: 'CONFIRMED',
   bank: 'VENEZUELA',
   bankDisplayName: 'Banco de Venezuela',
   amountKey: '10K',
+  amountVes: 10000,
   side: 'BUY',
   sideLabel: 'MI VENTA',
   headline: 'Prueba de entrega',
-  confidence: 'MEDIA',
+  confidence: 'HIGH',
   sampleSize: 10,
   currentPrice: 950,
   projectedLow: 949,
