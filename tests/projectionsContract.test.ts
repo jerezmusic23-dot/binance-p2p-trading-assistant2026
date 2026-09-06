@@ -97,3 +97,5 @@ describe('bank/payType no forman parte de la serie general', () => {
     expect(report.floor.observed?.price).toBe(930);
   });
 });
+
+// CI guard: this contract is intentionally independent of bank/payType filters.
