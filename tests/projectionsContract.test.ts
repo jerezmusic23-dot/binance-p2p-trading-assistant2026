@@ -87,9 +87,11 @@ describe('bank/payType no forman parte de la serie general', () => {
   });
 
   it('la proyección general no requiere datos estratégicos', () => {
-    const source = row(9, 930, 950);
-    const { strategicBuyPrice, strategicSellPrice, strategicSpreadPct, ...raw } = source;
-    const report = buildDailyProjection([raw as HistoryRecord], t(20));
+    const raw = { ...row(9, 930, 950) };
+    delete raw.strategicBuyPrice;
+    delete raw.strategicSellPrice;
+    delete raw.strategicSpreadPct;
+    const report = buildDailyProjection([raw], t(20));
 
     expect(report.ceiling.observed?.price).toBe(950);
     expect(report.floor.observed?.price).toBe(930);
