@@ -83,7 +83,7 @@ export const BankMatrix: React.FC<BankMatrixProps> = ({ activeGlobalFilter, onSe
     }
   };
 
-  useEffect(() => { void load(); }, []);
+  useEffect(() => { void load(); }, [activeGlobalFilter?.bank, activeGlobalFilter?.amount]);
 
   if (loading) return <div className="p-6 text-center text-sm text-[#848e9c]">Cargando matriz ejecutable…</div>;
   if (error) return <div className="rounded-lg border border-[#f6465d]/30 p-6 text-sm text-[#f6465d]">{error}<button type="button" onClick={() => void load(true)} className="ml-3 underline">Reintentar</button></div>;
@@ -91,7 +91,7 @@ export const BankMatrix: React.FC<BankMatrixProps> = ({ activeGlobalFilter, onSe
 
   const view = filterMatrixView(matrix, activeGlobalFilter);
   const selected = view.singleCell;
-  const executableCount = Object.values(matrix.cells).flatMap(row => Object.values(row)).filter(c => c.status === 'EXECUTABLE').length;
+  const visibleExecutableCount = view.visibleBanks.flatMap(bank => view.visibleAmounts.map(amount => matrix.cells[bank]?.[amount])).filter((c): c is ExecutableCell => c != null && c.status === 'EXECUTABLE').length;
 
   return (
     <div className="space-y-4">
@@ -109,7 +109,7 @@ export const BankMatrix: React.FC<BankMatrixProps> = ({ activeGlobalFilter, onSe
       </section>
 
       <div className="flex flex-wrap items-center justify-between gap-2 rounded border border-[#2b2f36] bg-[#181a20] p-3 text-[11px]">
-        <div><span className="text-[#5e6673]">Filtro activo:</span> <b>{activeGlobalFilter?.bankDisplayName ?? 'Todos los Bancos'}</b> · <b>{activeGlobalFilter?.amount ?? 'ALL'}</b> · <span className="text-[#5e6673]">Ejecutables detectados: {executableCount}</span></div>
+        <div><span className="text-[#5e6673]">Filtro activo:</span> <b>{activeGlobalFilter?.bankDisplayName ?? 'Todos los Bancos'}</b> · <b>{activeGlobalFilter?.amount ?? 'ALL'}</b> · <span className="text-[#5e6673]">Ejecutables en vista: {visibleExecutableCount}</span></div>
         <button type="button" onClick={() => void load(true)} disabled={refreshing} className="flex items-center gap-1 rounded border border-[#2b2f36] px-2 py-1 hover:bg-[#2b2f36] disabled:opacity-50"><RefreshCw className={`h-3 w-3 ${refreshing ? 'animate-spin' : ''}`} />Actualizar</button>
       </div>
 
