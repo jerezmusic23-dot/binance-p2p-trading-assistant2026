@@ -67,6 +67,32 @@ export const BANK_CODE_MAP: Record<string, BankCodeConfig> = {
   },
 };
 
+/**
+ * Payment rails that are valid Binance P2P methods but are NOT a reliable
+ * reference for the general USDT/VES market projection.
+ *
+ * Recarga Pines has its own Binance P2P market page, but its quoted prices do
+ * not represent the bank-transfer/cash market the projection is intended to
+ * describe. It is therefore excluded ONLY from the unfiltered GENERAL market
+ * reference. Bank/amount queries keep their exact Binance results untouched.
+ */
+export const GENERAL_REFERENCE_EXCLUDED_PAY_TYPES = new Set(['RecargaPines']);
+
+function isExcludedFromGeneralReference(ad: NormalizedAd): boolean {
+  return ad.paymentOptions.some((method) => {
+    const payType = method.payType?.replace(/\s+/g, '').toLowerCase();
+    const methodName = method.tradeMethodName?.replace(/\s+/g, '').toLowerCase();
+    return (
+      (payType !== null && GENERAL_REFERENCE_EXCLUDED_PAY_TYPES.has(payType === 'recargapines' ? 'RecargaPines' : method.payType ?? '')) ||
+      methodName === 'recargapines'
+    );
+  });
+}
+
+export function filterGeneralReferenceAds(ads: readonly NormalizedAd[]): NormalizedAd[] {
+  return ads.filter((ad) => !isExcludedFromGeneralReference(ad));
+}
+
 /** Liquidity-weighted average price of one side, or null when no ad reports volume. */
 function liquidityWeightedPrice(ads: NormalizedAd[]): number | null {
   return round2(
@@ -147,75 +173,21 @@ export class BinanceP2PService {
     for (const item of rawAds) {
       if (!item || !item.adv || !item.advertiser) continue;
 
-      /*
-       * PRE-DEPLOY: Number.isFinite, not isNaN.
-       *
-       * parseFloat('1e309') is Infinity, which is neither NaN nor <= 0, so an
-       * absurd price walked straight through this guard and reached the ad
-       * list the order book renders. evaluateAd rejects it downstream - the
-       * defence in depth held - but a price that cannot exist has no business
-       * being carried at all.
-       */
       const price = parseFloat(item.adv.price);
       if (!Number.isFinite(price) || price <= 0) continue;
 
-      /*
-       * PRE-DEPLOY: AN UNREADABLE LIMIT IS NOT A PERMISSIVE LIMIT.
-       *
-       * These were `parseFloat(...) || 0`, and both zeros are permissive: a
-       * minimum of 0 accepts any amount, and a maximum of 0 is Binance's "no
-       * upper limit". So an ad whose limits could not be read became an ad
-       * that accepts EVERY tier - the exact inversion of this project's rule
-       * that a condition which could not be established is never treated as
-       * satisfied. A 100.000 VES operation could be recommended against an ad
-       * whose real ceiling was 5.000.
-       *
-       * The ad is discarded, exactly as an ad with an unreadable price already
-       * was. A published 0 is still kept: for the minimum it means "no floor",
-       * for the maximum "no ceiling", and both are real answers.
-       *
-       * A NEGATIVE limit is discarded too. It is not a looser bound, it is a
-       * malformed field, and `amountVes < -5` is false for every amount.
-       */
       const minAmountVes = parseFloat(item.adv.minSingleTransAmount);
       const maxAmountVes = parseFloat(item.adv.maxSingleTransAmount);
       if (!Number.isFinite(minAmountVes) || minAmountVes < 0) continue;
       if (!Number.isFinite(maxAmountVes) || maxAmountVes < 0) continue;
 
-      /*
-       * FASE 4: liquidity absence must survive normalization.
-       *
-       * `parseFloat(...) || 0` mapped "Binance published no volume" and
-       * "Binance published zero volume" onto the same 0, so an ad whose
-       * liquidity is simply unknown looked like an ad with none. The
-       * executability layer has to tell those apart: one is a fact, the other
-       * is a missing fact, and neither may be invented.
-       *
-       * PRE-DEPLOY: a NEGATIVE volume is a third case, and it is the missing
-       * one. It is not a quantity, so it is reported as unknown rather than
-       * carried: executability already refused it, but weightedAverage and the
-       * maker queue sum would have taken it as a number and let it subtract
-       * from a total.
-       */
       const reportedAvailable = parseFloat(item.adv.tradableQuantity || item.adv.surplusAmount);
       const availableUsdtReported =
         Number.isFinite(reportedAvailable) && reportedAvailable >= 0 ? reportedAvailable : null;
-      // UNCHANGED for existing consumers (liquidity-weighted average).
       const availableUsdt = availableUsdtReported ?? 0;
 
       const tradeMethods = Array.isArray(item.adv.tradeMethods) ? item.adv.tradeMethods : [];
-
-      // UNCHANGED: the human-readable list existing consumers already read.
       const paymentMethods = tradeMethods.map((m) => m.tradeMethodName || m.payType).filter(Boolean);
-
-      /*
-       * FASE 3: Binance's payment methods kept VERBATIM, canonical code
-       * included. paymentMethods above collapses payType into
-       * tradeMethodName, so the canonical code ('BBVAProvincial') was lost
-       * and only the label ('Provincial (BBVA)') survived - a label that does
-       * not equal any code in BANK_CODE_MAP.apiPayTypes. Bank verification
-       * compares against payType and nothing else.
-       */
       const paymentOptions = tradeMethods.map((m) => ({
         payType: m.payType ?? null,
         tradeMethodName: m.tradeMethodName ?? null,
@@ -241,7 +213,11 @@ export class BinanceP2PService {
   }
 
   /**
-   * Fetches real live market snapshot for both BUY and SELL sides concurrently
+   * Fetches real live market snapshot for both BUY and SELL sides concurrently.
+   *
+   * When this is the unfiltered GENERAL market, Recarga Pines is removed
+   * before calculating any reference price. Bank/amount-filtered snapshots are
+   * never altered by this rule.
    */
   public static async fetchFullMarketSnapshot(filterBank?: string, filterAmount?: number): Promise<MarketSnapshot> {
     const startTime = Date.now();
@@ -251,8 +227,6 @@ export class BinanceP2PService {
       payTypes = BANK_CODE_MAP[filterBank].apiPayTypes;
     }
 
-    // Query BUY side (Taker buys USDT, paying VES)
-    // Query SELL side (Taker sells USDT, receiving VES)
     const [rawBuyAds, rawSellAds] = await Promise.all([
       this.queryP2PAds({
         tradeType: 'BUY',
@@ -268,97 +242,45 @@ export class BinanceP2PService {
       }),
     ]);
 
-    const topBuyAds = this.normalizeAds(rawBuyAds);
-    const topSellAds = this.normalizeAds(rawSellAds);
+    const normalizedBuyAds = this.normalizeAds(rawBuyAds);
+    const normalizedSellAds = this.normalizeAds(rawSellAds);
+    const isGeneralReference = !filterBank && filterAmount === undefined;
+    const topBuyAds = isGeneralReference
+      ? filterGeneralReferenceAds(normalizedBuyAds)
+      : normalizedBuyAds;
+    const topSellAds = isGeneralReference
+      ? filterGeneralReferenceAds(normalizedSellAds)
+      : normalizedSellAds;
 
     if (topBuyAds.length === 0 && topSellAds.length === 0) {
-      throw new Error('No active P2P ads found for the specified criteria.');
+      throw new Error('No active P2P ads found for the specified criteria after reference filtering.');
     }
 
-    // Calculate real stats.
-    // C2: a side with no ads yields null everywhere. Nothing is derived from
-    // the opposite side and nothing defaults to 0 - an absent price is absent.
-    //
-    // FASE 2: every descriptive statistic now comes from marketStatistics, so
-    // BUY and SELL use identical definitions. The previous code sorted BUY
-    // ascending and SELL descending and then indexed [floor(n/2)] on both,
-    // which returned a different middle element per side for an even count.
     const buyStats = describeSide(topBuyAds.map((a) => a.price));
     const sellStats = describeSide(topSellAds.map((a) => a.price));
-
     const hasBuySide = buyStats.count > 0;
     const hasSellSide = sellStats.count > 0;
 
-    // Buy side (Taker pays VES to buy USDT): best price is the lowest ask.
     const bestBuyPrice = round2(buyStats.min);
-    // Sell side: best price is the highest bid.
     const bestSellPrice = round2(sellStats.max);
-
     const averageBuyPrice = round2(buyStats.mean);
     const averageSellPrice = round2(sellStats.mean);
-
     const medianBuyPrice = round2(buyStats.median);
     const medianSellPrice = round2(sellStats.median);
-
     const weightedBuyPrice = liquidityWeightedPrice(topBuyAds);
     const weightedSellPrice = liquidityWeightedPrice(topSellAds);
 
-    /*
-     * THE RAW EXTREME SPREAD, SIGNED.
-     *
-     * A spread needs two prices; with one side missing there is no spread.
-     *
-     * IT USED TO BE ABSOLUTE-VALUED, and that contradicted this project's own
-     * contract - types.ts states "spreadAbsolute = arbitrageSellPrice -
-     * arbitrageBuyPrice ... Signed. Never absolute-valued: a loss must stay a
-     * loss." Two things did it:
-     *
-     *   Math.abs(bestBuyPrice - bestSellPrice)   erased the direction, and
-     *   Math.min(bestBuyPrice, bestSellPrice)    divided by whichever price
-     *                                            happened to be lower rather
-     *                                            than by the money committed.
-     *
-     * On the real production book - ask 945.75 above bid 944.75, which is what
-     * a functioning market looks like - the pair reported +0.1058%. The taker
-     * loses 0.1057% crossing that spread. The number had the wrong sign, and it
-     * is persisted as HistoryRecord.spreadPct and drawn on the history screen.
-     *
-     * The direction is the taker's, unchanged: bestBuyPrice is the ask I would
-     * pay (the entry) and bestSellPrice the bid I would receive (the exit). The
-     * formula is the domain's own signedSpreadPct, so there is one definition
-     * of this sign in the codebase rather than two.
-     *
-     * NOT ROUNDED, unlike the VES figure beside it. Real spreads in this market
-     * live in the third and fourth decimal: at two decimals -0.1057% and
-     * -0.1149% both become -0.11, and a 0.004% move becomes 0.00. That is the
-     * same reasoning opportunityEngine already applies to its own spreadPct.
-     */
     const spreadAbsolute =
       bestBuyPrice !== null && bestSellPrice !== null
         ? round2(bestSellPrice - bestBuyPrice)
         : null;
     const spreadPercentage = signedSpreadPct(bestSellPrice, bestBuyPrice);
-
     const missingSide = (side: 'BUY' | 'SELL') =>
       `El lado ${side} no devolvio anuncios. No hay precio: la ausencia es el dato.`;
 
-    /*
-     * STRATEGIC PRICES.
-     *
-     * RECOMPRA = Binance BUY, VENTA = Binance SELL. Both are taken as the
-     * MEDIAN of their side, which is where the market actually is. The
-     * extremes above (min BUY / max SELL) estimate the tail of the ad
-     * population: one distant ad at 980 VES moves max(SELL) by 58 VES and
-     * leaves the median untouched. They stay in the snapshot as the raw audit
-     * trail, but nothing decides on them any more.
-     */
     const strategicBuyPrice = medianBuyPrice;
     const strategicSellPrice = medianSellPrice;
-
-    // Signed on purpose: venta below recompra is a LOSS and has to stay
-    // distinguishable from a gain. Denominator is always the repurchase price.
     const strategicSpreadPct = round2(signedSpreadPct(strategicSellPrice, strategicBuyPrice));
-
     const strategicReason =
       strategicBuyPrice === null && strategicSellPrice === null
         ? 'Ningun lado del libro devolvio anuncios: no hay precio estrategico.'
@@ -371,7 +293,6 @@ export class BinanceP2PService {
     const bestBuy: Valued<number | null> = hasBuySide
       ? { value: bestBuyPrice, provenance: 'REAL' }
       : { value: null, provenance: 'REAL', reason: missingSide('BUY') };
-
     const bestSell: Valued<number | null> = hasSellSide
       ? { value: bestSellPrice, provenance: 'REAL' }
       : { value: null, provenance: 'REAL', reason: missingSide('SELL') };
@@ -397,18 +318,6 @@ export class BinanceP2PService {
       strategicSellPrice,
       strategicSpreadPct,
       strategicReason,
-      /*
-       * The whole captured book, not the first 10.
-       *
-       * The slice threw away half of what was already fetched, normalized and
-       * used for the aggregates. Anything reading the snapshot - the order
-       * book view, the payType diagnostic, anything deriving coverage per
-       * bank - saw a sample less than half the size of the real one, and an
-       * absent bank could not be told from a bank that simply fell below
-       * tenth place.
-       *
-       * No extra request: rows is still 20 per side.
-       */
       topBuyAds,
       topSellAds,
       source: 'BINANCE_P2P',
