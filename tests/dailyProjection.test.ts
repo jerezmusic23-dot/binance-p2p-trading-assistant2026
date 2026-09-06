@@ -112,8 +112,11 @@ describe('los campos estratégicos no contaminan la proyección general', () => 
   });
 
   it('un registro sin strategic* sigue siendo válido', () => {
-    const { strategicBuyPrice, strategicSellPrice, strategicSpreadPct, ...legacyShape } = base[0];
-    const report = buildDailyProjection([legacyShape as HistoryRecord], at(20, 20));
+    const legacyShape = { ...base[0] };
+    delete legacyShape.strategicBuyPrice;
+    delete legacyShape.strategicSellPrice;
+    delete legacyShape.strategicSpreadPct;
+    const report = buildDailyProjection([legacyShape], at(20, 20));
 
     expect(report.legs[0].now).toBe(950);
     expect(report.legs[1].now).toBe(930);
