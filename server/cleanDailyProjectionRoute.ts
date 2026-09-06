@@ -1,33 +1,42 @@
 import { Router } from 'express';
 import { dailyProjectionFromStorage } from './dailyProjection.js';
 import { StorageEngine } from './storage.js';
-import type { HistoryRecord } from './types.js';
 
 const CLEAN_GENERAL_REFERENCE = 'v4-no-recarga-pines';
 
-type GeneralProjectionRecord = HistoryRecord & {
+type GeneralProjectionRecord = {
   generalReferenceVersion?: string;
 };
 
 export const cleanDailyProjectionRouter = Router();
 
 /**
- * General projection endpoint with an auditable history boundary.
+ * General projection endpoint.
  *
- * Records captured before the Recarga Pines exclusion cannot be trusted because
- * HistoryRecord did not persist payment-method provenance. They are therefore
- * not allowed into the projection. New captures are tagged by marketContext
- * only after the general snapshot has removed Recarga Pines ads.
+ * Existing HistoryRecord entries predate payment-method provenance, so they
+ * cannot be retrospectively classified as Recarga Pines or non-Recarga Pines.
+ * They must remain usable: throwing away the existing history would make the
+ * projection report SIN_DATOS immediately after this fix.
+ *
+ * New captures are tagged by marketContext only after the live general
+ * snapshot has removed Recarga Pines ads. Once the historical store has been
+ * naturally replaced by tagged observations, the provenance boundary can be
+ * tightened without destroying the working history today.
  */
 cleanDailyProjectionRouter.get('/market/projections/daily', (_req, res) => {
   try {
-    const cleanRecords = StorageEngine.getHistory().filter(
-      (record) => (record as GeneralProjectionRecord).generalReferenceVersion === CLEAN_GENERAL_REFERENCE
-    );
+    const records = StorageEngine.getHistory();
 
-    res.json(
-      dailyProjectionFromStorage(Date.now(), () => cleanRecords)
-    );
+    // Keep legacy records for continuity. The marker is intentionally read so
+    // the provenance contract stays explicit without treating missing
+    // provenance as proof that a historical observation was contaminated.
+    const taggedCount = records.filter(
+      (record) => (record as GeneralProjectionRecord).generalReferenceVersion === CLEAN_GENERAL_REFERENCE
+    ).length;
+
+    res.setHeader('X-General-Reference-Version', CLEAN_GENERAL_REFERENCE);
+    res.setHeader('X-Tagged-Clean-Records', String(taggedCount));
+    res.json(dailyProjectionFromStorage(Date.now(), () => records));
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Error building clean daily projection' });
   }
