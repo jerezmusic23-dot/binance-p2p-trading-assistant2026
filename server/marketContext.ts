@@ -4,45 +4,15 @@
  *
  * Traduce un `MarketSnapshot` a la capa v3 de `HistoryRecord`: liquidez,
  * profundidad y nivel ponderado por volumen.
- *
- * POR QUÉ EXISTE
- *
- * Cada captura ya calculaba estos valores y los tiraba al persistir. Una
- * proyección construida sólo sobre el precio no puede distinguir un movimiento
- * sostenido por volumen de otro que ocurre sobre un libro vacío, y ésos no son
- * el mismo mercado. Sin liquidez en el histórico, esa distinción es
- * irrecuperable: no se puede reconstruir a posteriori lo que no se guardó.
- *
- * LO QUE NO HACE
- *
- * No deriva, no rellena y no colapsa ausencias a cero. Un anuncio que no
- * publicó volumen no cuenta como "cero USDT disponibles": cuenta como que no
- * se sabe, y por eso se guarda aparte cuántos anuncios sí lo publicaron. Una
- * suma de 0 sobre 12 anuncios que reportan es un libro seco; una suma de 0
- * sobre 0 anuncios que reportan no dice nada en absoluto.
- *
- * Función pura: recibe el snapshot, devuelve un fragmento de registro. Si no
- * hay nada que añadir devuelve `{}` y el registro se queda en v2, que es una
- * situación normal y no un error.
  */
 
 import type { HistoryRecord, MarketSnapshot, NormalizedAd } from './types.js';
 
 export interface SideLiquidity {
-  /** USDT sumados sobre los anuncios que SÍ publicaron volumen. */
   usdt: number | null;
-  /** Cuántos anuncios lo publicaron. Sin esto, una suma baja es ambigua. */
   ads: number;
 }
 
-/**
- * Suma la liquidez publicada de un lado del libro.
- *
- * `availableUsdtReported` es el único campo que distingue "sin liquidez" de
- * "liquidez desconocida"; `availableUsdt` colapsa el null a 0 por compatibilidad
- * y aquí no sirve. Los valores no finitos o negativos se descartan: un anuncio
- * con volumen imposible no se suma ni se corrige.
- */
 export function sumSideLiquidity(ads: readonly NormalizedAd[]): SideLiquidity {
   let usdt = 0;
   let counted = 0;
@@ -66,17 +36,19 @@ function finiteOrUndefined(value: number | null | undefined): number | undefined
 }
 
 /**
- * Fragmento v3 del registro, o `{}` cuando la captura no aportó ninguno.
+ * Contexto persistido junto a cada captura general.
  *
- * `enrichmentVersion` sólo se marca si hay al menos un campo real detrás: un
- * registro etiquetado como enriquecido pero vacío mentiría sobre lo que
- * contiene.
+ * `generalReferenceVersion` marks observations captured after the general
+ * reference was made independent of Recarga Pines. Older history has no
+ * payment-method provenance, so the projection must not treat it as verified.
  */
 export function buildMarketContext(snapshot: MarketSnapshot): Partial<HistoryRecord> {
   const buy = sumSideLiquidity(snapshot?.topBuyAds ?? []);
   const sell = sumSideLiquidity(snapshot?.topSellAds ?? []);
 
-  const context: Partial<HistoryRecord> = {};
+  const context: Partial<HistoryRecord> = {
+    generalReferenceVersion: 'v4-no-recarga-pines',
+  } as Partial<HistoryRecord>;
 
   if (buy.usdt !== null) {
     context.buyLiquidityUsdt = buy.usdt;
@@ -92,8 +64,6 @@ export function buildMarketContext(snapshot: MarketSnapshot): Partial<HistoryRec
   if (weightedBuy !== undefined) context.weightedBuyPrice = weightedBuy;
   if (weightedSell !== undefined) context.weightedSellPrice = weightedSell;
 
-  // El spread absoluto SÍ puede ser negativo: vender por debajo de la
-  // recompra es una pérdida y borrarla falsearía el mercado.
   const spread = finiteOrUndefined(snapshot?.spreadAbsolute);
   if (spread !== undefined) context.spreadAbsolute = spread;
 
@@ -101,6 +71,5 @@ export function buildMarketContext(snapshot: MarketSnapshot): Partial<HistoryRec
     context.captureStatus = snapshot.status;
   }
 
-  if (Object.keys(context).length === 0) return {};
-  return { enrichmentVersion: 'v3-context', ...context };
+  return context;
 }
