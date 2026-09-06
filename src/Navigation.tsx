@@ -2,7 +2,6 @@ import React from 'react';
 import {
   LayoutDashboard,
   TrendingUp,
-  Grid3X3,
   BookOpen,
   History,
   Bell,
@@ -15,7 +14,6 @@ export type TabType =
   | 'publish'
   | 'analysis'
   | 'projections'
-  | 'matrix'
   | 'orderbook'
   | 'history'
   | 'alerts';
@@ -38,34 +36,19 @@ export const Navigation: React.FC<NavigationProps> = ({
       icon: <LayoutDashboard className="w-4 h-4" />,
     },
     {
-      /* The maker screen sits right after the dashboard: it is the answer the
-         operator opens the app for. */
       id: 'publish',
       label: 'Mis Precios para Publicar',
       icon: <Tag className="w-4 h-4" />,
     },
     {
-      /* Trend, ceilings, floors and signals per BANCO x MONTO - the analyst
-         view, distinct from the older global session projection below. */
       id: 'analysis',
       label: 'Análisis del Mercado',
       icon: <Activity className="w-4 h-4" />,
     },
     {
       id: 'projections',
-      /*
-       * "Proyección Diaria (8AM-8PM)" named the old session chart: trece
-       * cubos horarios rellenados hacia adelante con una curva escrita a
-       * mano. Esa vista no existe. Lo que hay ahora es el libro completo
-       * leído con el mismo motor que cada celda, sin franja horaria fija.
-       */
       label: 'Proyección del Mercado',
       icon: <TrendingUp className="w-4 h-4" />,
-    },
-    {
-      id: 'matrix',
-      label: 'Matriz Multifiltro',
-      icon: <Grid3X3 className="w-4 h-4" />,
     },
     {
       id: 'orderbook',
