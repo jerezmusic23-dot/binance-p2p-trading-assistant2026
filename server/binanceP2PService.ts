@@ -44,7 +44,6 @@ export const BANK_CODE_MAP: Record<string, BankCodeConfig> = {
   BNC: {
     code: 'BNC',
     displayName: 'BNC',
-    // Observed in production: Binance publishes 'BNCBancoNacional', not 'BNC'.
     apiPayTypes: ['BNCBancoNacional'],
   },
   BANCAMIGA: {
@@ -55,9 +54,6 @@ export const BANK_CODE_MAP: Record<string, BankCodeConfig> = {
   VENEZUELA: {
     code: 'VENEZUELA',
     displayName: 'Banco de Venezuela',
-    // Observed in production: 'BancoDeVenezuela', capital D. The previous
-    // 'BancodeVenezuela' differed by one letter and matched nothing - and this
-    // is the busiest rail in the book.
     apiPayTypes: ['BancoDeVenezuela'],
   },
   PAGO_MOVIL: {
@@ -71,20 +67,24 @@ export const BANK_CODE_MAP: Record<string, BankCodeConfig> = {
  * Payment rails that are valid Binance P2P methods but are NOT a reliable
  * reference for the general USDT/VES market projection.
  *
- * Recarga Pines has its own Binance P2P market page, but its quoted prices do
- * not represent the bank-transfer/cash market the projection is intended to
- * describe. It is therefore excluded ONLY from the unfiltered GENERAL market
- * reference. Bank/amount queries keep their exact Binance results untouched.
+ * Binance exposes Recarga Pines as its own P2P payment-method market, so its
+ * prices must never define the general bank-transfer market reference.
  */
-export const GENERAL_REFERENCE_EXCLUDED_PAY_TYPES = new Set(['RecargaPines']);
+export const GENERAL_REFERENCE_EXCLUDED_PAY_TYPES = new Set(['recargapines']);
+
+function canonicalPaymentName(value: string | null | undefined): string {
+  return (value ?? '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+}
 
 function isExcludedFromGeneralReference(ad: NormalizedAd): boolean {
   return ad.paymentOptions.some((method) => {
-    const payType = method.payType?.replace(/\s+/g, '').toLowerCase();
-    const methodName = method.tradeMethodName?.replace(/\s+/g, '').toLowerCase();
+    const payType = canonicalPaymentName(method.payType);
+    const methodName = canonicalPaymentName(method.tradeMethodName);
     return (
-      (payType !== null && GENERAL_REFERENCE_EXCLUDED_PAY_TYPES.has(payType === 'recargapines' ? 'RecargaPines' : method.payType ?? '')) ||
-      methodName === 'recargapines'
+      GENERAL_REFERENCE_EXCLUDED_PAY_TYPES.has(payType) ||
+      GENERAL_REFERENCE_EXCLUDED_PAY_TYPES.has(methodName) ||
+      payType.includes('recargapines') ||
+      methodName.includes('recargapines')
     );
   });
 }
@@ -93,7 +93,6 @@ export function filterGeneralReferenceAds(ads: readonly NormalizedAd[]): Normali
   return ads.filter((ad) => !isExcludedFromGeneralReference(ad));
 }
 
-/** Liquidity-weighted average price of one side, or null when no ad reports volume. */
 function liquidityWeightedPrice(ads: NormalizedAd[]): number | null {
   return round2(
     weightedAverage(ads.map((ad) => ({ value: ad.price, weight: ad.availableUsdt })))
@@ -104,9 +103,6 @@ export class BinanceP2PService {
   private static readonly ENDPOINT = 'https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search';
   private static readonly TIMEOUT_MS = 12000;
 
-  /**
-   * Performs an authentic POST query to Binance P2P API
-   */
   public static async queryP2PAds(params: P2PSearchParams = {}): Promise<BinanceAdItem[]> {
     const payload = {
       asset: params.asset || 'USDT',
@@ -139,34 +135,19 @@ export class BinanceP2PService {
       });
 
       clearTimeout(timeoutId);
-
-      if (!response.ok) {
-        throw new Error(`Binance HTTP error: ${response.status} ${response.statusText}`);
-      }
+      if (!response.ok) throw new Error(`Binance HTTP error: ${response.status} ${response.statusText}`);
 
       const json = (await response.json()) as BinanceP2PResponse;
-
-      if (json.code !== '000000') {
-        throw new Error(`Binance API code error: ${json.code} - ${json.message || 'Unknown error'}`);
-      }
-
-      if (!Array.isArray(json.data)) {
-        throw new Error('Invalid data payload returned from Binance API');
-      }
-
+      if (json.code !== '000000') throw new Error(`Binance API code error: ${json.code} - ${json.message || 'Unknown error'}`);
+      if (!Array.isArray(json.data)) throw new Error('Invalid data payload returned from Binance API');
       return json.data;
     } catch (err: any) {
       clearTimeout(timeoutId);
-      if (err.name === 'AbortError') {
-        throw new Error(`Binance P2P request timed out after ${this.TIMEOUT_MS}ms`);
-      }
+      if (err.name === 'AbortError') throw new Error(`Binance P2P request timed out after ${this.TIMEOUT_MS}ms`);
       throw err;
     }
   }
 
-  /**
-   * Normalizes raw Binance Ad objects into validated numbers
-   */
   public static normalizeAds(rawAds: BinanceAdItem[]): NormalizedAd[] {
     const list: NormalizedAd[] = [];
 
@@ -182,8 +163,7 @@ export class BinanceP2PService {
       if (!Number.isFinite(maxAmountVes) || maxAmountVes < 0) continue;
 
       const reportedAvailable = parseFloat(item.adv.tradableQuantity || item.adv.surplusAmount);
-      const availableUsdtReported =
-        Number.isFinite(reportedAvailable) && reportedAvailable >= 0 ? reportedAvailable : null;
+      const availableUsdtReported = Number.isFinite(reportedAvailable) && reportedAvailable >= 0 ? reportedAvailable : null;
       const availableUsdt = availableUsdtReported ?? 0;
 
       const tradeMethods = Array.isArray(item.adv.tradeMethods) ? item.adv.tradeMethods : [];
@@ -212,45 +192,22 @@ export class BinanceP2PService {
     return list;
   }
 
-  /**
-   * Fetches real live market snapshot for both BUY and SELL sides concurrently.
-   *
-   * When this is the unfiltered GENERAL market, Recarga Pines is removed
-   * before calculating any reference price. Bank/amount-filtered snapshots are
-   * never altered by this rule.
-   */
   public static async fetchFullMarketSnapshot(filterBank?: string, filterAmount?: number): Promise<MarketSnapshot> {
     const startTime = Date.now();
     let payTypes: string[] = [];
 
-    if (filterBank && BANK_CODE_MAP[filterBank]) {
-      payTypes = BANK_CODE_MAP[filterBank].apiPayTypes;
-    }
+    if (filterBank && BANK_CODE_MAP[filterBank]) payTypes = BANK_CODE_MAP[filterBank].apiPayTypes;
 
     const [rawBuyAds, rawSellAds] = await Promise.all([
-      this.queryP2PAds({
-        tradeType: 'BUY',
-        payTypes,
-        transAmount: filterAmount || null,
-        rows: 20,
-      }),
-      this.queryP2PAds({
-        tradeType: 'SELL',
-        payTypes,
-        transAmount: filterAmount || null,
-        rows: 20,
-      }),
+      this.queryP2PAds({ tradeType: 'BUY', payTypes, transAmount: filterAmount || null, rows: 20 }),
+      this.queryP2PAds({ tradeType: 'SELL', payTypes, transAmount: filterAmount || null, rows: 20 }),
     ]);
 
     const normalizedBuyAds = this.normalizeAds(rawBuyAds);
     const normalizedSellAds = this.normalizeAds(rawSellAds);
-    const isGeneralReference = !filterBank && filterAmount === undefined;
-    const topBuyAds = isGeneralReference
-      ? filterGeneralReferenceAds(normalizedBuyAds)
-      : normalizedBuyAds;
-    const topSellAds = isGeneralReference
-      ? filterGeneralReferenceAds(normalizedSellAds)
-      : normalizedSellAds;
+    const isGeneralReference = !filterBank && filterAmount == null;
+    const topBuyAds = isGeneralReference ? filterGeneralReferenceAds(normalizedBuyAds) : normalizedBuyAds;
+    const topSellAds = isGeneralReference ? filterGeneralReferenceAds(normalizedSellAds) : normalizedSellAds;
 
     if (topBuyAds.length === 0 && topSellAds.length === 0) {
       throw new Error('No active P2P ads found for the specified criteria after reference filtering.');
@@ -270,25 +227,20 @@ export class BinanceP2PService {
     const weightedBuyPrice = liquidityWeightedPrice(topBuyAds);
     const weightedSellPrice = liquidityWeightedPrice(topSellAds);
 
-    const spreadAbsolute =
-      bestBuyPrice !== null && bestSellPrice !== null
-        ? round2(bestSellPrice - bestBuyPrice)
-        : null;
+    const spreadAbsolute = bestBuyPrice !== null && bestSellPrice !== null ? round2(bestSellPrice - bestBuyPrice) : null;
     const spreadPercentage = signedSpreadPct(bestSellPrice, bestBuyPrice);
-    const missingSide = (side: 'BUY' | 'SELL') =>
-      `El lado ${side} no devolvio anuncios. No hay precio: la ausencia es el dato.`;
+    const missingSide = (side: 'BUY' | 'SELL') => `El lado ${side} no devolvio anuncios. No hay precio: la ausencia es el dato.`;
 
     const strategicBuyPrice = medianBuyPrice;
     const strategicSellPrice = medianSellPrice;
     const strategicSpreadPct = round2(signedSpreadPct(strategicSellPrice, strategicBuyPrice));
-    const strategicReason =
-      strategicBuyPrice === null && strategicSellPrice === null
-        ? 'Ningun lado del libro devolvio anuncios: no hay precio estrategico.'
-        : strategicBuyPrice === null
-          ? missingSide('BUY')
-          : strategicSellPrice === null
-            ? missingSide('SELL')
-            : null;
+    const strategicReason = strategicBuyPrice === null && strategicSellPrice === null
+      ? 'Ningun lado del libro devolvio anuncios: no hay precio estrategico.'
+      : strategicBuyPrice === null
+        ? missingSide('BUY')
+        : strategicSellPrice === null
+          ? missingSide('SELL')
+          : null;
 
     const bestBuy: Valued<number | null> = hasBuySide
       ? { value: bestBuyPrice, provenance: 'REAL' }
