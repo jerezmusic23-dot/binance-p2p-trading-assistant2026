@@ -1,5 +1,5 @@
 import React from 'react';
-import { Building2, DollarSign, Filter, RotateCcw, Check, Sparkles, SlidersHorizontal } from 'lucide-react';
+import { Building2, DollarSign, RotateCcw, SlidersHorizontal, Grid3X3 } from 'lucide-react';
 import { BankFilterKey, AmountFilterKey, GlobalFilterState } from './types';
 
 interface GlobalFilterBarProps {
@@ -66,7 +66,6 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
   return (
     <div id="global-multifilter-bar" className="bg-[#111417] border-b border-[#2b2f36] px-4 lg:px-8 py-2.5 shadow-inner">
       <div className="max-w-7xl mx-auto flex flex-col xl:flex-row items-start xl:items-center justify-between gap-3">
-        {/* Left Section: Active Filter Status Badge */}
         <div className="flex items-center gap-2.5 flex-wrap">
           <div className="flex items-center gap-1.5 text-xs font-bold font-mono uppercase tracking-wider text-[#848e9c]">
             <SlidersHorizontal className="w-3.5 h-3.5 text-[#FCD535]" />
@@ -79,7 +78,18 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
               <span className="text-[#FCD535] font-bold">
                 Conectado a Matriz: {filter.bankDisplayName} {filter.amount !== 'ALL' ? `· ${filter.amount} VES` : ''}
               </span>
+              {onViewMatrixClick && (
+                <button
+                  type="button"
+                  onClick={onViewMatrixClick}
+                  className="flex items-center gap-1 rounded border border-[#FCD535]/50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-[#FCD535] hover:bg-[#FCD535]/10"
+                >
+                  <Grid3X3 className="h-3 w-3" />
+                  Abrir matriz
+                </button>
+              )}
               <button
+                type="button"
                 onClick={handleReset}
                 className="ml-1 text-[#848e9c] hover:text-[#e0e0e0] cursor-pointer flex items-center gap-0.5 text-[10px] uppercase font-bold tracking-wider"
                 title="Restablecer a mercado general"
@@ -96,9 +106,7 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
           )}
         </div>
 
-        {/* Center/Right Section: Interactive Filter Controls */}
         <div className="flex flex-wrap items-center gap-2 w-full xl:w-auto">
-          {/* Bank Selector Horizontal Scroll / Wrap */}
           <div className="flex items-center gap-1 overflow-x-auto max-w-full py-0.5 scrollbar-thin">
             <span className="text-[10px] uppercase text-[#848e9c] font-bold font-mono mr-1 shrink-0 flex items-center gap-1">
               <Building2 className="w-3 h-3 text-[#FCD535]" /> Banco:
@@ -107,6 +115,7 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
               const isSelected = filter.bank === b.key;
               return (
                 <button
+                  type="button"
                   key={b.key}
                   id={`filter-bank-${b.key.toLowerCase()}`}
                   onClick={() => handleBankSelect(b.key)}
@@ -124,7 +133,6 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
 
           <div className="hidden sm:block w-px h-4 bg-[#2b2f36]" />
 
-          {/* Amount Tier Selector */}
           <div className="flex items-center gap-1 overflow-x-auto max-w-full py-0.5">
             <span className="text-[10px] uppercase text-[#848e9c] font-bold font-mono mr-1 shrink-0 flex items-center gap-1">
               <DollarSign className="w-3 h-3 text-[#02c076]" /> Monto:
@@ -133,6 +141,7 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
               const isSelected = filter.amount === a.key;
               return (
                 <button
+                  type="button"
                   key={a.key}
                   id={`filter-amount-${a.key.toLowerCase()}`}
                   onClick={() => handleAmountSelect(a.key)}
