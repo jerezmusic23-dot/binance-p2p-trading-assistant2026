@@ -38,20 +38,26 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
 
   const handleBankSelect = (bankKey: BankFilterKey) => {
     const bankObj = BANK_OPTIONS.find((b) => b.key === bankKey);
-    onFilterChange({
+    const nextFilter: GlobalFilterState = {
       ...filter,
       bank: bankKey,
       bankDisplayName: bankObj?.name || 'Todos los Bancos',
-    });
+    };
+    onFilterChange(nextFilter);
+    // The bank/monto selectors are the MultiFilter UI. Once a selection is
+    // made, open the matrix immediately so the operator can see its effect.
+    onViewMatrixClick?.();
   };
 
   const handleAmountSelect = (amountKey: AmountFilterKey) => {
     const amountObj = AMOUNT_OPTIONS.find((a) => a.key === amountKey);
-    onFilterChange({
+    const nextFilter: GlobalFilterState = {
       ...filter,
       amount: amountKey,
       amountVal: amountObj?.val ?? null,
-    });
+    };
+    onFilterChange(nextFilter);
+    onViewMatrixClick?.();
   };
 
   const handleReset = () => {
@@ -61,6 +67,7 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
       amount: 'ALL',
       amountVal: null,
     });
+    onViewMatrixClick?.();
   };
 
   return (
@@ -76,7 +83,7 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
             <div className="flex items-center gap-2 px-2.5 py-1 rounded bg-[#FCD535]/15 border border-[#FCD535]/50 text-xs font-mono">
               <span className="w-2 h-2 rounded-full bg-[#FCD535] animate-pulse" />
               <span className="text-[#FCD535] font-bold">
-                Conectado a Matriz: {filter.bankDisplayName} {filter.amount !== 'ALL' ? `· ${filter.amount} VES` : ''}
+                Matriz: {filter.bankDisplayName} {filter.amount !== 'ALL' ? `· ${filter.amount} VES` : ''}
               </span>
               {onViewMatrixClick && (
                 <button
@@ -101,7 +108,7 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
           ) : (
             <div className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-[#1e2329] border border-[#2b2f36] text-xs font-mono text-[#848e9c]">
               <span className="w-2 h-2 rounded-full bg-[#02c076]" />
-              <span>Mercado General P2P (Todos los Bancos y Montos)</span>
+              <span>Mercado General P2P (Proyección sin banco, monto ni medio de pago)</span>
             </div>
           )}
         </div>
