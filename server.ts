@@ -1,7 +1,6 @@
 import express from 'express';
 import path from 'node:path';
 import { apiRouter } from './server/routes.js';
-import { cleanDailyProjectionRouter } from './server/cleanDailyProjectionRoute.js';
 import { CentralMarketStore } from './server/centralStore.js';
 
 async function startServer() {
@@ -12,9 +11,6 @@ async function startServer() {
   app.use(express.json({ limit: '1mb' }));
 
   // API must be registered before the SPA fallback.
-  // The clean projection route comes first so legacy, unverified history
-  // cannot reach the projection engine.
-  app.use('/api', cleanDailyProjectionRouter);
   app.use('/api', apiRouter);
 
   const centralStore = CentralMarketStore.getInstance();

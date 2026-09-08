@@ -198,6 +198,13 @@ export const ProjectionsPanel: React.FC = () => {
         <p>2. En cada hora se conserva el <b className="text-[#f0b90b]">precio más alto de VENTA</b> y el <b className="text-[#02c076]">precio más bajo de COMPRA</b>.</p>
         <p>3. El histórico compara cómo se movieron esos mismos extremos y calcula dirección, fuerza y trayectoria futura.</p>
         <p>4. Si falta evidencia, se muestra “no verificable”; nunca se sustituye por otra fuente.</p>
+        {report.dataProvenance.unverifiedRecords > 0 && (
+          <p className="mt-2 text-[#f0b90b]">
+            ⚠ {report.dataProvenance.unverifiedRecords} de {report.dataProvenance.totalRecords}{' '}
+            observaciones del histórico son anteriores al filtro de Recarga Pines y no se puede
+            confirmar que lo excluyan. Se usan igual, sin descartarlas ni inventar que están limpias.
+          </p>
+        )}
       </section>
     </div>
   );

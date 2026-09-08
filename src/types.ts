@@ -1139,4 +1139,11 @@ export interface DailyProjectionResponse {
     used: string[];
     availableNotUsed: { name: string; reason: string }[];
   };
+  /** Cuánto del histórico usado puede confirmarse libre de Recarga Pines. */
+  dataProvenance: {
+    totalRecords: number;
+    verifiedCleanRecords: number;
+    unverifiedRecords: number;
+    fullyVerified: boolean;
+  };
 }

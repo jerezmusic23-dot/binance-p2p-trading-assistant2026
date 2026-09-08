@@ -158,6 +158,39 @@ export interface DailyProjectionReport {
   stateText: string;
   daysMissing: number;
   variables: VariableReport;
+  dataProvenance: DataProvenanceSummary;
+}
+
+/**
+ * Cuánto del histórico usado puede afirmarse libre de Recarga Pines.
+ *
+ * `generalReferenceVersion` sólo existe en los registros capturados después
+ * de que `filterGeneralReferenceAds` excluyera Recarga Pines de
+ * buyPrice/sellPrice (server/marketContext.ts). Los registros anteriores no
+ * se descartan - Regla 5/8: no se destruye histórico existente ni se inventa
+ * limpieza que nadie observó - pero tampoco se presentan como verificados.
+ * `unverifiedRecords > 0` es la señal explícita de que una parte del
+ * histórico no puede confirmarse, que la pantalla debe poder mostrar.
+ */
+export interface DataProvenanceSummary {
+  totalRecords: number;
+  verifiedCleanRecords: number;
+  unverifiedRecords: number;
+  /** true sólo cuando CADA registro usado lleva la marca v4. */
+  fullyVerified: boolean;
+}
+
+export function summariseProvenance(records: readonly HistoryRecord[]): DataProvenanceSummary {
+  let verified = 0;
+  for (const record of records) {
+    if (record?.generalReferenceVersion === 'v4-no-recarga-pines') verified += 1;
+  }
+  return {
+    totalRecords: records.length,
+    verifiedCleanRecords: verified,
+    unverifiedRecords: records.length - verified,
+    fullyVerified: records.length > 0 && verified === records.length,
+  };
 }
 
 /**
@@ -415,6 +448,7 @@ export function buildDailyProjection(
     stateText: SCREEN_STATE_TEXT[state],
     daysMissing: Math.max(0, MIN_PROFILE_DAYS - previousVenta.length),
     variables: variableReport(records, previousVenta.length),
+    dataProvenance: summariseProvenance(records),
   };
 }
 

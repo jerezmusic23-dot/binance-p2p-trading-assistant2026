@@ -11,10 +11,6 @@ import { dailyProjectionFromStorage } from './dailyProjection.js';
 import { GENERAL_MARKET_KEY, projectCell } from './makerProjectionEngine.js';
 import { CentralMarketStore } from './centralStore.js';
 import { StorageEngine } from './storage.js';
-import {
-  buildMarketProjectionAsync,
-  type MarketProjectionReport,
-} from './marketProjection.js';
 import { AlertRule } from './types.js';
 
 export const apiRouter = Router();
