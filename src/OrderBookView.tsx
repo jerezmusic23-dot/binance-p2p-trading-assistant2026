@@ -12,15 +12,18 @@
  *
  * Esto es una consulta simple, no una matriz: una selección de banco+monto a
  * la vez, con los anuncios reales de esa consulta. La Matriz Multifiltro fue
- * retirada deliberadamente y esta pantalla no la reintroduce - no hay una
- * grilla banco×monto aquí, sólo la consulta activa.
+ * retirada deliberadamente y esta pantalla no la reintroduce.
  *
- * NUNCA presenta datos de otro banco/monto bajo la etiqueta del banco pedido:
- * si la consulta específica falla o no tiene anuncios verificables
- * (`snapshot.filterFallbackReason` presente, o snapshot ausente), la pantalla
- * dice NO DISPONIBLE en vez de mostrar en silencio los números generales.
+ * ═══ DOS PUERTAS PARA "NO DISPONIBLE", PORQUE HAY DOS FORMAS DE FALLAR ═══
+ *
+ * 1. La ruta lanza (Binance no responde, 404): se detecta por el error.
+ * 2. La ruta responde 200 con el snapshot GENERAL y `filterFallbackReason`
+ *    puesto - que es lo que `centralStore.getFilteredSnapshot` hace cuando la
+ *    consulta filtrada falla o no trae anuncios. Sin esta segunda puerta, los
+ *    números del mercado general se mostrarían bajo el nombre del banco
+ *    pedido, que es exactamente lo que no puede pasar.
  */
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { BookOpen, ArrowUpRight, ArrowDownRight, RefreshCw, RotateCcw, AlertTriangle } from 'lucide-react';
 import { ApiService } from './api';
 import { fmt } from './format';
@@ -47,11 +50,22 @@ export const AMOUNT_OPTIONS: { key: AmountFilterKey; label: string; val: number 
   { key: '100K', label: '100K VES', val: 100000 },
 ];
 
+/** PUERTA 1: la ruta lanzó. El texto del error dice si fue "no hay anuncios". */
+export function isUnavailableError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+  return (
+    message.includes('no active p2p ads') ||
+    message.includes('no disponible') ||
+    message.includes('http 404')
+  );
+}
+
 /**
- * La consulta se pidió filtrada pero el servidor no la pudo honrar (falló o
- * no había anuncios verificables): jamás se presenta el sustituto general
- * como si fuera del banco/monto pedido - un banco sin anuncios muestra
- * NO DISPONIBLE, nunca los números generales bajo su nombre.
+ * PUERTA 2: la ruta respondió, pero con el sustituto general.
+ *
+ * Jamás se presenta ese sustituto como si fuera del banco/monto pedido: un
+ * banco sin anuncios muestra NO DISPONIBLE, nunca los números generales bajo
+ * su nombre.
  */
 export function isQueryUnavailable(isFilteredQuery: boolean, snapshot: MarketSnapshot | null): boolean {
   return isFilteredQuery && (snapshot === null || Boolean(snapshot.filterFallbackReason));
@@ -70,6 +84,9 @@ export function queryLabel(snapshot: MarketSnapshot | null, requestedBank: BankF
   return `${bankText}${amountText}`.toUpperCase();
 }
 
+/** Refresco automático de la consulta activa. El servidor cachea 10s por celda. */
+const REFRESH_MS = 15_000;
+
 export const OrderBookView: React.FC = () => {
   const [bank, setBank] = useState<BankFilterKey>('ALL');
   const [amount, setAmount] = useState<AmountFilterKey>('ALL');
@@ -77,28 +94,46 @@ export const OrderBookView: React.FC = () => {
   const [snapshot, setSnapshot] = useState<MarketSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [errorUnavailable, setErrorUnavailable] = useState(false);
+
+  /*
+   * La consulta en vuelo se identifica por banco+monto: una respuesta que
+   * llega después de que el operador ya cambió de banco se descarta, en vez
+   * de pintarse sobre la selección nueva.
+   */
+  const inFlight = useRef('');
 
   const load = useCallback(async (queryBank: BankFilterKey, queryAmount: AmountFilterKey, force: boolean) => {
+    const key = `${queryBank}:${queryAmount}`;
+    inFlight.current = key;
     setLoading(true);
     setError(null);
+    setErrorUnavailable(false);
     const amountVal = AMOUNT_OPTIONS.find((a) => a.key === queryAmount)?.val ?? null;
     try {
       const result = force
         ? await ApiService.refreshMarket(queryBank, amountVal ?? undefined)
         : await ApiService.getLatestMarket(queryBank, amountVal ?? undefined);
+      if (inFlight.current !== key) return;
       setSnapshot(result?.snapshot ?? null);
     } catch (err: any) {
+      if (inFlight.current !== key) return;
       setSnapshot(null);
+      setErrorUnavailable(isUnavailableError(err));
       setError(err?.message ?? 'No se pudo consultar Binance P2P.');
     } finally {
-      setLoading(false);
+      if (inFlight.current === key) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
+    // El snapshot anterior se descarta AL CAMBIAR de consulta: mientras carga
+    // Mercantil no puede seguir viéndose el precio general de la consulta previa.
+    setSnapshot(null);
     void load(bank, amount, false);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bank, amount]);
+    const timer = window.setInterval(() => void load(bank, amount, false), REFRESH_MS);
+    return () => window.clearInterval(timer);
+  }, [bank, amount, load]);
 
   const handleReset = () => {
     setBank('ALL');
@@ -106,20 +141,21 @@ export const OrderBookView: React.FC = () => {
   };
 
   const isFilteredQuery = bank !== 'ALL' || amount !== 'ALL';
-  const isUnavailable = isQueryUnavailable(isFilteredQuery, snapshot);
+  const isUnavailable = errorUnavailable || (!loading && isQueryUnavailable(isFilteredQuery, snapshot));
+  const hardError = error !== null && !errorUnavailable;
 
   const renderAdCard = (ad: NormalizedAd, type: 'BUY' | 'SELL') => {
     const isBuy = type === 'BUY';
     return (
       <div key={ad.advNo} className="bg-[#111417] border border-[#2b2f36] rounded p-3.5 hover:border-[#474d57] transition space-y-2.5">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <span className="font-bold text-[#e0e0e0] text-xs truncate max-w-[130px]">{ad.merchantName}</span>
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="font-bold text-[#e0e0e0] text-xs truncate max-w-[150px]">{ad.merchantName}</span>
             {ad.userType === 'merchant' && (
               <span className="px-1.5 py-0.2 rounded bg-[#FCD535]/15 text-[#FCD535] text-[10px] font-bold border border-[#FCD535]/30">PRO</span>
             )}
           </div>
-          <div className="text-[11px] text-[#848e9c] font-mono">
+          <div className="text-[11px] text-[#848e9c] font-mono whitespace-nowrap">
             {ad.ordersCount} órd. · <span className="text-[#02c076]">{(ad.finishRate * 100).toFixed(1)}%</span>
           </div>
         </div>
@@ -130,18 +166,12 @@ export const OrderBookView: React.FC = () => {
           </span>
         </div>
         <div className="text-[11px] text-[#848e9c] space-y-1 font-mono">
-          <div className="flex justify-between">
-            <span>Disponible:</span>
-            <span className="text-[#e0e0e0]">{ad.availableUsdt.toFixed(2)} USDT</span>
-          </div>
-          <div className="flex justify-between">
-            <span>Límites:</span>
-            <span className="text-[#e0e0e0]">{ad.minAmountVes.toLocaleString()} - {ad.maxAmountVes.toLocaleString()} VES</span>
-          </div>
+          <div className="flex justify-between"><span>Disponible:</span><span className="text-[#e0e0e0]">{ad.availableUsdt.toFixed(2)} USDT</span></div>
+          <div className="flex justify-between"><span>Límites:</span><span className="text-[#e0e0e0]">{ad.minAmountVes.toLocaleString()} - {ad.maxAmountVes.toLocaleString()} VES</span></div>
         </div>
         <div className="flex flex-wrap gap-1 pt-1">
           {ad.paymentMethods.map((pm, idx) => (
-            <span key={idx} className="px-1.5 py-0.5 rounded bg-[#181a20] text-[#848e9c] text-[10px] border border-[#2b2f36]">{pm}</span>
+            <span key={`${ad.advNo}-${idx}`} className="px-1.5 py-0.5 rounded bg-[#181a20] text-[#848e9c] text-[10px] border border-[#2b2f36]">{pm}</span>
           ))}
         </div>
       </div>
@@ -220,7 +250,7 @@ export const OrderBookView: React.FC = () => {
             <div className="text-xs font-mono font-bold text-[#eaecef]">
               {loading && !snapshot ? 'Consultando…' : queryLabel(snapshot, bank, amount)}
             </div>
-            {!isUnavailable && (
+            {!isUnavailable && !hardError && snapshot && (
               <div className="flex items-center gap-1 bg-[#111417] p-1 rounded border border-[#2b2f36] text-xs">
                 <button onClick={() => setActiveSide('ALL')} className={`px-3 py-1 rounded text-xs font-mono transition cursor-pointer ${activeSide === 'ALL' ? 'bg-[#1e2329] text-[#e0e0e0] border border-[#474d57]' : 'text-[#848e9c] hover:text-[#e0e0e0]'}`}>Ambos Lados</button>
                 <button onClick={() => setActiveSide('BUY')} className={`px-3 py-1 rounded text-xs font-mono font-bold transition cursor-pointer ${activeSide === 'BUY' ? 'bg-[#1e2329] text-[#02c076] border border-[#02c076]' : 'text-[#848e9c] hover:text-[#e0e0e0]'}`}>Recompra (BUY)</button>
@@ -230,11 +260,11 @@ export const OrderBookView: React.FC = () => {
           </div>
         </div>
 
-        {error && (
+        {hardError && (
           <div className="mt-3 p-2.5 rounded bg-[#cf304a]/10 border border-[#cf304a]/30 text-[#cf304a] text-xs font-mono">{error}</div>
         )}
 
-        {!error && isUnavailable && (
+        {!hardError && isUnavailable && (
           <div id="orderbook-no-disponible" className="mt-3 p-4 rounded bg-[#181a20] border border-[#f0b90b]/30 flex items-start gap-2.5">
             <AlertTriangle className="w-4 h-4 text-[#f0b90b] mt-0.5 shrink-0" />
             <div className="text-xs text-[#e0e0e0]">
@@ -250,7 +280,7 @@ export const OrderBookView: React.FC = () => {
           </div>
         )}
 
-        {!error && !isUnavailable && snapshot && (
+        {!hardError && !isUnavailable && snapshot && (
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-4 text-xs font-mono">
             <div className="bg-[#111417] p-3 rounded border border-[#2b2f36]">
               <span className="text-[10px] text-[#848e9c] uppercase block">Promedio Compra</span>
@@ -276,7 +306,7 @@ export const OrderBookView: React.FC = () => {
         )}
       </div>
 
-      {!error && !isUnavailable && snapshot && (
+      {!hardError && !isUnavailable && snapshot && (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           {(activeSide === 'ALL' || activeSide === 'BUY') && (
             <div className="bg-[#181a20] border border-[#2b2f36] rounded-lg p-4 space-y-3">
