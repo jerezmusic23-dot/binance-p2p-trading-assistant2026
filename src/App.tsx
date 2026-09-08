@@ -149,7 +149,7 @@ export default function App() {
         {activeTab === 'publish' && <MakerMatrix />}
         {activeTab === 'analysis' && <MarketAnalysisPanel />}
 
-        {activeTab === 'orderbook' && <OrderBookView snapshot={snapshot} />}
+        {activeTab === 'orderbook' && <OrderBookView />}
         {activeTab === 'history' && <HistoryAndBacktest />}
         {activeTab === 'alerts' && <AlertsManager />}
       </main>
