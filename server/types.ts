@@ -370,6 +370,19 @@ export interface HistoryRecord {
   spreadAbsolute?: number;
   /** Estado de la captura que produjo el registro. */
   captureStatus?: 'LIVE' | 'STALE' | 'OFFLINE';
+  /**
+   * ADDITIVE, v4. Marca los registros capturados DESPUÉS de que la referencia
+   * general excluyera Recarga Pines (`filterGeneralReferenceAds`, en
+   * `binanceP2PService.ts`) de `buyPrice`/`sellPrice`.
+   *
+   * Ausente en todo registro anterior: esos no tienen forma de saber si algún
+   * anuncio de Recarga Pines participó en su precio, así que la ausencia del
+   * campo NO significa "contaminado" - significa "no verificable". Ninguno de
+   * los dos casos se descarta (Regla 5/8: no se destruye histórico existente,
+   * no se inventa limpieza que nadie observó); `dailyProjection.ts` cuenta
+   * ambos grupos y lo dice en su respuesta.
+   */
+  generalReferenceVersion?: 'v4-no-recarga-pines';
 }
 
 /** What the storage layer is actually doing, for diagnosing persistence. */

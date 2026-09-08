@@ -38,9 +38,18 @@ function finiteOrUndefined(value: number | null | undefined): number | undefined
 /**
  * Contexto persistido junto a cada captura general.
  *
- * `generalReferenceVersion` marks observations captured after the general
- * reference was made independent of Recarga Pines. Older history has no
- * payment-method provenance, so the projection must not treat it as verified.
+ * Dos marcas de procedencia independientes, una por cada capa:
+ *
+ * `generalReferenceVersion` va en TODO registro que pase por aquí, tenga o no
+ * liquidez detrás: marca que su buyPrice/sellPrice se calcularon ya excluyendo
+ * Recarga Pines (`filterGeneralReferenceAds`). Los registros anteriores a esta
+ * versión no la llevan - no porque se les haya quitado nada, sino porque nadie
+ * puede afirmar retroactivamente si un anuncio de Recarga Pines participó en
+ * su precio. `dailyProjection.ts` cuenta ambos grupos y lo dice.
+ *
+ * `enrichmentVersion` (v3, previa a la anterior) sólo se marca cuando la
+ * captura realmente trajo algo de la capa de liquidez/profundidad detrás -
+ * `validateHistoryRecord` sólo exige esos campos cuando la marca está puesta.
  */
 export function buildMarketContext(snapshot: MarketSnapshot): Partial<HistoryRecord> {
   const buy = sumSideLiquidity(snapshot?.topBuyAds ?? []);
@@ -48,24 +57,30 @@ export function buildMarketContext(snapshot: MarketSnapshot): Partial<HistoryRec
 
   const context: Partial<HistoryRecord> = {
     generalReferenceVersion: 'v4-no-recarga-pines',
-  } as Partial<HistoryRecord>;
+  };
+
+  let hasEnrichment = false;
 
   if (buy.usdt !== null) {
     context.buyLiquidityUsdt = buy.usdt;
     context.buyLiquidityAds = buy.ads;
+    hasEnrichment = true;
   }
   if (sell.usdt !== null) {
     context.sellLiquidityUsdt = sell.usdt;
     context.sellLiquidityAds = sell.ads;
+    hasEnrichment = true;
   }
 
   const weightedBuy = positiveOrUndefined(snapshot?.weightedBuyPrice);
   const weightedSell = positiveOrUndefined(snapshot?.weightedSellPrice);
-  if (weightedBuy !== undefined) context.weightedBuyPrice = weightedBuy;
-  if (weightedSell !== undefined) context.weightedSellPrice = weightedSell;
+  if (weightedBuy !== undefined) { context.weightedBuyPrice = weightedBuy; hasEnrichment = true; }
+  if (weightedSell !== undefined) { context.weightedSellPrice = weightedSell; hasEnrichment = true; }
 
   const spread = finiteOrUndefined(snapshot?.spreadAbsolute);
-  if (spread !== undefined) context.spreadAbsolute = spread;
+  if (spread !== undefined) { context.spreadAbsolute = spread; hasEnrichment = true; }
+
+  if (hasEnrichment) context.enrichmentVersion = 'v3-context';
 
   if (snapshot?.status === 'LIVE' || snapshot?.status === 'STALE' || snapshot?.status === 'OFFLINE') {
     context.captureStatus = snapshot.status;

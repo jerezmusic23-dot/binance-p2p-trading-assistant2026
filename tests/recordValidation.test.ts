@@ -249,7 +249,9 @@ describe('el contexto de mercado', () => {
     const built = buildMarketContext(
       snapshot({ topBuyAds: [ad({ availableUsdtReported: null })], status: undefined as never })
     );
-    expect(built).toEqual({});
+    // generalReferenceVersion va en todo registro (marca el régimen de
+    // captura, no si hubo liquidez); ningún campo de la capa v3 se inventa.
+    expect(built).toEqual({ generalReferenceVersion: 'v4-no-recarga-pines' });
     expect(built.enrichmentVersion).toBeUndefined();
   });
 
