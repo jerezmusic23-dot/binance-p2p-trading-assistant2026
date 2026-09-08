@@ -91,10 +91,21 @@ export interface WalkForwardReport {
   split: WalkForwardSplit;
   validation: HorizonMetrics[];
   test: HorizonMetrics[];
-  /** Modelo elegido por horizonte, decidido SÓLO con validación. */
+  /**
+   * Modelo utilizable por horizonte: elegido en validación Y confirmado en
+   * test. `null` significa SIN MODELO, y el motor dirá NO DECIDIR.
+   */
   chosen: Record<number, ModelId | null>;
   /** Error típico del modelo elegido por horizonte, en % (medido en validación). */
   chosenErrorPct: Record<number, number | null>;
+  /**
+   * Modelo que ganó la validación, ANTES de la puerta de confirmación. Se
+   * conserva para poder decir por qué un horizonte se quedó sin modelo:
+   * `candidate` con `chosen === null` = el candidato no confirmó en test.
+   */
+  candidate: Record<number, ModelId | null>;
+  /** Por qué el horizonte quedó como quedó, en palabras. */
+  horizonVerdict: Record<number, string>;
   evaluable: boolean;
   reason: string;
 }
@@ -135,13 +146,60 @@ export const SIGNAL_TO_NOISE_FLOOR = 1.0;
 export const MIN_SIGNALS_TO_QUALIFY = 20;
 
 /**
- * Nivel del contraste "esta señal bate al azar".
+ * Nivel del contraste "esta señal bate al azar", ANTES de corregir.
  *
  * Es el mismo 0.05 que el resto del proyecto usa para decidir si algo se
  * publica como evidencia. Un modelo que no lo pasa NO se usa: el horizonte se
  * queda sin modelo y la decisión será NO DECIDIR.
  */
 export const SELECTION_ALPHA = 0.05;
+
+/**
+ * Corrección por comparaciones múltiples (Bonferroni).
+ *
+ * ═══ POR QUÉ HIZO FALTA ═══
+ *
+ * En cada horizonte compiten siete modelos, y hay seis horizontes: cuarenta y
+ * dos contrastes. A 0.05 por contraste, dos "ganadores" por puro azar son lo
+ * ESPERADO, no la excepción. Se detectó con un test: sobre un paseo aleatorio
+ * de 600 horas —sin nada que predecir por construcción— algún horizonte
+ * seguía encontrando modelo elegible.
+ *
+ * Publicar eso sería exactamente el fallo que este motor existe para evitar:
+ * una señal con aspecto validado sobre un mercado que no tiene señal. Se
+ * reparte el alfa entre los modelos que compiten en el horizonte, que es la
+ * corrección más conservadora y la que no necesita suponer independencia
+ * entre modelos (no la hay: comparten datos).
+ */
+export const SELECTION_ALPHA_CORRECTED = SELECTION_ALPHA / MODEL_IDS.length;
+
+/**
+ * Nivel del contraste de CONFIRMACIÓN sobre el test.
+ *
+ * ═══ POR QUÉ HACE FALTA UNA SEGUNDA PUERTA ═══
+ *
+ * La corrección de Bonferroni reduce los falsos positivos de la BÚSQUEDA,
+ * pero no los elimina, y sobre todo no comprueba que el ganador siga siendo
+ * bueno fuera de donde se le eligió. Medido sobre 18 paseos aleatorios de 600
+ * horas —series sin nada que predecir por construcción— la selección por
+ * validación seguía nombrando modelo en 5 de 18, y el modelo nombrado acertaba
+ * el 34%, el 31% y el 27% de sus señales en el test: PEOR que una moneda. Una
+ * señal así no es ruido inofensivo, es una señal invertida que haría perder
+ * dinero al maker.
+ *
+ * Por eso el test no sólo se reporta: VETA. Con el modelo y el umbral ya
+ * congelados en validación, el ganador tiene que volver a batir al azar en un
+ * tramo que no participó en su elección. Aquí NO se corrige por comparaciones
+ * múltiples porque no se compara nada: se contrasta un único modelo ya
+ * elegido. El test se sigue leyendo una sola vez y no elige entre modelos —
+ * sólo responde sí o no.
+ *
+ * Coste: la precisión reportada de un modelo que pasa las dos puertas es
+ * optimista (está condicionada a haberlas pasado). Beneficio: la probabilidad
+ * de publicar una señal sobre un mercado impredecible cae de ~0.05 a ~0.0036
+ * por modelo y horizonte.
+ */
+export const CONFIRMATION_ALPHA = 0.05;
 
 interface Case {
   i: number;
@@ -260,6 +318,8 @@ export function runWalkForward(
       test: [],
       chosen: {},
       chosenErrorPct: {},
+      candidate: {},
+      horizonVerdict: {},
       evaluable: false,
       reason:
         `Histórico insuficiente para validar: ${grid.observedHours} horas observadas, ` +
@@ -286,6 +346,8 @@ export function runWalkForward(
   const test: HorizonMetrics[] = [];
   const chosen: Record<number, ModelId | null> = {};
   const chosenErrorPct: Record<number, number | null> = {};
+  const candidate: Record<number, ModelId | null> = {};
+  const horizonVerdict: Record<number, string> = {};
 
   for (const horizon of HORIZONS) {
     // PASO 1 — validación sin umbral: se mide el error típico de cada modelo.
@@ -314,15 +376,16 @@ export function runWalkForward(
      * habría publicado como una señal.
      *
      * Ganar la comparación entre modelos no basta: hay que batir al azar con
-     * evidencia. Si ningún modelo lo consigue, el horizonte se queda SIN
-     * MODELO y el motor dirá NO DECIDIR, que es la respuesta correcta cuando
-     * el mercado no es predecible a ese plazo.
+     * evidencia, y con el alfa ya repartido entre los modelos que compiten
+     * (ver SELECTION_ALPHA_CORRECTED). Si ningún modelo lo consigue, el
+     * horizonte se queda SIN MODELO y el motor dirá NO DECIDIR, que es la
+     * respuesta correcta cuando el mercado no es predecible a ese plazo.
      */
     const eligible = scoredValidation.filter((m) => {
       if (m.n < MIN_CASES_PER_HORIZON) return false;
       if (m.signalAccuracy === null || m.signals < MIN_SIGNALS_TO_QUALIFY) return false;
       const betterThanChance = binomialTailProbability(m.signalHits, m.signals);
-      return betterThanChance < SELECTION_ALPHA;
+      return betterThanChance < SELECTION_ALPHA_CORRECTED;
     });
     const winner =
       eligible.length > 0
@@ -334,21 +397,60 @@ export function runWalkForward(
           })
         : null;
 
-    chosen[horizon] = winner?.model ?? null;
-    chosenErrorPct[horizon] = winner?.mape ?? null;
+    candidate[horizon] = winner?.model ?? null;
 
-    // PASO 4 — test, con el modelo y el umbral ya congelados.
-    if (winner !== null) {
-      const testMetrics = evaluate(
-        grid,
-        models[winner.model],
-        horizon,
-        validationEnd,
-        testEnd,
-        winner.mape,
-        features
-      );
-      test.push({ model: winner.model, horizon, ...testMetrics });
+    if (winner === null) {
+      chosen[horizon] = null;
+      chosenErrorPct[horizon] = null;
+      horizonVerdict[horizon] =
+        'Ningún modelo batió al azar en validación con evidencia suficiente: SIN MODELO.';
+      continue;
+    }
+
+    // PASO 4 — test, con el modelo y el umbral ya congelados en validación.
+    const testMetrics = evaluate(
+      grid,
+      models[winner.model],
+      horizon,
+      validationEnd,
+      testEnd,
+      winner.mape,
+      features
+    );
+    test.push({ model: winner.model, horizon, ...testMetrics });
+
+    /*
+     * PASO 5 — CONFIRMACIÓN. El test veta, no sólo informa.
+     *
+     * El candidato ganó donde se le eligió; eso no dice que sirva fuera. Aquí
+     * se le exige repetir contra el azar en un tramo que no participó en su
+     * elección. Un único contraste, sin corregir: no se compara nada, se
+     * confirma un modelo ya decidido.
+     */
+    const enoughTest =
+      testMetrics.n >= MIN_CASES_PER_HORIZON && testMetrics.signals >= MIN_SIGNALS_TO_QUALIFY;
+    const confirmP = enoughTest
+      ? binomialTailProbability(testMetrics.signalHits, testMetrics.signals)
+      : null;
+    const confirmed = confirmP !== null && confirmP < CONFIRMATION_ALPHA;
+
+    chosen[horizon] = confirmed ? winner.model : null;
+    chosenErrorPct[horizon] = confirmed ? winner.mape : null;
+
+    if (!enoughTest) {
+      horizonVerdict[horizon] =
+        `${winner.model} ganó la validación, pero el tramo de test no tiene casos suficientes ` +
+        `(${testMetrics.n} casos, ${testMetrics.signals} señales) para confirmarlo: EVIDENCIA INSUFICIENTE, SIN MODELO.`;
+    } else if (!confirmed) {
+      const acc = ((testMetrics.signalAccuracy ?? 0) * 100).toFixed(1);
+      horizonVerdict[horizon] =
+        `${winner.model} ganó la validación pero NO confirmó en test ` +
+        `(${testMetrics.signalHits}/${testMetrics.signals} señales, ${acc}%): SIN MODELO.`;
+    } else {
+      const acc = ((testMetrics.signalAccuracy ?? 0) * 100).toFixed(1);
+      horizonVerdict[horizon] =
+        `${winner.model} elegido en validación y confirmado en test ` +
+        `(${testMetrics.signalHits}/${testMetrics.signals} señales, ${acc}%).`;
     }
   }
 
@@ -358,6 +460,8 @@ export function runWalkForward(
     test,
     chosen,
     chosenErrorPct,
+    candidate,
+    horizonVerdict,
     evaluable: true,
     reason: `Walk-forward sobre ${grid.observedHours} horas observadas.`,
   };

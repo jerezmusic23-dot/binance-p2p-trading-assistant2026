@@ -1214,6 +1214,8 @@ export interface LegDecisionView {
   confidence: DecisionConfidence;
   decision: MarketDecision;
   reason: string;
+  /** Veredicto del walk-forward sobre el modelo de este horizonte. */
+  modelVerdict: string;
 }
 
 export interface HorizonMetricsView {
@@ -1258,6 +1260,8 @@ export interface MarketReadingResponse {
     test: HorizonMetricsView[];
     chosen: Record<string, ForecastModelId | null>;
     chosenErrorPct: Record<string, number | null>;
+    candidate: Record<string, ForecastModelId | null>;
+    horizonVerdict: Record<string, string>;
     evaluable: boolean;
     reason: string;
   };

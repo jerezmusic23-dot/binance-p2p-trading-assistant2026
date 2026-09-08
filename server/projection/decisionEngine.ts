@@ -118,6 +118,12 @@ export interface LegDecision {
   /* ── DECISIÓN ── */
   decision: Decision;
   reason: string;
+  /**
+   * Qué pasó con el modelo de este horizonte en el walk-forward: elegido y
+   * confirmado, o por qué se descartó. Es lo que permite distinguir "el
+   * mercado está plano" de "no tengo un modelo en el que confiar".
+   */
+  modelVerdict: string;
 }
 
 /* ------------------------------------------------------------------------ *
@@ -498,6 +504,11 @@ export function decideLeg(
       : null;
 
   const partial: Omit<LegDecision, 'reason'> = {
+    modelVerdict:
+      walkForward.horizonVerdict[horizon] ??
+      (walkForward.evaluable
+        ? 'Horizonte no evaluado.'
+        : 'Histórico insuficiente para validar ningún modelo.'),
     leg,
     binanceSide: leg === 'VENTA' ? 'SELL' : 'BUY',
     horizon,

@@ -76,19 +76,61 @@ function capturesPerHour(grid: HourlyGrid): number | null {
 }
 
 /**
- * La decisión conjunta es la MÁS CONSERVADORA de las dos piernas.
+ * Hacia dónde apunta cada acción. Dos acciones DISTINTAS pueden apuntar al
+ * mismo lado del mercado, y ésa es justamente la diferencia que la primera
+ * versión de este resumen no hacía.
+ */
+type Stance = 'ALCISTA' | 'BAJISTA' | 'NEUTRAL';
+
+const STANCE: Record<Exclude<Decision, 'NO_DECIDIR'>, Stance> = {
+  // El precio sube: se pide más por lo que vendo y se acumula lo que compro.
+  SUBIR_PRECIO: 'ALCISTA',
+  AUMENTAR_EXPOSICION: 'ALCISTA',
+  ESPERAR: 'ALCISTA',
+  // El precio baja: conviene ejecutar ya y no acumular.
+  BAJAR_PRECIO: 'BAJISTA',
+  PUBLICAR: 'BAJISTA',
+  REDUCIR_EXPOSICION: 'BAJISTA',
+  NO_PUBLICAR: 'BAJISTA',
+  // Sin sesgo.
+  MANTENER_PRECIO: 'NEUTRAL',
+};
+
+/**
+ * RESUMEN DE LAS DOS PIERNAS EN UNA SOLA ACCIÓN.
  *
- * Las dos piernas pueden pedir cosas opuestas —vender caro y comprar barato
- * no siempre apuntan al mismo lado— y en ese caso el operador no tiene una
- * acción única: tiene dos decisiones separadas, que es lo que la pantalla
- * muestra. Este campo sólo resume, y ante desacuerdo se abstiene.
+ * ═══ EL FALLO QUE ESTO CORRIGE ═══
+ *
+ * La primera versión comparaba las ETIQUETAS: si las dos piernas no decían
+ * exactamente lo mismo, devolvía MANTENER_PRECIO. Pero las dos piernas
+ * responden a preguntas distintas —a qué precio vendo y a qué precio compro—
+ * así que casi nunca coinciden en la etiqueta aunque coincidan en la lectura.
+ *
+ * Medido sobre una tendencia alcista clara (confianza ALTA, señal/ruido 3.14
+ * en ambas piernas), MI VENTA decía SUBIR_PRECIO y MI COMPRA decía
+ * AUMENTAR_EXPOSICIÓN —las dos correctas y las dos alcistas— y el titular
+ * salía MANTENER_PRECIO: el consejo CONTRARIO al de sus propias piernas.
+ *
+ * ═══ LA REGLA ═══
+ *
+ * Se compara el SENTIDO, no la etiqueta. Ambas piernas leen el mismo mercado,
+ * de modo que un desacuerdo de sentido sí es un conflicto real y ahí sí se
+ * mantiene. Si coinciden, el titular es la acción de MI VENTA, que es la
+ * pierna cuyo precio el maker publica y controla; la acción de MI COMPRA se
+ * sigue mostrando entera al lado, sin resumir.
  */
 export function combineDecisions(venta: Decision, compra: Decision): Decision {
   if (venta === 'NO_DECIDIR' || compra === 'NO_DECIDIR') return 'NO_DECIDIR';
   if (venta === compra) return venta;
-  // Cualquier desacuerdo entre piernas se resuelve sin inventar una tercera
-  // acción: se mantiene, que es lo único que no compromete ninguna de las dos.
-  return 'MANTENER_PRECIO';
+
+  const ventaStance = STANCE[venta];
+  const compraStance = STANCE[compra];
+
+  // Conflicto real de sentido, o una pierna sin sesgo: no se fuerza un titular.
+  if (ventaStance !== compraStance) return 'MANTENER_PRECIO';
+
+  // Mismo sentido, acciones distintas: manda la pierna que el maker publica.
+  return venta;
 }
 
 export function buildMarketReading(

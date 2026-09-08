@@ -4,7 +4,7 @@ import { buildDailyProjection } from '../../server/dailyProjection.js';
 import type { SeriesPoint } from '../../server/projection/series.js';
 import type { HistoryRecord } from '../../server/types.js';
 
-function rng(seed:number){let s=seed;return()=>{s=(s*1103515245+12345)&0x7fffffff;return s/0x7fffffff;};}
+function rng(seed:number){let a=seed>>>0;return()=>{a=(a+0x6d2b79f5)>>>0;let t=a;t=Math.imul(t^(t>>>15),t|1);t^=t+Math.imul(t^(t>>>7),t|61);return ((t^(t>>>14))>>>0)/4294967296;};} // mulberry32: el LCG anterior desbordaba 2^53 y ciclaba
 function mk(seed:number){const rand=rng(seed);return()=>{const u=Math.max(rand(),1e-9),v=Math.max(rand(),1e-9);return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v);};}
 const vene=(day:number,hour:number,min:number)=>Date.UTC(2026,5,day,hour+4,min,0);
 

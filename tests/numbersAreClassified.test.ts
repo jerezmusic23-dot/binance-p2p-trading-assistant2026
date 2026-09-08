@@ -236,6 +236,28 @@ describe('every percentage on the screen is a frequency or a price ratio', () =>
     'flatRate',
     'downRate',
     'finishRate',
+    /*
+     * Las tres siguientes salen del walk-forward y son RECUENTOS sobre el
+     * tramo de test, no confianzas elegidas. Cada una viaja acompañada de su
+     * denominador en la propia tabla del panel, que es la condición para poder
+     * juzgarlas:
+     *
+     * · `directionAccuracy` = aciertos de dirección / casos con movimiento
+     *   real (se excluyen los planos: acertar el signo de un movimiento nulo
+     *   no es acertar nada).
+     * · `signalAccuracy`    = aciertos / señales emitidas. Es la única que
+     *   describe la calidad de decidir, porque sólo cuenta los casos en que el
+     *   motor se mojó.
+     * · `abstentionRate`    = instantes sin señal / instantes evaluados.
+     *   Abstenerse es información, no un fallo, y se publica como tal.
+     *
+     * Ninguna es una probabilidad de que el mercado haga algo: son la
+     * frecuencia con que un modelo ya congelado acertó sobre datos que no
+     * participaron en su elección.
+     */
+    'directionAccuracy',
+    'signalAccuracy',
+    'abstentionRate',
     // ratios of observed prices
     'strategicSpreadPct',
     'spreadPct',

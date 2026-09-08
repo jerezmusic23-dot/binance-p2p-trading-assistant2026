@@ -166,6 +166,15 @@ const LegCard: React.FC<{ leg: LegDecisionView; color: string; title: string; wa
     <p className="mt-2 border-t border-[#2b2f36] pt-2 text-[10px] leading-relaxed text-[#848e9c]">
       {leg.reason}
     </p>
+
+    {/*
+      Por qué hay (o no hay) modelo a este horizonte. Sin esto, "NO DECIDIR"
+      se lee como un fallo; con esto se lee como lo que es: el motor no
+      encontró un modelo que batiera al azar fuera de donde se le eligió.
+    */}
+    <p className="mt-1 text-[9px] leading-relaxed text-[#5e6673]">
+      <b className="text-[#848e9c]">Modelo:</b> {leg.modelVerdict}
+    </p>
   </section>
 );
 
@@ -216,7 +225,15 @@ export const MarketDecisionPanel: React.FC = () => {
   const venta = report.venta.find((d) => d.horizon === active) ?? null;
   const compra = report.compra.find((d) => d.horizon === active) ?? null;
   const horizons = report.venta.map((d) => d.horizon);
+  /*
+   * El test NO es sólo un informe: es la puerta de confirmación. Un candidato
+   * puede tener fila de test y aun así haber sido RECHAZADO ahí. Sólo se
+   * presenta como modelo del horizonte el que además figura en `chosen`;
+   * si no, la fila de test se muestra como lo que es: la prueba que lo tumbó.
+   */
   const testRow = report.walkForward.test.find((m) => m.horizon === active) ?? null;
+  const confirmedModel = report.walkForward.chosen[String(active)] ?? null;
+  const testConfirms = testRow !== null && confirmedModel === testRow.model;
 
   return (
     <div className="space-y-4 rounded-xl border border-[#2b2f36] bg-[#1e2329] p-5">
@@ -289,11 +306,13 @@ export const MarketDecisionPanel: React.FC = () => {
             <p className="mt-1">
               Walk-forward por tiempo: {report.walkForward.split.trainHours} h de entrenamiento,{' '}
               {report.walkForward.split.validationHours} h de validación (donde se elige el modelo) y{' '}
-              {report.walkForward.split.testHours} h de test, que sólo se leen para reportar.
+              {report.walkForward.split.testHours} h de test, que no participan en la elección y
+              que además tienen derecho a veto: un modelo que gana en validación y no repite en
+              test se descarta.
             </p>
-            {testRow ? (
+            {testRow && testConfirms ? (
               <p className="mt-1">
-                A {active}h ganó <b className="text-[#eaecef]">{testRow.model}</b>. Fuera de muestra:
+                A {active}h ganó <b className="text-[#eaecef]">{testRow.model}</b> y confirmó. Fuera de muestra:
                 dirección acertada{' '}
                 <b className="text-[#eaecef]">
                   {testRow.directionAccuracy !== null ? `${(testRow.directionAccuracy * 100).toFixed(1)}%` : '—'}
@@ -304,6 +323,15 @@ export const MarketDecisionPanel: React.FC = () => {
                 </b>{' '}
                 ({testRow.signals} señales) y se abstiene el{' '}
                 {testRow.abstentionRate !== null ? `${(testRow.abstentionRate * 100).toFixed(0)}%` : '—'} del tiempo.
+              </p>
+            ) : testRow ? (
+              <p className="mt-1 text-[#f0b90b]">
+                A {active}h <b className="text-[#eaecef]">{testRow.model}</b> ganó la validación pero{' '}
+                <b className="text-[#eaecef]">no confirmó en test</b>:{' '}
+                {testRow.signalHits}/{testRow.signals} señales{' '}
+                {testRow.signalAccuracy !== null ? `(${(testRow.signalAccuracy * 100).toFixed(1)}%)` : ''}. Se
+                descarta y la decisión es NO DECIDIR: publicar una señal que no se sostiene fuera de donde se
+                eligió es peor que no publicar ninguna.
               </p>
             ) : (
               <p className="mt-1 text-[#f0b90b]">

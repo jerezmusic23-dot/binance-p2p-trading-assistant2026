@@ -3,7 +3,7 @@ import { runWalkForward, HORIZONS } from '../../server/projection/walkForward.js
 import { MODEL_LABEL } from '../../server/projection/forecastModels.js';
 import type { HistoryRecord } from '../../server/types.js';
 
-function rng(seed:number){let s=seed;return()=>{s=(s*1103515245+12345)&0x7fffffff;return s/0x7fffffff;};}
+function rng(seed:number){let a=seed>>>0;return()=>{a=(a+0x6d2b79f5)>>>0;let t=a;t=Math.imul(t^(t>>>15),t|1);t^=t+Math.imul(t^(t>>>7),t|61);return ((t^(t>>>14))>>>0)/4294967296;};} // mulberry32: el LCG anterior desbordaba 2^53 y ciclaba
 function mkNormal(seed:number){const r=rng(seed);return()=>{const u=Math.max(r(),1e-9),v=Math.max(r(),1e-9);return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v);};}
 
 type Regime='trend'|'randomwalk'|'meanrevert'|'momentum';
