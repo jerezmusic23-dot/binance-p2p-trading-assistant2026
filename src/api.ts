@@ -3,6 +3,7 @@ import {
   MakerMatrixResponse,
   MakerProjectionsResponse,
   DailyProjectionResponse,
+  MarketReadingResponse,
   CellSeriesResponse,
   OpportunitiesResponse,
   HistoryRecord,
@@ -59,6 +60,10 @@ export class ApiService {
 
   public static async getDailyProjection(): Promise<DailyProjectionResponse> {
     return requestJson<DailyProjectionResponse>('/api/market/projections/daily');
+  }
+
+  public static async getMarketReading(): Promise<MarketReadingResponse> {
+    return requestJson<MarketReadingResponse>('/api/market/reading');
   }
 
   public static async getCellSeries(

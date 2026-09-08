@@ -1147,3 +1147,125 @@ export interface DailyProjectionResponse {
     fullyVerified: boolean;
   };
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * LECTURA DEL MERCADO ORIENTADA A DECIDIR
+ * Espejo de server/marketDecision.ts y server/projection/decisionEngine.ts.
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+export type DecisionProvenance = 'REAL' | 'AGGREGATED' | 'PROJECTED' | 'HEURISTIC';
+
+export interface DecisionValued<T> {
+  value: T;
+  provenance: DecisionProvenance;
+  source: string;
+}
+
+export type MarketRegime =
+  | 'CONTINUACION'
+  | 'REVERSION'
+  | 'LATERAL'
+  | 'TRANSICION'
+  | 'INDETERMINADO';
+
+export type DecisionConfidence = 'ALTA' | 'MEDIA' | 'BAJA' | 'NULA';
+
+export type MarketDecision =
+  | 'PUBLICAR'
+  | 'NO_PUBLICAR'
+  | 'ESPERAR'
+  | 'SUBIR_PRECIO'
+  | 'BAJAR_PRECIO'
+  | 'MANTENER_PRECIO'
+  | 'REDUCIR_EXPOSICION'
+  | 'AUMENTAR_EXPOSICION'
+  | 'NO_DECIDIR';
+
+export type ForecastModelId =
+  | 'NAIVE'
+  | 'MOMENTUM'
+  | 'MOMENTUM_ACCEL'
+  | 'TREND_MA'
+  | 'ANALOGY'
+  | 'MEDIAN_MOVE'
+  | 'HYBRID';
+
+export interface LegDecisionView {
+  leg: 'VENTA' | 'COMPRA';
+  binanceSide: 'BUY' | 'SELL';
+  horizon: number;
+  currentPrice: DecisionValued<number | null>;
+  velocityPctPerHour: DecisionValued<number | null>;
+  accelerationPctPerHour2: DecisionValued<number | null>;
+  volatilityPct: DecisionValued<number | null>;
+  rangePosition: DecisionValued<number | null>;
+  consistency: DecisionValued<number | null>;
+  model: ForecastModelId | null;
+  projectedPrice: DecisionValued<number | null>;
+  projectedLow: DecisionValued<number | null>;
+  projectedHigh: DecisionValued<number | null>;
+  expectedMovePct: DecisionValued<number | null>;
+  historicalErrorPct: DecisionValued<number | null>;
+  signalToNoise: DecisionValued<number | null>;
+  regime: MarketRegime;
+  continuationProbability: DecisionValued<number | null>;
+  reversalProbability: DecisionValued<number | null>;
+  analogCases: number;
+  confidence: DecisionConfidence;
+  decision: MarketDecision;
+  reason: string;
+}
+
+export interface HorizonMetricsView {
+  model: ForecastModelId;
+  horizon: number;
+  n: number;
+  mae: number | null;
+  mape: number | null;
+  directionHits: number;
+  directionTotal: number;
+  directionAccuracy: number | null;
+  directionPValue: number | null;
+  signals: number;
+  signalHits: number;
+  signalAccuracy: number | null;
+  abstentionRate: number | null;
+}
+
+export interface MarketReadingResponse {
+  generatedAt: number;
+  source: 'market_history.json';
+  observedHours: number;
+  missingHours: number;
+  capturesPerHour: number | null;
+  venta: LegDecisionView[];
+  compra: LegDecisionView[];
+  headlineHorizon: number;
+  reading: string;
+  decision: MarketDecision;
+  decisionText: string;
+  legsAgree: number | null;
+  walkForward: {
+    split: {
+      trainEnd: number;
+      validationEnd: number;
+      testEnd: number;
+      trainHours: number;
+      validationHours: number;
+      testHours: number;
+    };
+    validation: HorizonMetricsView[];
+    test: HorizonMetricsView[];
+    chosen: Record<string, ForecastModelId | null>;
+    chosenErrorPct: Record<string, number | null>;
+    evaluable: boolean;
+    reason: string;
+  };
+  dataProvenance: {
+    totalRecords: number;
+    verifiedCleanRecords: number;
+    unverifiedRecords: number;
+    fullyVerified: boolean;
+  };
+  insufficientReason: string | null;
+}

@@ -3,6 +3,7 @@ import { Activity, RefreshCw, TrendingDown, TrendingUp } from 'lucide-react';
 import { ApiService } from './api';
 import type { DailyLegReport, DailyProjectionResponse, ScreenState } from './types';
 import { ProjectionsChart } from './ProjectionsChart';
+import { MarketDecisionPanel } from './MarketDecisionPanel';
 import { hourLabel } from './dailyChartRows';
 
 const VENTA = '#f0b90b';
@@ -156,6 +157,15 @@ export const ProjectionsPanel: React.FC = () => {
   const latest = report.generatedAt ? new Date(report.generatedAt).toLocaleTimeString('es-VE', { hour: '2-digit', minute: '2-digit' }) : '—';
 
   return (
+    <div className="space-y-4">
+      {/*
+        La lectura orientada a decidir va PRIMERO: es la que responde "qué
+        hago". Debajo se conserva la proyección hora a hora del día, que
+        responde "cómo se ha movido" - dos preguntas distintas, cada una con su
+        motor y su bloque.
+      */}
+      <MarketDecisionPanel />
+
     <div className="space-y-4 rounded-xl border border-[#2b2f36] bg-[#1e2329] p-5">
       <header className="flex items-start justify-between gap-3">
         <div>
@@ -206,6 +216,7 @@ export const ProjectionsPanel: React.FC = () => {
           </p>
         )}
       </section>
+    </div>
     </div>
   );
 };

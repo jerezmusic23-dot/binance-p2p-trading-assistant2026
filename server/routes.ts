@@ -8,6 +8,7 @@ import { selectBestMakerCell } from './makerMatrix.js';
 import { HistoricalMarketStore } from './historicalMarketStore.js';
 import { runProjectionBacktest } from './projectionBacktest.js';
 import { dailyProjectionFromStorage } from './dailyProjection.js';
+import { marketReadingFromStorage } from './marketDecision.js';
 import { GENERAL_MARKET_KEY, projectCell } from './makerProjectionEngine.js';
 import { CentralMarketStore } from './centralStore.js';
 import { StorageEngine } from './storage.js';
@@ -115,6 +116,39 @@ apiRouter.get('/market/projections/daily', (_req, res) => {
     res.json(dailyProjectionFromStorage());
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Error building daily projection' });
+  }
+});
+
+/*
+ * LECTURA DEL MERCADO ORIENTADA A DECIDIR.
+ *
+ * El motor de `marketDecision.ts`: observación, predicción, incertidumbre y
+ * decisión, por pierna y por horizonte, con el walk-forward que la sostiene
+ * viajando dentro de la respuesta.
+ *
+ * Ruta aparte de /projections/daily a propósito. Aquélla responde "cómo se ha
+ * movido el día"; ésta responde "qué hago". Son dos preguntas y mezclarlas en
+ * un solo payload fue lo que hizo que la pantalla anterior enseñara una
+ * dirección sin poder decir si era accionable.
+ *
+ * Se cachea 60s: el walk-forward recorre el histórico entero y no cambia de
+ * respuesta dentro de una misma hora de rejilla.
+ */
+let readingCache: { at: number; body: unknown } | null = null;
+const READING_CACHE_MS = 60_000;
+
+apiRouter.get('/market/reading', (_req, res) => {
+  try {
+    const now = Date.now();
+    if (readingCache !== null && now - readingCache.at < READING_CACHE_MS) {
+      res.json(readingCache.body);
+      return;
+    }
+    const body = marketReadingFromStorage(now);
+    readingCache = { at: now, body };
+    res.json(body);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Error building market reading' });
   }
 });
 
