@@ -88,8 +88,9 @@ const legReport = (
   evidence: 'ESTIMACION_SIN_VALIDAR',
   evidenceText: 'artificial',
   label: leg === 'VENTA' ? 'MI VENTA (Binance BUY)' : 'MI COMPRA (Binance SELL)',
-  extraction: { recordsRead: 100, droppedLegacy: 0, droppedInvalid: 0 },
+  extraction: { recordsRead: 100, droppedLegacy: 0, droppedInvalid: 0, legacyRecords: 0 },
   market: { leg, direction: 'SUBIENDO', speed: 'LENTO', changePct: 0.5 },
+  executableExtreme: null,
 });
 
 const base = (): DailyProjectionResponse => ({

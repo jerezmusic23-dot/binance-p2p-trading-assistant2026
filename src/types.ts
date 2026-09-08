@@ -1099,10 +1099,20 @@ export interface DailyLegReport {
   evidence: DailyEvidenceLevel;
   evidenceText: string;
   label: string;
-  extraction: { recordsRead: number; droppedLegacy: number; droppedInvalid: number };
+  extraction: { recordsRead: number; droppedLegacy: number; droppedInvalid: number; legacyRecords: number };
   market: { leg: MakerLeg; direction: DayDirection; speed: DaySpeed; changePct: number | null };
+  /** Referencia estratégica en la hora actual. Es lo que se proyecta. */
   now: number | null;
   nowOrigin: PriceOrigin;
+  /** Mejor precio EJECUTABLE de la hora actual. Observado, nunca proyectado. */
+  executableExtreme: {
+    leg: MakerLeg;
+    price: number;
+    hour: number;
+    observations: number;
+    field: 'buyPrice' | 'sellPrice';
+    calculation: string;
+  } | null;
   opportunity: LegOpportunity | null;
   favourableHours: HourFavourability[];
   turn: ProjectedTurn | null;

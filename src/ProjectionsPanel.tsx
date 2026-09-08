@@ -68,9 +68,12 @@ const ExtremeCard: React.FC<{
 
       <div className="mt-4 grid gap-3 sm:grid-cols-2">
         <div className="rounded-lg border border-[#2b2f36] bg-[#181a20] p-3">
-          <div className="text-[9px] uppercase tracking-wider text-[#5e6673]">Ahora · observado</div>
+          <div className="text-[9px] uppercase tracking-wider text-[#5e6673]">Referencia estratégica · ahora</div>
           <div className="mt-1 font-mono text-2xl" style={{ color }}>{money(leg.now)}</div>
-          <div className="mt-1 text-[9px] text-[#848e9c]">Precio real del mercado general capturado por Binance P2P.</div>
+          <div className="mt-1 text-[9px] text-[#848e9c]">
+            Mediana del lado {leg.projection.leg === 'VENTA' ? 'Binance SELL' : 'Binance BUY'} en la hora
+            actual. Es lo que se proyecta: describe dónde está el mercado, no con quién se opera.
+          </div>
         </div>
         <div className="rounded-lg border border-[#2b2f36] bg-[#181a20] p-3">
           <div className="text-[9px] uppercase tracking-wider text-[#5e6673]">24 h · proyectado</div>
@@ -81,9 +84,38 @@ const ExtremeCard: React.FC<{
         </div>
       </div>
 
+      {/*
+        EXTREMO EJECUTABLE, separado a propósito de la referencia. Es el mejor
+        precio con el que se puede operar ahora; NUNCA se proyecta.
+      */}
+      <div className="mt-3 rounded-lg border border-[#2b2f36] bg-[#181a20] p-3">
+        <div className="text-[9px] uppercase tracking-wider text-[#5e6673]">
+          Extremo ejecutable · observado {leg.executableExtreme === null ? '' : `· ${leg.executableExtreme.observations} capturas`}
+        </div>
+        <div className="mt-1 font-mono text-lg text-[#e0e0e0]">
+          {leg.executableExtreme === null ? 'no verificable' : money(leg.executableExtreme.price)}
+        </div>
+        <div className="mt-1 text-[9px] text-[#848e9c]">
+          {leg.executableExtreme === null
+            ? 'La hora en curso todavía no tiene capturas.'
+            : `${leg.executableExtreme.calculation}. No se proyecta.`}
+        </div>
+      </div>
+
       <div className="mt-3 rounded-lg border border-[#2b2f36] bg-[#181a20] p-3 text-[9px] leading-relaxed text-[#848e9c]">
-        <b className="text-[#e0e0e0]">Fuente:</b> mercado general USDT/VES · <b className="text-[#e0e0e0]">regla:</b> {leg.projection.leg === 'VENTA' ? 'precio MÁS ALTO de VENTA (techo)' : 'precio MÁS BAJO de COMPRA (piso)'}.
-        <br />No usa banco, monto, anuncios prestados ni precio estratégico.
+        <b className="text-[#e0e0e0]">Fuente:</b> mercado general USDT/VES · <b className="text-[#e0e0e0]">se proyecta:</b>{' '}
+        {leg.projection.leg === 'VENTA' ? 'la referencia del lado VENTA' : 'la referencia del lado COMPRA'}{' '}
+        ({leg.nowOrigin.field}).
+        <br />No usa banco, monto ni anuncios prestados.
+        {leg.extraction.legacyRecords > 0 && (
+          <>
+            <br />
+            <span className="text-[#f0b90b]">
+              ⚠ {leg.extraction.legacyRecords} de {leg.extraction.recordsRead} observaciones no traían
+              referencia estratégica y usaron el extremo, que es lo único que llegaron a guardar.
+            </span>
+          </>
+        )}
       </div>
     </section>
   );

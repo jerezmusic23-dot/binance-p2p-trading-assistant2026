@@ -44,12 +44,14 @@ const row = (
 });
 
 describe('fuente de la proyección general', () => {
-  it('declara los campos crudos como única fuente de cada pierna', () => {
-    expect(FIELD_FOR_LEG).toEqual({ VENTA: 'sellPrice', COMPRA: 'buyPrice' });
+  it('declara la referencia estratégica como fuente de la proyección', () => {
+    // D4: se proyecta la mediana del lado, no su extremo. El LADO no cambia.
+    expect(FIELD_FOR_LEG).toEqual({ VENTA: 'strategicSellPrice', COMPRA: 'strategicBuyPrice' });
   });
 
-  it('VENTA toma el precio SELL más alto y COMPRA el BUY más bajo', () => {
-    const records = [row(9, 930, 950), row(10, 940, 960), row(11, 935, 955)];
+  it('el techo sale del lado VENTA y el piso del lado COMPRA', () => {
+    // Referencia explícita (buy, sell, strategicBuy, strategicSell).
+    const records = [row(9, 1, 2, 930, 950), row(10, 1, 2, 940, 960), row(11, 1, 2, 935, 955)];
     const report = buildDailyProjection(records, t(20));
 
     expect(report.ceiling.observed?.price).toBe(960);
@@ -59,29 +61,25 @@ describe('fuente de la proyección general', () => {
   });
 
   it('no usa el máximo o mínimo global mezclando las dos piernas', () => {
-    const records = [row(9, 930, 950), row(10, 936, 945), row(11, 940, 920)];
+    const records = [row(9, 1, 2, 930, 950), row(10, 1, 2, 936, 945), row(11, 1, 2, 940, 920)];
     const report = buildDailyProjection(records, t(20));
 
-    // MAX sellPrice = 950; MIN buyPrice = 930.
+    // MAX del lado VENTA = 950; MIN del lado COMPRA = 930.
     expect(report.ceiling.observed?.price).toBe(950);
     expect(report.floor.observed?.price).toBe(930);
   });
 });
 
 describe('bank/payType no forman parte de la serie general', () => {
-  it('cambiar strategic* no cambia ninguna serie de precios proyectada', () => {
+  it('cambiar el EXTREMO no cambia la serie proyectada (D4)', () => {
     const base = [row(9, 930, 950, 5000, 100), row(10, 940, 960, 5100, 101)];
-    const altered = base.map((r) => ({
-      ...r,
-      strategicBuyPrice: 1,
-      strategicSellPrice: 999999,
-      strategicSpreadPct: 999999,
-    }));
+    // Un anuncio anómalo sólo puede mover el extremo, nunca la referencia.
+    const poisoned = base.map((r) => ({ ...r, buyPrice: 920.659, sellPrice: 1200 }));
 
-    expect(extractLegSeries(altered, 'VENTA').points.map((p) => p.price)).toEqual(
+    expect(extractLegSeries(poisoned, 'VENTA').points.map((p) => p.price)).toEqual(
       extractLegSeries(base, 'VENTA').points.map((p) => p.price)
     );
-    expect(extractLegSeries(altered, 'COMPRA').points.map((p) => p.price)).toEqual(
+    expect(extractLegSeries(poisoned, 'COMPRA').points.map((p) => p.price)).toEqual(
       extractLegSeries(base, 'COMPRA').points.map((p) => p.price)
     );
   });

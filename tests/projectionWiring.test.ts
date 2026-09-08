@@ -110,7 +110,9 @@ describe('la ruta /api/market/projections/daily — la única de la pantalla', (
   it('cada precio de la respuesta trae su cadena de origen', async () => {
     const body = await (await fetch(`${base}/api/market/projections/daily`)).json();
     for (const origin of [body.ceiling.origin, body.floor.origin, ...body.legs.map((l: any) => l.nowOrigin)]) {
-      expect(origin.field).toMatch(/^(buy|sell)Price$/);
+      // D4: la proyección declara la referencia estratégica; el extremo
+      // ejecutable se publica aparte, en `executableExtreme`.
+      expect(origin.field).toMatch(/^(strategicBuy|strategicSell|buy|sell)Price$/);
       expect(['BUY', 'SELL']).toContain(origin.binanceSide);
       expect(['VENTA', 'COMPRA']).toContain(origin.leg);
       expect(['OBSERVADO', 'PROYECTADO']).toContain(origin.kind);
