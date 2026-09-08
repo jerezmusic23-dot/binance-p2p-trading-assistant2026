@@ -175,6 +175,8 @@ describe('pollMarket - success path', () => {
         'weightedSellPrice',
         'spreadAbsolute',
         'captureStatus',
+        // Añadido aditivamente: el régimen de referencia general (v4, sin Recarga Pines).
+        'generalReferenceVersion',
       ].sort()
     );
 
@@ -183,6 +185,7 @@ describe('pollMarket - success path', () => {
     expect(record.buyLiquidityAds).toBe(10);
     expect(record.buyLiquidityUsdt).toBe(5000);
     expect(record.enrichmentVersion).toBe('v3-context');
+    expect(record.generalReferenceVersion).toBe('v4-no-recarga-pines');
 
     // Los anuncios uno a uno siguen fuera, deliberadamente.
     expect(record).not.toHaveProperty('topBuyAds');
@@ -1486,8 +1489,17 @@ describe('payType diagnostic over the full captured book', () => {
   });
 
   it('distinguishes a bank not observed from a code Binance does not know', async () => {
-    // 'RecargaPines' is a real rail production returns and no bank claims.
-    const unmapped = { payType: 'RecargaPines', tradeMethodName: 'Recarga Pines' };
+    /*
+     * 'RecargaPines' used to be the fixture here: a real rail production
+     * returns and no bank claims. It no longer reaches this diagnostic on a
+     * general poll - `filterGeneralReferenceAds` strips it out of
+     * topBuyAds/topSellAds before `observedOptions` is built, which is
+     * exactly the fix that keeps it out of the general reference price. So
+     * this uses a different, made-up rail that isn't on the exclusion list,
+     * to keep proving the SAME point: an unclaimed code is preserved as
+     * evidence, not silently absorbed into a bank that didn't send it.
+     */
+    const unmapped = { payType: 'SomeUnknownRail', tradeMethodName: 'Some Unknown Rail' };
     stubBinance(
       [makeAdItem({ price: '919.00', tradeMethods: [unmapped] })],
       [makeAdItem({ price: '921.50' })] // default fixture: Banesco
@@ -1501,7 +1513,7 @@ describe('payType diagnostic over the full captured book', () => {
     expect(verdict('BANESCO').status).toBe('VERIFIED');
     expect(verdict('VENEZUELA').status).toBe('NOT_OBSERVED'); // simply absent here
     // ...and the unclaimed code is preserved as evidence, not acted on.
-    expect(m.observedUnmapped.map((o) => o.payType)).toContain('RecargaPines');
+    expect(m.observedUnmapped.map((o) => o.payType)).toContain('SomeUnknownRail');
   });
 
   it('the corrected codes verify against the payTypes production really returns', async () => {

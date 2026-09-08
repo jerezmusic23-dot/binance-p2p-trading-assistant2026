@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, afterEach } from 'vitest';
-import { DEFAULT_PRICE_CHANGE_INTERVAL_MS, DEFAULT_SIGNAL_INTERVAL_MS, MIN_SIGNAL_INTERVAL_MS, priorityOf, readSignalInterval, startDigestState, accumulatePriceChange, releasePriceChangeDigest, EMPTY_DIGEST_STATE } from '../server/alertScheduler.js';
+import { DEFAULT_PRICE_CHANGE_INTERVAL_MS, DEFAULT_SIGNAL_INTERVAL_MS, MIN_SIGNAL_INTERVAL_MS, priorityOf, readSignalInterval, startDigestState, accumulatePriceChange, releasePriceChangeDigest } from '../server/alertScheduler.js';
 import { TelegramNotifier } from '../server/telegramNotifier.js';
 import type { MarketSignal } from '../server/signalEngine.js';
 
@@ -54,9 +54,13 @@ describe('price-change digest remains 30 minutes', () => {
   it('anchors the digest clock at startup', () => expect(startDigestState(T0)).toEqual({ pending: {}, lastReleasedAt: T0 }));
   it('does not change the maker digest cadence', () => expect(DEFAULT_PRICE_CHANGE_INTERVAL_MS).toBe(1_800_000));
   it('groups and releases a changed cell after the interval', () => {
+    // Arrancado con startDigestState(T0), no con EMPTY_DIGEST_STATE: el
+    // estado vacío se libera de inmediato en cuanto hay algo que decir (ver
+    // "the window holds" más abajo) - lo que este test fija es la ventana
+    // ANCLADA al arranque del servidor, que si espera el intervalo completo.
     const cell = { bank: 'MERCANTIL', bankDisplayName: 'Mercantil', amountKey: '10K', amountVes: 10_000 } as any;
     const pairing = { buy: { price: 940 }, sell: { price: 945 } } as any;
-    let state = accumulatePriceChange(EMPTY_DIGEST_STATE, { cell, pairing, previous: { buyPrice: 939, sellPrice: 945 } }, T0 + 1_000);
+    const state = accumulatePriceChange(startDigestState(T0), { cell, pairing, previous: { buyPrice: 939, sellPrice: 945 } }, T0 + 1_000);
     expect(releasePriceChangeDigest(state, T0 + 1_000, DEFAULT_PRICE_CHANGE_INTERVAL_MS).digest).toBeNull();
     const released = releasePriceChangeDigest(state, T0 + DEFAULT_PRICE_CHANGE_INTERVAL_MS, DEFAULT_PRICE_CHANGE_INTERVAL_MS);
     expect(released.digest?.changes).toHaveLength(1);

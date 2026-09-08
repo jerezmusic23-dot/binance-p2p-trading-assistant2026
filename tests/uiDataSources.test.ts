@@ -91,7 +91,7 @@ describe('TEST 14 - no component derives an opportunity from global prices', () 
    * they are the market level and that is legitimate. What they may never do
    * is appear in a component that declares an opportunity.
    */
-  const OPPORTUNITY_COMPONENTS = ['MyOperationPanel.tsx', 'BankMatrix.tsx'];
+  const OPPORTUNITY_COMPONENTS = ['MyOperationPanel.tsx'];
 
   for (const file of OPPORTUNITY_COMPONENTS) {
     it(`${file} never reads a global price`, () => {
@@ -120,60 +120,17 @@ describe('TEST 14 - no component derives an opportunity from global prices', () 
   });
 });
 
-describe('TEST 10 - BankMatrix consumes the executable matrix and nothing else', () => {
-  it('calls getExecutableMatrix', () => {
-    const matrix = code(SRC, 'BankMatrix.tsx');
-
-    expect(matrix).toMatch(/ApiService\.getExecutableMatrix/);
-    expect(matrix).not.toMatch(/getBankMatrix/);
-  });
-
-  it('renders cells from executableMatrix.cells', () => {
-    const matrix = code(SRC, 'BankMatrix.tsx');
-    expect(matrix).toMatch(/matrix\.cells/);
-  });
-
-  it('no longer references the removed structure', () => {
-    const matrix = code(SRC, 'BankMatrix.tsx');
-
-    expect(matrix).not.toMatch(/ratesByAmount/);
-    expect(matrix).not.toMatch(/leaderPrice/);
-    expect(matrix).not.toMatch(/suggestedPrice/);
-  });
-
-  it('shows every cell state instead of hiding the blocked ones', () => {
-    const matrix = read(SRC, 'BankMatrix.tsx');
-
-    for (const status of [
-      'EXECUTABLE',
-      'NO_OPPORTUNITY',
-      'NO_LIQUIDITY',
-      'INSUFFICIENT_LIQUIDITY',
-      'NO_AD',
-      'STALE',
-      'NOT_VERIFIABLE',
-      'ERROR',
-    ]) {
-      expect(matrix).toContain(status);
-    }
-  });
-
-  it('shows bank, amount, both prices, spread and liquidity per cell', () => {
-    const matrix = read(SRC, 'BankMatrix.tsx');
-    // `amountKeys` selects visible columns from `bankMatrixFilter.ts` now -
-    // extracted so the Filtro Global's row/column reduction can be tested
-    // without rendering a component, same as `dailyChartRows.ts`.
-    const filter = read(SRC, 'bankMatrixFilter.ts');
-
-    expect(matrix).toMatch(/bankDisplayNames/);
-    expect(matrix + filter).toMatch(/amountKeys/);
-    // Economics first: the column says what the user does, not what the API calls it.
-    expect(matrix).toMatch(/MI COMPRA/);
-    expect(matrix).toMatch(/MI VENTA/);
-    expect(matrix).toMatch(/Spread/);
-    expect(matrix).toMatch(/Liquidez/);
-  });
-});
+/*
+ * TEST 10 USED TO LIVE HERE - "BankMatrix consumes the executable matrix and
+ * nothing else".
+ *
+ * `src/BankMatrix.tsx` (and `GlobalFilterBar.tsx`, its nav tab and its
+ * overview shortcut) were removed: Anuncios Reales P2P now queries the real
+ * order book by bank/amount directly, without a bank×amount grid, and that
+ * removal is intentional and must stay in place. There is nothing left to
+ * assert about a component that no longer exists, and restoring these tests
+ * would only be a path back to restoring the component they described.
+ */
 
 describe('TEST 11 / 12 - one source of truth for the opportunity', () => {
   it('the UI reads the same endpoint the notifier is fed from', () => {
@@ -270,7 +227,7 @@ describe('TEST 12 (backend) - no Math.abs on an economic spread', () => {
     // And the sign now comes from the domain's single definition of it.
     expect(service).toMatch(/signedSpreadPct\(bestSellPrice, bestBuyPrice\)/);
 
-    for (const file of ['MainOverview.tsx', 'BankMatrix.tsx', 'MyOperationPanel.tsx', 'Header.tsx']) {
+    for (const file of ['MainOverview.tsx', 'MyOperationPanel.tsx', 'Header.tsx']) {
       expect(code(SRC, file)).not.toMatch(/Math\.abs/);
     }
   });
@@ -341,7 +298,7 @@ describe('TEST 13 - only the maker path may price against the leader', () => {
   });
 
   it('no taker client module does either', () => {
-    for (const file of ['BankMatrix.tsx', 'MyOperationPanel.tsx', 'api.ts']) {
+    for (const file of ['MyOperationPanel.tsx', 'api.ts']) {
       const src = code(SRC, file);
       expect(src).not.toMatch(/leaderPrice/);
       expect(src).not.toMatch(/suggestedPrice/);

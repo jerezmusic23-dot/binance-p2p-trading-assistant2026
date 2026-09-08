@@ -127,8 +127,8 @@ describe('3. notifyMarketSignals() NUNCA vuelve a ser un no-op permanente', () =
     const signal: MarketSignal = {
       kind: 'TREND_CHANGE',
       status: 'CONFIRMED',
-      bank: 'BANESCO',
-      bankDisplayName: 'Banesco',
+      bank: 'MERCANTIL',
+      bankDisplayName: 'Mercantil',
       amountKey: '10K',
       amountVes: 10_000,
       side: 'BUY',
@@ -142,7 +142,7 @@ describe('3. notifyMarketSignals() NUNCA vuelve a ser un no-op permanente', () =
       projectedHigh: 942,
       watchStartHour: null,
       watchEndHour: null,
-      identity: 'TREND_CHANGE:BANESCO:10K:BUY:regresion',
+      identity: 'TREND_CHANGE:MERCANTIL:10K:BUY:regresion',
     } as MarketSignal;
 
     const [result] = await notifier.notifyMarketSignals([signal], Date.now());

@@ -27,12 +27,12 @@ import type { HistoricalObservation } from '../server/historicalMarketStore.js';
 import type { SignalMemory } from '../server/signalEngine.js';
 
 const CELL = {
-  bank: 'VENEZUELA',
-  bankDisplayName: 'Banco de Venezuela',
+  bank: 'MERCANTIL',
+  bankDisplayName: 'Mercantil',
   amountKey: '10K',
   amountVes: 10_000,
 };
-const KEY = 'VENEZUELA:10K:BUY';
+const KEY = 'MERCANTIL:10K:BUY';
 
 function step(series: HistoricalObservation[], price: number, memory: SignalMemory) {
   return evaluateSignals({

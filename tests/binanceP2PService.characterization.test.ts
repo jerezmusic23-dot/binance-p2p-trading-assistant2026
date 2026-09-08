@@ -300,7 +300,7 @@ describe('fetchFullMarketSnapshot', () => {
   it('throws when both sides come back empty', async () => {
     vi.stubGlobal('fetch', makeFetchMock([makeBinanceResponse([])]));
     await expect(BinanceP2PService.fetchFullMarketSnapshot()).rejects.toThrow(
-      'No active P2P ads found for the specified criteria.'
+      'No active P2P ads found for the specified criteria after reference filtering.'
     );
   });
 
@@ -374,7 +374,7 @@ describe('fetchFullMarketSnapshot', () => {
     // failure is explicit rather than a snapshot full of zeros.
     vi.stubGlobal('fetch', makeFetchMock([makeBinanceResponse([])]));
     await expect(BinanceP2PService.fetchFullMarketSnapshot()).rejects.toThrow(
-      'No active P2P ads found for the specified criteria.'
+      'No active P2P ads found for the specified criteria after reference filtering.'
     );
   });
 

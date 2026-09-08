@@ -369,13 +369,18 @@ export class TelegramNotifier {
       const previous = this.lastSentAt.get(key);
       const cooldownMs = Math.max(this.config.cooldownMs, DEFAULT_SYSTEM_ALERT_COOLDOWN_MS);
       if (previous !== undefined && now - previous < cooldownMs) return { outcome: 'COOLDOWN' };
-      const result = await this.send(formatSystemAlertMessage(alert));
-      if (result.outcome === 'SENT') {
-        this.lastSystemState.set(key, alert.state);
-        this.lastSentAt.set(key, now);
-        this.prune(now);
-      }
-      return result;
+      /*
+       * Recorded BEFORE the send, and regardless of its outcome. A system
+       * alert fires on every poll while the condition holds (every few
+       * seconds during an outage), unlike a market signal that fires once per
+       * genuine event - so a failed delivery here must still hold the
+       * cooldown shut, or a sustained Telegram outage turns into a request
+       * every single poll instead of one attempt per window.
+       */
+      this.lastSystemState.set(key, alert.state);
+      this.lastSentAt.set(key, now);
+      this.prune(now);
+      return await this.send(formatSystemAlertMessage(alert));
     } catch (err) {
       const detail = this.describe(err);
       return { outcome: 'NETWORK_ERROR', detail };
