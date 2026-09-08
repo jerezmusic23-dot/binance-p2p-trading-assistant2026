@@ -98,17 +98,21 @@ export type MakerLeg = 'VENTA' | 'COMPRA';
 /**
  * De qué lado de Binance se lee cada pierna. ÚNICA definición del módulo.
  *
- * Si alguna vez hay que cambiarla, se cambia aquí y en ningún otro sitio; todo
- * lo demás la consulta.
+ * Pantalla GENERAL/TAKER (Proyección del Mercado + Anuncios Reales P2P), no
+ * una proyección de maker por celda (ver `arbitrageSides.ts`). VENTA lee
+ * `record.sellPrice` (máximo, tradeType=SELL); COMPRA lee `record.buyPrice`
+ * (mínimo, tradeType=BUY) - la misma regla que fija `arbitrageSides.ts` para
+ * el taker (`tests/arbitrageSideSemantics.test.ts` prueba que coinciden). Si
+ * hay que cambiarla, se cambia aquí y en ningún otro sitio.
  */
 export const LEG_BINANCE_SIDE: Record<MakerLeg, 'BUY' | 'SELL'> = {
-  VENTA: 'BUY',
-  COMPRA: 'SELL',
+  VENTA: 'SELL',
+  COMPRA: 'BUY',
 };
 
 export const LEG_LABEL: Record<MakerLeg, string> = {
-  VENTA: 'MI VENTA (Binance BUY)',
-  COMPRA: 'MI COMPRA (Binance SELL)',
+  VENTA: 'MI VENTA (Binance SELL)',
+  COMPRA: 'MI COMPRA (Binance BUY)',
 };
 
 /**

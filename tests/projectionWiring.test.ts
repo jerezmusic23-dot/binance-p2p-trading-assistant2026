@@ -95,22 +95,22 @@ describe('la ruta /api/market/projections/daily — la única de la pantalla', (
     expect(body.source).toBe('market_history.json');
     expect(body.legs.map((l: any) => l.projection.leg)).toEqual(['VENTA', 'COMPRA']);
     // La traducción viaja en la respuesta, no se deduce en la pantalla.
-    expect(body.legs[0].projection.binanceSide).toBe('BUY');
-    expect(body.legs[1].projection.binanceSide).toBe('SELL');
+    expect(body.legs[0].projection.binanceSide).toBe('SELL');
+    expect(body.legs[1].projection.binanceSide).toBe('BUY');
   });
 
   it('el techo viene de MI VENTA y el piso de MI COMPRA, siempre', async () => {
     const body = await (await fetch(`${base}/api/market/projections/daily`)).json();
     expect(body.ceiling.leg).toBe('VENTA');
-    expect(body.ceiling.binanceSide).toBe('BUY');
+    expect(body.ceiling.binanceSide).toBe('SELL');
     expect(body.floor.leg).toBe('COMPRA');
-    expect(body.floor.binanceSide).toBe('SELL');
+    expect(body.floor.binanceSide).toBe('BUY');
   });
 
   it('cada precio de la respuesta trae su cadena de origen', async () => {
     const body = await (await fetch(`${base}/api/market/projections/daily`)).json();
     for (const origin of [body.ceiling.origin, body.floor.origin, ...body.legs.map((l: any) => l.nowOrigin)]) {
-      expect(origin.field).toMatch(/^strategic(Buy|Sell)Price$/);
+      expect(origin.field).toMatch(/^(buy|sell)Price$/);
       expect(['BUY', 'SELL']).toContain(origin.binanceSide);
       expect(['VENTA', 'COMPRA']).toContain(origin.leg);
       expect(['OBSERVADO', 'PROYECTADO']).toContain(origin.kind);

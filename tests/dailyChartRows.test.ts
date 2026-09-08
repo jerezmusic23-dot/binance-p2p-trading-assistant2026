@@ -164,6 +164,7 @@ const base = (): DailyProjectionResponse => ({
   stateText: 'artificial',
   daysMissing: 0,
   variables: { used: [], availableNotUsed: [] },
+  dataProvenance: { totalRecords: 100, verifiedCleanRecords: 100, unverifiedRecords: 0, fullyVerified: true },
 });
 
 describe('las horas se rotulan en formato de 12 horas', () => {

@@ -35,33 +35,31 @@
  * make impossible.
  *
  * ═══════════════════════════════════════════════════════════════════════
- * DOS ROLES, EL MISMO NÚMERO. LÉASE ESTO ANTES DE "CORREGIR" NADA AQUÍ.
+ * ESTE MÓDULO Y `projection/dailyShape.ts` DESCRIBEN EL MISMO ROL.
  * ═══════════════════════════════════════════════════════════════════════
  *
- * Este módulo describe al TAKER: alguien que cruza el spread. Para él,
- * tradeType 'BUY' es de verdad una compra, porque paga el ask.
+ * Este módulo describe al TAKER: alguien que cruza el spread sobre el libro
+ * GENERAL de Binance P2P, sin banco ni monto. `projection/dailyShape.ts`
+ * (`LEG_BINANCE_SIDE`) alimenta la misma pantalla general - Proyección del
+ * Mercado y Anuncios Reales P2P - así que su tabla usa la MISMA lectura, no
+ * una opuesta:
  *
- * El propietario también opera como MAKER, publicando anuncios, y en ese rol el
- * MISMO lado significa lo contrario:
+ *   MI VENTA  = tradeType 'SELL' = record.sellPrice (máximo) -> techo
+ *   MI COMPRA = tradeType 'BUY'  = record.buyPrice  (mínimo) -> piso
  *
- *              tradeType='BUY' (el ask)      tradeType='SELL' (el bid)
- *   TAKER      compro, pago el ask           vendo, cobro el bid
- *   MAKER      publico mi VENTA aquí         publico mi COMPRA aquí
+ * (Este módulo existió antes con una lectura de MAKER para `dailyShape.ts` -
+ * la del operador publicando su propio anuncio, que compite contra los
+ * anuncios que devuelve el lado opuesto. Esa lectura no tiene ya ningún
+ * consumidor: ningún módulo de maker importa `LEG_BINANCE_SIDE`, así que
+ * dejarla desalineada con lo que `dailyProjection.ts` calcula de verdad sólo
+ * producía una etiqueta "Binance BUY/SELL" incorrecta en la pantalla general.
+ * Si alguna vez se construye una proyección de maker por celda, necesitará su
+ * propia tabla, con su propio nombre - no la de esta pantalla general.)
  *
- * Las dos lecturas son correctas: un maker que quiere vender compite con los
- * anuncios que devuelve 'BUY', porque son los rivales que verá su comprador.
- * Y por eso el maker gana el spread donde el taker lo paga.
- *
- * El mapa del maker vive en `projection/dailyShape.ts` (`LEG_BINANCE_SIDE`):
- *
- *   MI VENTA  = tradeType 'BUY'  = strategicBuyPrice  -> techo
- *   MI COMPRA = tradeType 'SELL' = strategicSellPrice -> piso
- *
- * NO renombrar `arbitrageBuyPrice` a "mi venta". Sería falso en este rol:
- * `isArbitrageOpportunity` compara la entrada contra la salida DEL TAKER, y
- * cambiarle el nombre invertiría el sentido de una comparación que decide si
- * una operación gana o pierde dinero. Los dos módulos no se contradicen; hablan
- * de dos operaciones distintas sobre el mismo libro.
+ * NO renombrar `arbitrageBuyPrice` a "mi venta": `isArbitrageOpportunity`
+ * compara la entrada contra la salida DEL TAKER, y cambiarle el nombre
+ * invertiría el sentido de una comparación que decide si una operación gana o
+ * pierde dinero.
  *
  * `tests/arbitrageSideSemantics.test.ts` fija que ambos mapas apuntan al mismo
  * lado de Binance, de modo que si alguien invierte uno de los dos, salta.

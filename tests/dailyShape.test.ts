@@ -73,10 +73,10 @@ describe('la hora local no se confunde con la UTC', () => {
  * SEMÁNTICA OPERACIONAL. Es la parte que no puede estar mal.
  * ══════════════════════════════════════════════════════════════════════════ */
 
-describe('MI VENTA es Binance BUY y MI COMPRA es Binance SELL', () => {
+describe('MI VENTA es Binance SELL y MI COMPRA es Binance BUY', () => {
   it('el mapeo está declarado en un solo sitio y dice eso', () => {
-    expect(LEG_BINANCE_SIDE.VENTA).toBe('BUY');
-    expect(LEG_BINANCE_SIDE.COMPRA).toBe('SELL');
+    expect(LEG_BINANCE_SIDE.VENTA).toBe('SELL');
+    expect(LEG_BINANCE_SIDE.COMPRA).toBe('BUY');
   });
 
   it('los dos lados de Binance NO son el mismo lado', () => {
@@ -84,10 +84,10 @@ describe('MI VENTA es Binance BUY y MI COMPRA es Binance SELL', () => {
   });
 
   it('vendiendo interesa el precio más alto; recomprando, el más bajo', () => {
-    // Publico en el lado BUY de Binance para vender: quiero cobrar más.
+    // MI VENTA lee el lado SELL de Binance (el anunciante compra USDT): quiero cobrar más.
     expect(isBetterForLeg('VENTA', 940, 936)).toBe(true);
     expect(isBetterForLeg('VENTA', 930, 936)).toBe(false);
-    // Publico en el lado SELL de Binance para recomprar: quiero pagar menos.
+    // MI COMPRA lee el lado BUY de Binance (el anunciante vende USDT): quiero pagar menos.
     expect(isBetterForLeg('COMPRA', 928, 931)).toBe(true);
     expect(isBetterForLeg('COMPRA', 934, 931)).toBe(false);
   });
@@ -179,8 +179,8 @@ describe('REGRESIÓN: max(BUY, SELL) y min(BUY, SELL) no pueden volver', () => {
 
   it('la pierna que produce el techo declara su lado de Binance', () => {
     const venta = projectLeg(ventaPoints, 'VENTA', at(10, 20));
-    expect(venta.binanceSide).toBe('BUY');
-    expect(projectLeg(compraPoints, 'COMPRA', at(10, 20)).binanceSide).toBe('SELL');
+    expect(venta.binanceSide).toBe('SELL');
+    expect(projectLeg(compraPoints, 'COMPRA', at(10, 20)).binanceSide).toBe('BUY');
   });
 });
 

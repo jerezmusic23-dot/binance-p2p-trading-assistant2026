@@ -80,10 +80,14 @@ describe('la proyección general usa los extremos crudos del libro', () => {
     ];
     const report = buildDailyProjection(rows, at(20, 20));
 
+    // Techo = máximo de sellPrice = 945. Nunca 920 (sellPrice de la fila
+    // cruzada) filtrándose como si fuera el mínimo de buyPrice.
     expect(report.ceiling.observed?.price).toBe(945);
     expect(report.ceiling.observed?.price).not.toBe(936);
-    expect(report.floor.observed?.price).toBe(920);
-    expect(report.floor.observed?.price).not.toBe(930);
+    // Piso = mínimo de buyPrice = 930. 920 es un sellPrice, no un candidato
+    // válido para COMPRA aunque sea el valor más bajo de toda la tabla.
+    expect(report.floor.observed?.price).toBe(930);
+    expect(report.floor.observed?.price).not.toBe(920);
   });
 });
 

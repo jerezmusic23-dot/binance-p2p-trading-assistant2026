@@ -321,33 +321,38 @@ describe('the arbitrage vocabulary can no longer reach Telegram', () => {
 });
 
 /**
- * LOS DOS ROLES SOBRE EL MISMO LIBRO
- * ==================================
+ * UN SOLO ROL SOBRE EL MISMO LIBRO GENERAL
+ * =========================================
  *
- * `arbitrageSides.ts` describe al TAKER y `projection/dailyShape.ts` al MAKER.
- * Para el mismo lado de Binance dicen operaciones opuestas, y las dos son
- * correctas: el maker publica su venta donde el taker compra.
+ * `arbitrageSides.ts` y `projection/dailyShape.ts` (`LEG_BINANCE_SIDE`)
+ * describen las DOS piernas de la MISMA pantalla general/taker - Proyección
+ * del Mercado y Anuncios Reales P2P - así que tienen que apuntar exactamente
+ * al mismo lado de Binance, no a lados opuestos. Ningún módulo de maker
+ * importa `LEG_BINANCE_SIDE`: no hay un segundo rol que justifique una lectura
+ * distinta aquí.
  *
  * Lo que NO puede pasar es que uno de los dos mapas se invierta y deje de
- * apuntar al lado que dice. Eso es lo que se fija aquí, y es la razón por la
- * que no se renombró el vocabulario de arbitraje al del maker: no es un nombre
- * engañoso, es otro rol.
+ * apuntar al lado que dice - eso volvería a etiquetar el techo/piso general
+ * con el lado de Binance equivocado, aunque el número siguiera siendo
+ * correcto. Eso es lo que se fija aquí.
  */
-describe('taker y maker apuntan al mismo lado de Binance', () => {
-  it('la pierna de ENTRADA del taker y MI VENTA salen ambas de tradeType BUY', async () => {
+describe('la pantalla general y el motor de arbitraje apuntan al mismo lado de Binance', () => {
+  it('MI COMPRA y la pierna de ENTRADA del taker salen ambas de tradeType BUY', async () => {
     const { tradeTypeForLeg } = await import('../server/arbitrageSides.js');
     const { LEG_BINANCE_SIDE } = await import('../server/projection/dailyShape.js');
 
     expect(tradeTypeForLeg('ARBITRAGE_BUY')).toBe('BUY');
-    expect(LEG_BINANCE_SIDE.VENTA).toBe('BUY');
+    expect(LEG_BINANCE_SIDE.COMPRA).toBe('BUY');
+    expect(LEG_BINANCE_SIDE.COMPRA).toBe(tradeTypeForLeg('ARBITRAGE_BUY'));
   });
 
-  it('la pierna de SALIDA del taker y MI COMPRA salen ambas de tradeType SELL', async () => {
+  it('MI VENTA y la pierna de SALIDA del taker salen ambas de tradeType SELL', async () => {
     const { tradeTypeForLeg } = await import('../server/arbitrageSides.js');
     const { LEG_BINANCE_SIDE } = await import('../server/projection/dailyShape.js');
 
     expect(tradeTypeForLeg('ARBITRAGE_SELL')).toBe('SELL');
-    expect(LEG_BINANCE_SIDE.COMPRA).toBe('SELL');
+    expect(LEG_BINANCE_SIDE.VENTA).toBe('SELL');
+    expect(LEG_BINANCE_SIDE.VENTA).toBe(tradeTypeForLeg('ARBITRAGE_SELL'));
   });
 
   it('los dos mapas son biyectivos y no colapsan en un solo lado', async () => {
