@@ -22,19 +22,32 @@
  *      denominador de la relación señal/ruido y es la razón principal de que
  *      la proyección anterior no alcanzara el umbral para decidir.
  *
- * ═══ LO QUE NO CAMBIA: LA SEMÁNTICA ═══
+ * ═══ REFERENCIA ROBUSTA, NO EXTREMO ═══
  *
- * `record.buyPrice` ya es el MÍNIMO del lado Binance BUY y `record.sellPrice`
- * el MÁXIMO del lado Binance SELL, calculados por captura en
- * `binanceP2PService`. Eso es correcto y NO se toca: es el mejor precio
- * disponible en ese instante.
+ * La proyección lee `strategicBuyPrice` / `strategicSellPrice`: la MEDIANA de
+ * cada lado en esa captura. NO lee `buyPrice` / `sellPrice`, que son los
+ * extremos.
  *
- *   COMPRA = mínimo BUY  (Binance BUY  = el anunciante vende USDT = mi compra)
- *   VENTA  = máximo SELL (Binance SELL = el anunciante compra USDT = mi venta)
+ * El extremo es el precio correcto para EJECUTAR - es el mejor anuncio que
+ * existe ahora - pero es la referencia equivocada para PROYECTAR, porque sigue
+ * al anuncio más lejano en vez de al mercado. Medido: un solo anuncio a
+ * 920.659 movía el extremo 48.64 VES mientras la mediana se movía 0.05.
  *
- * Lo que cambia es cómo se resumen MUCHAS capturas dentro de una hora: la
- * mediana de esos extremos instantáneos, que es un nivel, en vez del extremo
- * de los extremos, que es un estadístico de orden.
+ * La mediana de la captura es además la referencia que el resto de la
+ * arquitectura ya usa para decidir (`centralStore` la emplea para las alertas
+ * de Telegram, tras el incidente del anuncio de 980 VES), así que esto alinea
+ * la proyección con esa misma definición en vez de inventar una tercera.
+ *
+ *   COMPRA = mediana del lado Binance BUY  (el anunciante vende USDT = mi compra)
+ *   VENTA  = mediana del lado Binance SELL (el anunciante compra USDT = mi venta)
+ *
+ * La semántica de lados NO cambia: COMPRA sigue siendo el lado BUY y VENTA el
+ * lado SELL. Lo que cambia es qué estadístico de ese lado se proyecta.
+ *
+ * REGISTROS LEGACY: los anteriores a `calculationVersion: 'v2-strategic'` no
+ * llevan mediana. Para ésos se usa el extremo, que es lo único que se observó:
+ * no se descarta el registro ni se inventa una mediana que nadie midió. La
+ * celda declara cuántas de sus capturas fueron de cada clase.
  *
  * ═══ HUECOS ═══
  *
@@ -60,8 +73,21 @@ export const WELL_OBSERVED_MIN = 3;
 
 export type GridLeg = 'VENTA' | 'COMPRA';
 
-/** De qué campo del histórico general sale cada pierna. Única definición. */
-export const GRID_FIELD: Record<GridLeg, 'buyPrice' | 'sellPrice'> = {
+/**
+ * De qué campo del histórico general sale cada pierna. Única definición.
+ *
+ * Referencia ROBUSTA (mediana de la captura), no el extremo.
+ */
+export const GRID_FIELD: Record<GridLeg, 'strategicBuyPrice' | 'strategicSellPrice'> = {
+  VENTA: 'strategicSellPrice',
+  COMPRA: 'strategicBuyPrice',
+};
+
+/**
+ * El extremo del mismo lado. SÓLO se usa cuando el registro es anterior a la
+ * capa estratégica: es lo único que esa observación llegó a guardar.
+ */
+export const GRID_FALLBACK_FIELD: Record<GridLeg, 'buyPrice' | 'sellPrice'> = {
   VENTA: 'sellPrice',
   COMPRA: 'buyPrice',
 };
@@ -92,6 +118,12 @@ export interface HourlyGrid {
   cells: (GridCell | null)[];
   /** Horas con observación. */
   observedHours: number;
+  /**
+   * Capturas que no traían referencia robusta y cayeron al extremo (registros
+   * anteriores a `v2-strategic`). Se declara para no presentar como robusta
+   * una serie que en parte no lo es.
+   */
+  legacyRecords: number;
   /** Horas sin ninguna captura dentro del tramo cubierto. */
   missingHours: number;
 }
@@ -117,11 +149,23 @@ export function hourFloor(t: number): number {
  */
 export function buildHourlyGrid(records: readonly HistoryRecord[], leg: GridLeg): HourlyGrid {
   const field = GRID_FIELD[leg];
+  const fallbackField = GRID_FALLBACK_FIELD[leg];
   const buckets = new Map<number, number[]>();
+  let legacyRecords = 0;
 
   for (const record of records) {
     if (!record || typeof record.timestamp !== 'number' || !Number.isFinite(record.timestamp)) continue;
-    const price = record[field];
+
+    /*
+     * Referencia robusta primero. El extremo SÓLO cuando el registro es
+     * anterior a la capa estratégica: ahí es lo único observado, y descartarlo
+     * tiraría histórico real (Regla 2) mientras que inventar una mediana sería
+     * fabricar un dato (Regla 5).
+     */
+    const robust = record[field];
+    const usable = typeof robust === 'number' && Number.isFinite(robust) && robust > 0;
+    if (!usable) legacyRecords += 1;
+    const price = usable ? robust : record[fallbackField];
     if (typeof price !== 'number' || !Number.isFinite(price) || price <= 0) continue;
 
     const key = hourFloor(record.timestamp);
@@ -131,7 +175,7 @@ export function buildHourlyGrid(records: readonly HistoryRecord[], leg: GridLeg)
   }
 
   if (buckets.size === 0) {
-    return { leg, startMs: 0, cells: [], observedHours: 0, missingHours: 0 };
+    return { leg, startMs: 0, cells: [], observedHours: 0, missingHours: 0, legacyRecords };
   }
 
   const keys = [...buckets.keys()].sort((a, b) => a - b);
@@ -159,7 +203,7 @@ export function buildHourlyGrid(records: readonly HistoryRecord[], leg: GridLeg)
     observedHours += 1;
   }
 
-  return { leg, startMs, cells, observedHours, missingHours: length - observedHours };
+  return { leg, startMs, cells, observedHours, missingHours: length - observedHours, legacyRecords };
 }
 
 /** La celda del índice, o `null` si es hueco o cae fuera. */

@@ -136,6 +136,8 @@ export function makeSnapshot(overrides: Partial<MarketSnapshot> = {}): MarketSna
     aggregatesProvenance: 'AGGREGATED',
     orderBookProvenance: 'REAL',
     strategicProvenance: 'STRATEGIC',
+    qualityExcluded: [],
+    strategicOutlierWatch: { buyFlagged: 0, sellFlagged: 0, buyDecidable: false, sellDecidable: false },
     ...overrides,
   };
 }

@@ -184,6 +184,7 @@ describe('normalizeAds', () => {
 
     expect(ad).toEqual({
       advNo: 'A1',
+      promoted: null,
       price: 919.55,
       minAmountVes: 2000,
       maxAmountVes: 80000,
@@ -441,7 +442,15 @@ describe('FASE 2 - medians agree across both sides', () => {
     stubSides(level, [...level, 980]);
     const snap = await BinanceP2PService.fetchFullMarketSnapshot();
 
-    expect(snap.bestSellPrice).toBe(980); // raw extreme preserved for auditing
+    /*
+     * CONTRATO ACTUALIZADO: el 980 ya no participa en el precio de la captura.
+     * La mediana seguía siendo robusta a él - ése era el punto de FASE 2 - pero
+     * el EXTREMO no lo era, y era el extremo el que llegaba al histórico y a la
+     * pantalla. Ahora el extremo es el mejor de los ELEGIBLES y el 980 queda
+     * registrado aparte, con su precio y su motivo: se audita mejor, no peor.
+     */
+    expect(snap.bestSellPrice).toBe(921.9);
+    expect(snap.qualityExcluded.map((e) => e.price)).toContain(980);
     expect(snap.medianSellPrice).toBeCloseTo(921.48, 1); // strategic level intact
     expect(snap.medianSellPrice! - snap.medianBuyPrice!).toBeLessThan(0.1);
   });

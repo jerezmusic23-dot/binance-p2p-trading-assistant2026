@@ -28,8 +28,10 @@ import {
   ExecutablePair,
   NormalizedAd,
   PairSearchReport,
+  QualityExclusion,
 } from './types.js';
 import { verifyBank } from './bankMatching.js';
+import { classifySide, exclusionRow } from './adQuality.js';
 import { round2, signedSpreadPct } from './marketStatistics.js';
 
 /** The amount tiers the bank matrix already works in, in VES. */
@@ -66,6 +68,8 @@ const REJECTION_REASONS: Record<ExecutabilityRejection, string> = {
   LIQUIDITY_INSUFFICIENT: 'El volumen publicado no cubre el monto solicitado.',
   LIQUIDITY_NOT_VERIFIABLE:
     'Binance no publico volumen para este anuncio. No se inventa liquidez: la operacion queda sin verificar.',
+  AD_QUALITY_EXCLUDED:
+    'El anuncio no paso la clasificacion de calidad: no describe el mercado y no puede formar parte de una operacion.',
 };
 
 /**
@@ -412,15 +416,33 @@ export function evaluateBankAmount(params: {
    * is deliberately the only place the sell side is evaluated leniently, and
    * nothing downstream reads these quotes as executable operations.
    */
-  const allBuy = buyAds.map((ad) =>
+  /*
+   * CALIDAD ANTES QUE EJECUTABILIDAD.
+   *
+   * Un anuncio anómalo puede tener banco verificado, límites compatibles y
+   * volumen publicado: las cuatro puertas de `evaluateAd` lo dejan pasar, y
+   * entonces se convierte en el extremo del par. Por eso la clase del anuncio
+   * se decide ANTES, sobre la distribución de su propio lado.
+   *
+   * Los apartados NO desaparecen: viajan en `qualityExcluded` con su motivo.
+   */
+  const buyClass = classifySide(buyAds, sellAds, 'ASK', amountVes);
+  const sellClass = classifySide(sellAds, buyAds, 'BID', amountVes);
+
+  const allBuy = buyClass.executionEligible.map((ad) =>
     evaluateAd(ad, { bank, allowedCodes, amountVes, side: 'BUY' })
   );
   const buyQuotes = allBuy.filter((q) => q.provenance === 'EXECUTABLE');
 
-  const allSell = sellAds.map((ad) =>
+  const allSell = sellClass.executionEligible.map((ad) =>
     evaluateAd(ad, { bank, allowedCodes, amountVes, side: 'SELL', requiredUsdt: 0 })
   );
   const sellQuotes = allSell.filter((q) => q.provenance === 'EXECUTABLE');
+
+  const qualityExcluded: QualityExclusion[] = [
+    ...buyClass.notNormal.map((c) => exclusionRow(c, 'BUY')),
+    ...sellClass.notNormal.map((c) => exclusionRow(c, 'SELL')),
+  ];
 
   const search = selectExecutablePair({
     buyCandidates: buyQuotes,
@@ -499,6 +521,7 @@ export function evaluateBankAmount(params: {
      * Rounding is a presentation concern and belongs in the view.
      */
     spreadPct: search.pair?.spreadPct ?? null,
+    qualityExcluded,
     buyReason: bestExecutableBuy === null ? noneReason('compra', allBuy.length) : null,
     sellReason: bestExecutableSell === null ? noneReason('venta', allSell.length) : null,
     buyRejections: tally(allBuy),

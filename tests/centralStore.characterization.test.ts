@@ -451,9 +451,21 @@ describe('evaluateAlerts', () => {
 
     const snapshot = await store.pollMarket();
 
-    // The raw extreme is preserved for auditing...
-    expect(snapshot?.bestSellPrice).toBe(980);
-    expect(snapshot?.spreadPercentage).toBeGreaterThan(6);
+    /*
+     * CONTRATO ACTUALIZADO POR LA PUERTA DE CALIDAD.
+     *
+     * Antes, `bestSellPrice` conservaba el 980 crudo y el spread mostrado leía
+     * 6.64%. Ahora el anuncio anómalo no participa en el precio: el extremo es
+     * el mejor de los ELEGIBLES. El rastro de auditoría no se pierde - mejora -
+     * porque el 980 viaja en `qualityExcluded` con su precio y su motivo, en
+     * vez de quedar escondido dentro de un precio agregado.
+     */
+    expect(snapshot?.bestSellPrice).toBe(921.9);
+    expect(snapshot?.spreadPercentage).toBeLessThan(1);
+    const excluded = snapshot?.qualityExcluded.find((e) => e.advNo === 'outlier');
+    expect(excluded?.quality).toBe('OUTLIER');
+    expect(excluded?.price).toBe(980);
+    expect(excluded?.reason).toMatch(/mediana de su lado/);
     // ...but the strategic level is where the market actually is.
     expect(snapshot?.strategicSpreadPct).toBeLessThan(0.2);
     // ...and no alert was raised.
@@ -517,7 +529,14 @@ describe('evaluateAlerts', () => {
 
     const snapshot = await store.pollMarket();
 
-    expect(snapshot?.bestBuyPrice).toBe(900); // the extreme is under the threshold
+    /*
+     * El 900 era el extremo que quedaba por debajo del umbral. Ahora no
+     * participa en el precio - es un OUTLIER frente a su propio lado - y queda
+     * registrado como excluido. La alerta sigue decidiendo sobre el estratégico
+     * y sigue sin dispararse, que es lo que este test comprueba.
+     */
+    expect(snapshot?.bestBuyPrice).toBe(921);
+    expect(snapshot?.qualityExcluded.some((e) => e.price === 900 && e.quality === 'OUTLIER')).toBe(true);
     expect(snapshot?.strategicBuyPrice).toBeGreaterThan(910);
     expect(fs.existsSync(path.join(tmpDir, 'data', 'alert_triggers.json'))).toBe(false);
   });

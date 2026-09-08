@@ -114,7 +114,9 @@ function synthetic(regime: Regime, hours: number, seed: number, perHour = 12): H
  * ════════════════════════════════════════════════════════════════════════ */
 describe('1. la semántica del libro no se puede invertir', () => {
   it('cada pierna lee su propio campo, declarado en un solo sitio', () => {
-    expect(GRID_FIELD).toEqual({ VENTA: 'sellPrice', COMPRA: 'buyPrice' });
+    // Referencia ROBUSTA (mediana de la captura), no el extremo. El LADO de
+    // Binance no cambia: COMPRA sigue leyendo el lado BUY y VENTA el lado SELL.
+    expect(GRID_FIELD).toEqual({ VENTA: 'strategicSellPrice', COMPRA: 'strategicBuyPrice' });
   });
 
   it('VENTA sale de sellPrice y COMPRA de buyPrice, nunca cruzados', () => {
@@ -481,7 +483,13 @@ describe('10. el motor lee sólo el libro general', () => {
       'hourlyGrid.ts', 'marketFeatures.ts', 'forecastModels.ts', 'walkForward.ts', 'decisionEngine.ts',
     ]) {
       const src = fs.readFileSync(`server/projection/${file}`, 'utf8');
-      expect(src, file).not.toMatch(/HistoricalMarketStore|makerMatrix|executableMatrix|strategicBuyPrice|strategicSellPrice/);
+      /*
+       * `strategicBuyPrice`/`strategicSellPrice` YA NO se vetan: son la mediana
+       * del MISMO lado general del que `buyPrice`/`sellPrice` son el extremo, y
+       * la rejilla los usa a propósito. Lo que se sigue vetando es cualquier
+       * fuente POR BANCO, que es lo que este guardián existe para impedir.
+       */
+      expect(src, file).not.toMatch(/HistoricalMarketStore|makerMatrix|executableMatrix|filterBank|apiPayTypes/);
     }
     const top = fs.readFileSync('server/marketDecision.ts', 'utf8');
     expect(top).not.toMatch(/HistoricalMarketStore|makerMatrix|executableMatrix/);

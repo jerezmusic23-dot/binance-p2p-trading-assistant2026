@@ -688,6 +688,8 @@ export class CentralMarketStore {
           aggregatesProvenance: 'REAL',
           orderBookProvenance: 'REAL',
           strategicProvenance: 'STRATEGIC',
+          qualityExcluded: [],
+          strategicOutlierWatch: { buyFlagged: 0, sellFlagged: 0, buyDecidable: false, sellDecidable: false },
         };
       }
       this.reportCaptureState(

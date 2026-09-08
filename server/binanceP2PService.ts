@@ -11,7 +11,8 @@ import {
   MarketSnapshot,
   Valued,
 } from './types.js';
-import { describeSide, round2, signedSpreadPct, weightedAverage } from './marketStatistics.js';
+import { describeSide, detectOutliers, round2, signedSpreadPct, weightedAverage } from './marketStatistics.js';
+import { classifySide, exclusionRow } from './adQuality.js';
 
 export interface P2PSearchParams {
   asset?: string;
@@ -99,6 +100,37 @@ function liquidityWeightedPrice(ads: NormalizedAd[]): number | null {
   );
 }
 
+/**
+ * La bandera de promoción que Binance haya publicado, sin deducir nada.
+ *
+ * ═══ LIMITACIÓN, DECLARADA ═══
+ *
+ * No se ha podido inspeccionar una respuesta RAW real de
+ * `/bapi/c2c/v2/friendly/c2c/adv/search` desde este entorno (el proxy de
+ * egreso deniega el host), así que el NOMBRE del campo que Binance usa para
+ * marcar un anuncio promocionado NO está confirmado. Aquí se leen sólo
+ * booleanos ESTRICTAMENTE `true` en campos con nombre de promoción; cualquier
+ * otra cosa devuelve `null`.
+ *
+ * `null` = DESCONOCIDO, jamás "no promocionado". No se infiere promoción del
+ * precio, del volumen ni de la posición en la lista: una heurística que
+ * convirtiera anuncios normales en PROMOTED sería exactamente el tipo de dato
+ * inventado que este proyecto no admite.
+ *
+ * Cuando se disponga de un RAW real, basta comprobar el nombre real del campo
+ * y añadirlo a `PROMOTION_KEYS`.
+ */
+const PROMOTION_KEYS = ['isPromoted', 'promoted', 'advPromoted'] as const;
+
+function readPromotedFlag(adv: unknown): boolean | null {
+  if (adv === null || typeof adv !== 'object') return null;
+  const record = adv as Record<string, unknown>;
+  for (const key of PROMOTION_KEYS) {
+    if (record[key] === true) return true;
+  }
+  return null;
+}
+
 export class BinanceP2PService {
   private static readonly ENDPOINT = 'https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search';
   private static readonly TIMEOUT_MS = 12000;
@@ -175,6 +207,7 @@ export class BinanceP2PService {
 
       list.push({
         advNo: item.adv.advNo,
+        promoted: readPromotedFlag(item.adv),
         price,
         minAmountVes,
         maxAmountVes,
@@ -213,19 +246,68 @@ export class BinanceP2PService {
       throw new Error('No active P2P ads found for the specified criteria after reference filtering.');
     }
 
-    const buyStats = describeSide(topBuyAds.map((a) => a.price));
-    const sellStats = describeSide(topSellAds.map((a) => a.price));
-    const hasBuySide = buyStats.count > 0;
-    const hasSellSide = sellStats.count > 0;
+    /*
+     * CALIDAD ANTES DEL EXTREMO.
+     *
+     * `bestBuyPrice` es un MÍNIMO y `bestSellPrice` un MÁXIMO, así que un solo
+     * anuncio anómalo se convierte en el precio del mercado. Medido sobre
+     * precios reales: un anuncio a 920.659 en el lado BUY movía bestBuyPrice de
+     * 969.30 a 920.66 y el spread de +0.0878% a +5.3756%.
+     *
+     * Los anuncios apartados NO se borran de `topBuyAds`/`topSellAds`: la UI
+     * sigue viendo el libro entero y `qualityExcluded` dice cuáles no cuentan y
+     * por qué. Lo que cambia es de qué anuncios sale el precio.
+     */
+    const buyClass = classifySide(topBuyAds, topSellAds, 'ASK');
+    const sellClass = classifySide(topSellAds, topBuyAds, 'BID');
+    const qualityExcluded = [
+      ...buyClass.notNormal.map((c) => exclusionRow(c, 'BUY')),
+      ...sellClass.notNormal.map((c) => exclusionRow(c, 'SELL')),
+    ];
 
-    const bestBuyPrice = round2(buyStats.min);
-    const bestSellPrice = round2(sellStats.max);
+    /*
+     * DOS ESTADÍSTICOS, DOS POBLACIONES.
+     *
+     * El EXTREMO describe con quién puedo operar -> anuncios ejecutables.
+     * La MEDIANA describe dónde está el mercado  -> anuncios de referencia
+     * (que excluyen además las colocaciones pagadas).
+     */
+    const buyExecStats = describeSide(buyClass.executionEligible.map((a) => a.price));
+    const sellExecStats = describeSide(sellClass.executionEligible.map((a) => a.price));
+
+    const buyEligiblePrices = buyClass.referenceEligible.map((a) => a.price);
+    const sellEligiblePrices = sellClass.referenceEligible.map((a) => a.price);
+    const buyStats = describeSide(buyEligiblePrices);
+    const sellStats = describeSide(sellEligiblePrices);
+
+    /*
+     * VIGILANCIA DEL NIVEL ESTRATÉGICO (D3).
+     *
+     * `detectOutliers` no decide elegibilidad - se comprobó que sobre un libro
+     * apretado marca el mejor precio legítimo, y que con MAD 0 no marca nada -
+     * pero es exactamente la herramienta para la que fue escrita: avisar de que
+     * la MEDIANA se está calculando sobre una distribución que aún contiene
+     * valores lejanos. Es un aviso auditable, no una puerta.
+     */
+    const buyWatch = detectOutliers(buyEligiblePrices);
+    const sellWatch = detectOutliers(sellEligiblePrices);
+    const strategicOutlierWatch = {
+      buyFlagged: buyWatch.outlierIndices.length,
+      sellFlagged: sellWatch.outlierIndices.length,
+      buyDecidable: buyWatch.isDecidable,
+      sellDecidable: sellWatch.isDecidable,
+    };
+    const hasBuySide = buyExecStats.count > 0;
+    const hasSellSide = sellExecStats.count > 0;
+
+    const bestBuyPrice = round2(buyExecStats.min);
+    const bestSellPrice = round2(sellExecStats.max);
     const averageBuyPrice = round2(buyStats.mean);
     const averageSellPrice = round2(sellStats.mean);
     const medianBuyPrice = round2(buyStats.median);
     const medianSellPrice = round2(sellStats.median);
-    const weightedBuyPrice = liquidityWeightedPrice(topBuyAds);
-    const weightedSellPrice = liquidityWeightedPrice(topSellAds);
+    const weightedBuyPrice = liquidityWeightedPrice(buyClass.referenceEligible);
+    const weightedSellPrice = liquidityWeightedPrice(sellClass.referenceEligible);
 
     const spreadAbsolute = bestBuyPrice !== null && bestSellPrice !== null ? round2(bestSellPrice - bestBuyPrice) : null;
     const spreadPercentage = signedSpreadPct(bestSellPrice, bestBuyPrice);
@@ -272,6 +354,8 @@ export class BinanceP2PService {
       strategicReason,
       topBuyAds,
       topSellAds,
+      qualityExcluded,
+      strategicOutlierWatch,
       source: 'BINANCE_P2P',
       fetchDurationMs: duration,
       status: 'LIVE',

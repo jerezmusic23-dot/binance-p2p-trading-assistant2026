@@ -188,6 +188,60 @@ export interface AdPaymentMethod {
  */
 export type BankVerification = 'VERIFIED' | 'NOT_VERIFIED' | 'NOT_VERIFIABLE';
 
+/**
+ * CALIDAD DEL ANUNCIO. Propiedad del anuncio, independiente de BUY/SELL.
+ *
+ * NORMAL       - describe el mercado; es el único que entra al libro ejecutable.
+ * PROMOTED     - Binance lo publicó como promocionado. Ver la limitación en
+ *                `normalizeAds`: hoy sólo se asigna si el RAW trae la bandera.
+ * OUTLIER      - se aleja de la distribución de su propio lado (regla A).
+ * UNVERIFIABLE - no hay datos suficientes sobre el anuncio para juzgarlo.
+ */
+export type AdQuality = 'NORMAL' | 'PROMOTED' | 'OUTLIER' | 'UNVERIFIABLE';
+
+/** Un anuncio apartado por calidad, con lo necesario para auditarlo. */
+export interface QualityExclusion {
+  advNo: string;
+  side: 'BUY' | 'SELL';
+  price: number;
+  quality: AdQuality;
+  /** Qué regla produjo el veredicto. */
+  rule: 'A_RELATIVE_DEVIATION' | 'PROMOTION_FLAG' | 'LIQUIDITY_NOT_PUBLISHED' | 'NOT_ASSESSED';
+  reason: string;
+  /** Evidencia de A: desviación relativa a la mediana de los comparables. */
+  deviationPct: number | null;
+  /** Evidencia de C: contradice la distribución del lado contrario. */
+  crossSideFlag: boolean;
+  /** false cuando no había comparables suficientes para juzgar. */
+  assessed: boolean;
+  /** Qué publicó Binance sobre el volumen. null = no lo publicó. */
+  availableUsdtReported: number | null;
+  /** Qué publicó Binance sobre la promoción. null = DESCONOCIDO. */
+  promoted: boolean | null;
+  /** Puede formar parte de una operación. */
+  executionEligible: boolean;
+  /** Puede definir el nivel del mercado. */
+  referenceEligible: boolean;
+}
+
+export interface AdQualityVerdict {
+  quality: AdQuality;
+  /** Qué regla produjo este veredicto. */
+  rule: 'A_RELATIVE_DEVIATION' | 'PROMOTION_FLAG' | 'LIQUIDITY_NOT_PUBLISHED' | 'NOT_ASSESSED';
+  /** Por qué, en palabras que se pueden contrastar contra los datos. */
+  reason: string;
+  /** Desviación relativa a la mediana de su lado, en %. null si no se juzgó. */
+  deviationPct: number | null;
+  /**
+   * La regla C encontró que el precio contradice al lado contrario.
+   * DESCRIPTIVO: por sí solo NUNCA excluye - un ask por debajo del bid es
+   * exactamente la oportunidad que se busca.
+   */
+  crossSideFlag: boolean;
+  /** false cuando el lado tenía menos anuncios de los necesarios para juzgar. */
+  assessed: boolean;
+}
+
 export interface NormalizedAd {
   advNo: string;
   price: number;
@@ -204,6 +258,17 @@ export interface NormalizedAd {
   userType: string;
   ordersCount: number;
   finishRate: number;
+  /**
+   * Lo que Binance dijo sobre la promoción del anuncio, VERBATIM.
+   *
+   *   true  - el RAW trae una bandera inequívoca de promoción.
+   *   null  - el RAW no la trae, o no se reconoce el campo.
+   *
+   * `null` significa DESCONOCIDO, nunca "no promocionado": promoción
+   * desconocida no es promoción confirmada, y no se deduce de heurísticas
+   * sobre el precio. Ver la limitación documentada en `normalizeAds`.
+   */
+  promoted?: boolean | null;
   /**
    * Human-readable labels. UNCHANGED: existing consumers (OrderBookView)
    * still read this. Never used for bank verification.
@@ -276,6 +341,24 @@ export interface MarketSnapshot {
   // Raw ad lists
   topBuyAds: NormalizedAd[];
   topSellAds: NormalizedAd[];
+  /**
+   * Anuncios que NO contaron para los precios de esta captura, con su motivo.
+   * Siguen presentes en topBuyAds/topSellAds: se apartan del cálculo, no del
+   * libro, para que nada desaparezca en silencio.
+   */
+  qualityExcluded: QualityExclusion[];
+  /**
+   * Aviso, no puerta: cuántos precios YA elegibles siguen marcados como
+   * lejanos por `detectOutliers` (z modificado sobre la MAD). Sirve para saber
+   * si la mediana de la captura se está calculando sobre una distribución
+   * todavía dispersa. No excluye a nadie.
+   */
+  strategicOutlierWatch: {
+    buyFlagged: number;
+    sellFlagged: number;
+    buyDecidable: boolean;
+    sellDecidable: boolean;
+  };
   
   // Health & Source metadata
   source: 'BINANCE_P2P';
@@ -579,7 +662,9 @@ export type ExecutabilityRejection =
   | 'AMOUNT_BELOW_MIN'
   | 'AMOUNT_ABOVE_MAX'
   | 'LIQUIDITY_INSUFFICIENT'
-  | 'LIQUIDITY_NOT_VERIFIABLE';
+  | 'LIQUIDITY_NOT_VERIFIABLE'
+  /** El anuncio no pasó la clasificación de calidad (OUTLIER/PROMOTED/UNVERIFIABLE). */
+  | 'AD_QUALITY_EXCLUDED';
 
 /** What the merchant's record says. Observed values only - no score. */
 export interface MerchantQuality {
@@ -672,6 +757,12 @@ export interface BankAmountExecutability {
   pair: ExecutablePair | null;
   /** Why there is no pair, when there is none. */
   noPairReason: string | null;
+  /**
+   * Anuncios apartados por su CLASE antes de mirar la ejecutabilidad, con el
+   * motivo. Existe para que un anuncio excluido nunca desaparezca en silencio:
+   * la matriz y la UI pueden decir por qué no está.
+   */
+  qualityExcluded: QualityExclusion[];
   /**
    * How the pair was searched for, and what was in range.
    *
