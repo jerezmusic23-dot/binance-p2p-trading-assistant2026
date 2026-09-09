@@ -64,6 +64,30 @@ export {
   venezuelaWeekday,
 } from './venezuelaClock.js';
 export { InvalidInstantError, assertInstant } from './venezuelaClock.js';
+/*
+ * El resumen horario vive en su propio módulo (`hourSummary.ts`): decidir qué
+ * número representa una hora es una responsabilidad distinta de proyectar.
+ * Se re-exporta para que los consumidores existentes sigan importando de aquí.
+ */
+export {
+  extremeForLeg,
+  groupByDay,
+  isBetterForLeg,
+  medianOf,
+  type DayShape,
+  type HourCell,
+  type HourSummary,
+  type MakerLeg,
+} from './hourSummary.js';
+import {
+  groupByDay,
+  isBetterForLeg,
+  medianOf,
+  type DayShape,
+  type HourCell,
+  type HourSummary,
+  type MakerLeg,
+} from './hourSummary.js';
 import { binomialTailProbability } from './probability.js';
 import { buildDayIndex, hourCellAhead, hourStartMs, ratiosAhead, remainingExtremeRatios } from './dayIndex.js';
 /*
@@ -93,7 +117,6 @@ export type { ResolvedHour, RatioSample } from './dayIndex.js';
 export const DEFAULT_HORIZON_HOURS = 24;
 
 /** La operación del propietario. Nunca el lado de Binance a secas. */
-export type MakerLeg = 'VENTA' | 'COMPRA';
 
 /**
  * De qué lado de Binance se lee cada pierna. ÚNICA definición del módulo.
@@ -173,90 +196,7 @@ export type DailyEvidenceLevel =
   | 'EVIDENCIA_FUERTE';
 
 
-/**
- * ¿Mejora `candidate` a `incumbent` PARA ESTA PIERNA?
- *
- * VENTA quiere el más alto (vendo más caro). COMPRA quiere el más bajo
- * (recompro más barato). Es la regla de la que cuelga todo lo demás.
- *
- * ═══ POR QUÉ COMPRUEBA LA PIERNA EN VEZ DE USAR UN TERNARIO ═══
- *
- * Escrito como `leg === 'VENTA' ? mayor : menor`, cualquier valor que no fuera
- * exactamente 'VENTA' —undefined incluido— caía en la rama de COMPRA y el motor
- * devolvía mínimos donde debía devolver máximos, sin un solo error. Ocurrió: una
- * llamada a la que le faltaba el argumento produjo un backtest entero con la
- * pierna equivocada y resultados que parecían razonables. TypeScript lo impide
- * en compilación; esto lo impide también en ejecución, que es donde llegan los
- * datos de fuera.
- */
-export function isBetterForLeg(leg: MakerLeg, candidate: number, incumbent: number): boolean {
-  if (leg === 'VENTA') return candidate > incumbent;
-  if (leg === 'COMPRA') return candidate < incumbent;
-  throw new Error(`Pierna desconocida: ${String(leg)}. Debe ser VENTA o COMPRA.`);
-}
 
-/** El extremo de la pierna: máximo para VENTA, mínimo para COMPRA. */
-export function extremeForLeg(leg: MakerLeg, values: readonly number[]): number | null {
-  let best: number | null = null;
-  for (const v of values) {
-    if (!Number.isFinite(v) || v <= 0) continue;
-    if (best === null || isBetterForLeg(leg, v, best)) best = v;
-  }
-  return best;
-}
-
-export interface HourCell {
-  hour: number;
-  /** El extremo de la pierna dentro de esa hora. */
-  best: number;
-  observations: number;
-  lastT: number;
-}
-
-export interface DayShape {
-  dayKey: string;
-  weekday: number;
-  /** Sólo horas realmente observadas. Las que faltan NO se rellenan. */
-  hours: Map<number, HourCell>;
-}
-
-/**
- * Agrupa una serie en días y horas locales quedándose con el extremo de la
- * pierna. Las 24 horas cuentan: no hay ventana que descarte ninguna.
- */
-export function groupByDay(points: readonly SeriesPoint[], leg: MakerLeg): DayShape[] {
-  const days = new Map<string, DayShape>();
-
-  for (const p of points) {
-    if (!Number.isFinite(p.t) || !Number.isFinite(p.price) || p.price <= 0) continue;
-    const hour = venezuelaHourOf(p.t);
-
-    const key = venezuelaDayKey(p.t);
-    let day = days.get(key);
-    if (day === undefined) {
-      day = { dayKey: key, weekday: venezuelaWeekday(p.t), hours: new Map() };
-      days.set(key, day);
-    }
-
-    const cell = day.hours.get(hour);
-    if (cell === undefined) {
-      day.hours.set(hour, { hour, best: p.price, observations: 1, lastT: p.t });
-      continue;
-    }
-    cell.observations += 1;
-    if (p.t > cell.lastT) cell.lastT = p.t;
-    if (isBetterForLeg(leg, p.price, cell.best)) cell.best = p.price;
-  }
-
-  return [...days.values()].sort((a, b) => a.dayKey.localeCompare(b.dayKey));
-}
-
-export function medianOf(values: readonly number[]): number | null {
-  if (values.length === 0) return null;
-  const s = [...values].sort((a, b) => a - b);
-  const mid = Math.floor(s.length / 2);
-  return s.length % 2 === 1 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
-}
 
 export type BandKind = 'P10_P90' | 'RANGO_OBSERVADO';
 
@@ -337,15 +277,15 @@ export function projectHour(
  */
 export function openToHourRatio(day: DayShape, hour: number): number | null {
   const target = day.hours.get(hour);
-  if (target === undefined || target.best <= 0) return null;
+  if (target === undefined || target.reference <= 0) return null;
 
   let openHour = Number.POSITIVE_INFINITY;
   for (const h of day.hours.keys()) if (h < openHour && h <= hour) openHour = h;
   if (!Number.isFinite(openHour) || openHour >= hour) return null;
 
   const open = day.hours.get(openHour);
-  if (open === undefined || open.best <= 0) return null;
-  return target.best / open.best;
+  if (open === undefined || open.reference <= 0) return null;
+  return target.reference / open.reference;
 }
 
 /**
@@ -358,9 +298,9 @@ export function realisedVolatilityUpTo(day: DayShape, hour: number): number | nu
   const moves: number[] = [];
   for (let i = 1; i < hours.length; i += 1) {
     if (hours[i].hour !== hours[i - 1].hour + 1) continue;
-    const from = hours[i - 1].best;
+    const from = hours[i - 1].reference;
     if (from <= 0) continue;
-    moves.push(Math.abs((hours[i].best - from) / from));
+    moves.push(Math.abs((hours[i].reference - from) / from));
   }
   return medianOf(moves);
 }
@@ -458,13 +398,19 @@ export interface LegProjection {
  * `now` se pasa explícito para que la función sea determinista y para que el
  * backtest pueda situarse en un instante del pasado sin tocar el reloj.
  */
+/**
+ * `summary` decide cómo se resume cada hora antes de proyectar. Por defecto
+ * `'EXTREME'`, que preserva el comportamiento de todos los consumidores
+ * existentes; la ruta estratégica de `dailyProjection.ts` pide `'MEDIAN'`.
+ */
 export function projectLeg(
   points: readonly SeriesPoint[],
   leg: MakerLeg,
   now: number,
-  horizonHours = DEFAULT_HORIZON_HOURS
+  horizonHours = DEFAULT_HORIZON_HOURS,
+  summary: HourSummary = 'EXTREME'
 ): LegProjection {
-  const all = groupByDay(points, leg);
+  const all = groupByDay(points, leg, summary);
   const todayKey = venezuelaDayKey(now);
   return projectLegFromDays(all, leg, todayKey, venezuelaHourOf(now), horizonHours);
 }
@@ -504,12 +450,12 @@ export function projectLegFromDays(
     const before = i > 0 ? observedHours[i - 1] : null;
     // Sólo entre horas contiguas: saltar un hueco daría un "movimiento por
     // hora" que en realidad son varias.
-    const contiguous = before !== null && before.hour === c.hour - 1 && before.best > 0;
+    const contiguous = before !== null && before.hour === c.hour - 1 && before.reference > 0;
     return {
       hour: c.hour,
-      price: c.best,
+      price: c.reference,
       observations: c.observations,
-      movePct: contiguous ? ((c.best - before!.best) / before!.best) * 100 : null,
+      movePct: contiguous ? ((c.reference - before!.reference) / before!.reference) * 100 : null,
     };
   });
 
@@ -522,7 +468,7 @@ export function projectLegFromDays(
 
   const anchorCell = today?.hours.get(anchorHour) ?? null;
   // Si la hora en curso aún no tiene observación, se ancla en la última que sí.
-  const anchorPrice = anchorCell?.best ?? (real.length > 0 ? real[real.length - 1].price : null);
+  const anchorPrice = anchorCell?.reference ?? (real.length > 0 ? real[real.length - 1].price : null);
 
   const base: LegProjection = {
     leg,

@@ -86,10 +86,10 @@ export function ratiosAhead(
   const out: RatioSample[] = [];
   for (const day of days) {
     const a = day.hours.get(anchorHour);
-    if (a === undefined || a.best <= 0) continue;
+    if (a === undefined || a.reference <= 0) continue;
     const target = hourCellAhead(index, day.dayKey, anchorHour, hoursAhead);
-    if (target === undefined || target.cell.best <= 0) continue;
-    out.push({ dayKey: day.dayKey, ratio: target.cell.best / a.best });
+    if (target === undefined || target.cell.reference <= 0) continue;
+    out.push({ dayKey: day.dayKey, ratio: target.cell.reference / a.reference });
   }
   return out;
 }
@@ -116,16 +116,16 @@ export function remainingExtremeRatios(
   const out: RatioSample[] = [];
   for (const day of days) {
     const anchor = day.hours.get(anchorHour);
-    if (anchor === undefined || anchor.best <= 0) continue;
+    if (anchor === undefined || anchor.reference <= 0) continue;
 
     const future: number[] = [];
     for (let k = 1; k <= horizonHours; k += 1) {
       const target = hourCellAhead(index, day.dayKey, anchorHour, k);
-      if (target !== undefined) future.push(target.cell.best);
+      if (target !== undefined) future.push(target.cell.reference);
     }
     const extreme = extremeForLeg(leg, future);
     if (extreme === null) continue;
-    out.push({ dayKey: day.dayKey, ratio: extreme / anchor.best });
+    out.push({ dayKey: day.dayKey, ratio: extreme / anchor.reference });
   }
   return out;
 }

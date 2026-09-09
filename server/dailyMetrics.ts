@@ -15,6 +15,7 @@ import {
   hourCellAhead,
   type LegProjection,
   type MakerLeg,
+  type HourSummary,
 } from './projection/dailyShape.js';
 import type { SeriesPoint } from './projection/series.js';
 import { percentileOf } from './projection/series.js';
@@ -57,21 +58,27 @@ export function fullPath(p: LegProjection): PathPoint[] {
  * Recorridos absolutos ancla→`horizonHours` observados en los días del
  * histórico. Cruza medianoche vía `hourCellAhead`, igual que la proyección.
  */
+/**
+ * `summary` debe coincidir con el de la proyección que se va a evaluar: medir
+ * los movimientos históricos con un estadístico horario distinto del que
+ * proyecta compararía dos series que no son la misma.
+ */
 export function historicalDayMoves(
   points: readonly SeriesPoint[],
   leg: MakerLeg,
   anchorHour: number,
-  horizonHours: number
+  horizonHours: number,
+  summary: HourSummary = 'EXTREME'
 ): number[] {
-  const days = groupByDay(points, leg);
+  const days = groupByDay(points, leg, summary);
   const index = buildDayIndex(days);
   const moves: number[] = [];
   for (const day of days) {
     const from = day.hours.get(anchorHour);
-    if (from === undefined || from.best <= 0) continue;
+    if (from === undefined || from.reference <= 0) continue;
     const to = hourCellAhead(index, day.dayKey, anchorHour, horizonHours);
     if (to === undefined) continue;
-    moves.push(Math.abs((to.cell.best - from.best) / from.best) * 100);
+    moves.push(Math.abs((to.cell.reference - from.reference) / from.reference) * 100);
   }
   return moves;
 }

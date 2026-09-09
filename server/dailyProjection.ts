@@ -13,20 +13,16 @@
  *
  *   VENTA  = strategicSellPrice   COMPRA = strategicBuyPrice
  *
- * Un extremo sigue al anuncio más lejano, no al mercado: medido, un único
- * anuncio a 920.659 movía el extremo 48.64 VES mientras la mediana se movía
- * 0.05, y proyectar desde ahí anclaba la proyección entera a un anuncio que
- * probablemente nadie puede ejecutar. Es la misma referencia que ya usan
- * `projection/hourlyGrid.ts` y las alertas de Telegram, así que las tres piezas
- * hablan de un único "nivel de mercado".
- * LOS EXTREMOS NO DESAPARECEN. `sellPrice`/`buyPrice` siguen siendo el mejor
- * precio EJECUTABLE y se publican aparte, en `executableExtreme`:
+ * Un extremo sigue al anuncio más lejano, no al mercado: un único anuncio a
+ * 920.659 movía el extremo 48.64 VES mientras la mediana se movía 0.05. Es la
+ * misma referencia que ya usan `hourlyGrid.ts` y las alertas de Telegram.
+ * LOS EXTREMOS NO DESAPARECEN: `sellPrice`/`buyPrice` siguen siendo el mejor
+ * precio EJECUTABLE y se publican aparte, en `executableExtreme`.
  *
  *   referencia estratégica -> dónde está el mercado -> se proyecta
  *   extremo ejecutable     -> con quién puedo operar -> NO se proyecta
- * REGISTROS LEGACY: uno anterior a `v2-strategic` no tiene mediana, así que usa
- * el extremo -lo único que observó- y suma en `legacyRecords`. No se fabrica
- * una mediana retrospectiva para tapar la ausencia.
+ * REGISTROS LEGACY: uno anterior a `v2-strategic` usa el extremo -lo único que
+ * observó- y suma en `legacyRecords`. No se fabrica una mediana retrospectiva.
  */
 
 import { StorageEngine } from './storage.js';
@@ -44,6 +40,7 @@ import {
   venezuelaHourOf,
   type DailyEvidenceLevel,
   type DailyTier,
+  type HourSummary,
   type LegProjection,
   type MakerLeg,
 } from './projection/dailyShape.js';
@@ -115,8 +112,7 @@ export interface LegExtraction {
 
 /**
  * El mejor precio EJECUTABLE de la hora en curso. Se publica junto a la
- * proyección pero no forma parte de ella: es con quién se opera, no dónde está
- * el mercado.
+ * proyección pero no forma parte de ella.
  */
 export interface ExecutableExtreme {
   leg: MakerLeg;
@@ -230,12 +226,10 @@ export function summariseProvenance(records: readonly HistoryRecord[]): DataProv
 }
 
 /**
- * De qué campo del histórico sale cada serie.
- *
+ * De qué campo del histórico sale cada serie. Dos preguntas distintas sobre la
+ * misma captura, que no se sustituyen:
  *   STRATEGIC  - la mediana del lado. Es lo que se PROYECTA.
- *   EXECUTABLE - el extremo del lado. Es el mejor precio con el que se OPERA.
- *
- * Son dos preguntas distintas sobre la misma captura y no se sustituyen.
+ *   EXECUTABLE - el extremo del lado. Es el precio con el que se OPERA.
  */
 export type LegSource = 'STRATEGIC' | 'EXECUTABLE';
 
@@ -255,15 +249,10 @@ function usableNumber(value: unknown): value is number {
 }
 
 /**
- * Fuente de la serie de una pierna.
- *
- * Por defecto la REFERENCIA ESTRATÉGICA, que es lo que se proyecta. El lado de
- * Binance no cambia: VENTA sigue leyendo el lado SELL y COMPRA el lado BUY;
- * lo que cambia es qué estadístico de ese lado se toma.
- *
- * Un registro sin referencia estratégica usa el extremo -lo único que observó-
- * y suma en `legacyRecords`. Nunca se descarta el registro ni se fabrica una
- * mediana que nadie midió.
+ * Fuente de la serie de una pierna. Por defecto la REFERENCIA ESTRATÉGICA. El
+ * lado de Binance no cambia -VENTA lee SELL y COMPRA lee BUY-; cambia qué
+ * estadístico de ese lado se toma. Un registro sin referencia usa el extremo,
+ * lo único que observó, y suma en `legacyRecords`.
  */
 export function extractLegSeries(
   records: readonly HistoryRecord[],
@@ -377,7 +366,8 @@ function summariseLeg(
   projection: LegProjection,
   points: readonly SeriesPoint[],
   turn: TurnThreshold,
-  horizonHours: number
+  horizonHours: number,
+  summary: HourSummary
 ): DailyMarketSummary {
   const close = projection.projectedClose;
   const anchor = projection.anchorPrice;
@@ -394,7 +384,7 @@ function summariseLeg(
   return {
     leg: projection.leg,
     direction,
-    speed: speedFor(changePct, historicalDayMoves(points, projection.leg, projection.anchorHour, horizonHours)),
+    speed: speedFor(changePct, historicalDayMoves(points, projection.leg, projection.anchorHour, horizonHours, summary)),
     changePct,
   };
 }
@@ -438,11 +428,8 @@ export function screenState(tier: DailyTier, legs: readonly DailyLegReport[]): S
 }
 
 /**
- * EL MEJOR PRECIO EJECUTABLE OBSERVADO EN LA HORA EN CURSO.
- *
- * Es un OBSERVADO, nunca un proyectado: describe con quién se puede operar
- * ahora mismo, y proyectarlo sería justamente el error que D4 corrige.
- * `null` cuando la hora en curso no tiene ninguna observación.
+ * Es un OBSERVADO, nunca un proyectado: proyectarlo sería el error que D4
+ * corrige. `null` cuando la hora en curso no tiene ninguna observación.
  */
 export function latestExecutableExtreme(
   points: readonly SeriesPoint[],
@@ -474,6 +461,13 @@ export function latestExecutableExtreme(
   };
 }
 
+/**
+ * Cómo resume una hora la ruta ESTRATÉGICA (D5): la mediana, por coherencia con
+ * `projection/hourlyGrid.ts`. Las dos rutas proyectan ya la misma referencia y
+ * ahora también con el mismo estadístico horario.
+ */
+export const STRATEGIC_SUMMARY: HourSummary = 'MEDIAN';
+
 export function buildDailyProjection(
   records: readonly HistoryRecord[],
   now: number,
@@ -492,12 +486,15 @@ export function buildDailyProjection(
    */
   const ventaExecutable = extractLegSeries(records, 'VENTA', 'EXECUTABLE');
   const compraExecutable = extractLegSeries(records, 'COMPRA', 'EXECUTABLE');
-  const venta = projectLeg(ventaSeries.points, 'VENTA', now, horizonHours);
-  const compra = projectLeg(compraSeries.points, 'COMPRA', now, horizonHours);
+  // D5: la hora se resume por su MEDIANA. `best` sigue disponible como dato
+  // descriptivo; cambia qué valor representa la hora en trayectoria, análogos,
+  // volatilidad realizada, umbral de giro y backtest.
+  const venta = projectLeg(ventaSeries.points, 'VENTA', now, horizonHours, STRATEGIC_SUMMARY);
+  const compra = projectLeg(compraSeries.points, 'COMPRA', now, horizonHours, STRATEGIC_SUMMARY);
 
   const todayKey = venezuelaDayKey(now);
-  const ventaDays = groupByDay(ventaSeries.points, 'VENTA');
-  const compraDays = groupByDay(compraSeries.points, 'COMPRA');
+  const ventaDays = groupByDay(ventaSeries.points, 'VENTA', STRATEGIC_SUMMARY);
+  const compraDays = groupByDay(compraSeries.points, 'COMPRA', STRATEGIC_SUMMARY);
   const previousVenta = ventaDays.filter((d) => d.dayKey < todayKey);
   const previousCompra = compraDays.filter((d) => d.dayKey < todayKey);
 
@@ -521,7 +518,7 @@ export function buildDailyProjection(
       evidenceText: DAILY_EVIDENCE_TEXT[evidence],
       label: LEG_LABEL[projection.leg],
       extraction,
-      market: summariseLeg(projection, points, turn, horizonHours),
+      market: summariseLeg(projection, points, turn, horizonHours, STRATEGIC_SUMMARY),
       now: projection.anchorPrice,
       nowOrigin: {
         field: FIELD_FOR_LEG[projection.leg],

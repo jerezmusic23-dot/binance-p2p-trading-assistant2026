@@ -112,7 +112,7 @@ export function backtestLeg(
 
     for (let anchor = 0; anchor <= 23; anchor += 1) {
       const anchorCell = actual.hours.get(anchor);
-      if (anchorCell === undefined || anchorCell.best <= 0) continue;
+      if (anchorCell === undefined || anchorCell.reference <= 0) continue;
 
       /*
        * El día evaluado se recorta hasta el ancla antes de proyectar: el motor
@@ -140,8 +140,8 @@ export function backtestLeg(
       const closeTarget = hourCellAhead(groundTruth, actual.dayKey, anchor, horizonHours);
       if (closeTarget !== undefined && projection.projectedClose !== null) {
         const closeCell = closeTarget.cell;
-        const modelError = Math.abs(projection.projectedClose.central - closeCell.best);
-        const persistenceError = Math.abs(anchorCell.best - closeCell.best);
+        const modelError = Math.abs(projection.projectedClose.central - closeCell.reference);
+        const persistenceError = Math.abs(anchorCell.reference - closeCell.reference);
         closeModel.push(modelError);
         closePersistence.push(persistenceError);
         dayModelErrors.push(modelError);
@@ -150,11 +150,11 @@ export function backtestLeg(
         coverageCases += 1;
         const lo = Math.min(projection.projectedClose.low, projection.projectedClose.high);
         const hi = Math.max(projection.projectedClose.low, projection.projectedClose.high);
-        if (closeCell.best >= lo && closeCell.best <= hi) covered += 1;
+        if (closeCell.reference >= lo && closeCell.reference <= hi) covered += 1;
 
         // Dirección: sólo cuenta cuando el mercado se movió de verdad.
-        const realMove = closeCell.best - anchorCell.best;
-        const projectedMove = projection.projectedClose.central - anchorCell.best;
+        const realMove = closeCell.reference - anchorCell.reference;
+        const projectedMove = projection.projectedClose.central - anchorCell.reference;
         if (realMove !== 0 && projectedMove !== 0) {
           directionTotal += 1;
           if (Math.sign(realMove) === Math.sign(projectedMove)) directionHits += 1;
@@ -165,13 +165,13 @@ export function backtestLeg(
       const futureValues: number[] = [];
       for (let k = 1; k <= horizonHours; k += 1) {
         const target = hourCellAhead(groundTruth, actual.dayKey, anchor, k);
-        if (target !== undefined) futureValues.push(target.cell.best);
+        if (target !== undefined) futureValues.push(target.cell.reference);
       }
       const realExtreme = extremeForLeg(leg, futureValues);
       if (realExtreme !== null && projection.projectedExtreme !== null) {
         extremeModel.push(Math.abs(projection.projectedExtreme.central - realExtreme));
         // La persistencia no predice un extremo distinto del precio de ahora.
-        extremePersistence.push(Math.abs(anchorCell.best - realExtreme));
+        extremePersistence.push(Math.abs(anchorCell.reference - realExtreme));
       }
     }
 

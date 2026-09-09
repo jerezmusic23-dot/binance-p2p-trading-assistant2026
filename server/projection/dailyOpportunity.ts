@@ -58,7 +58,7 @@ export function favourableHours(days: readonly DayShape[], leg: MakerLeg): HourF
 
     // Mejor primero, según la pierna.
     const ordered = [...cells].sort((a, b) =>
-      leg === 'VENTA' ? b.best - a.best : a.best - b.best
+      leg === 'VENTA' ? b.reference - a.reference : a.reference - b.reference
     );
 
     ordered.forEach((cell, index) => {
@@ -210,9 +210,9 @@ export function turnThreshold(days: readonly DayShape[]): TurnThreshold {
     const hours = [...day.hours.values()].sort((a, b) => a.hour - b.hour);
     for (let i = 1; i < hours.length; i += 1) {
       if (hours[i].hour !== hours[i - 1].hour + 1) continue; // el hueco se respeta
-      const from = hours[i - 1].best;
+      const from = hours[i - 1].reference;
       if (from <= 0) continue;
-      moves.push(Math.abs((hours[i].best - from) / from) * 100);
+      moves.push(Math.abs((hours[i].reference - from) / from) * 100);
     }
   }
   return { pct: medianOf(moves), sampleSize: moves.length };
