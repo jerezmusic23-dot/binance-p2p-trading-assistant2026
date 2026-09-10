@@ -111,12 +111,28 @@ export class CentralMarketStore {
    */
   private readonly historyIntervalMs = 60_000;
   /*
-   * Último estado de mercado REAL observado. Los cambios entre capturas se
-   * miden contra él, nunca contra una captura fallida: `buildMarketState`
-   * devuelve null para esas, y entonces esto no avanza. Así una caída de red no
-   * fabrica un cambio de líder ni una variación de liquidez.
+   * DOS CADENCIAS, DOS REFERENCIAS.
+   *
+   * El polling observa cada ~6 s; el histórico se escribe cada ~60 s. Medir la
+   * rotación del libro contra "la captura anterior" mezclaba las dos: un
+   * registro guardado a las 14:01 podía llevar deltas de 6 segundos en vez de
+   * un minuto, y la misma columna del histórico significaba una ventana
+   * distinta según cuántas capturas intermedias hubiese habido. No era
+   * look-ahead —nunca se mira hacia adelante— pero sí una ventana temporal
+   * inconsistente, y una variable así no se puede estudiar.
+   *
+   * `liveMarketState` es EFÍMERO: la observación en vivo, captura a captura.
+   * No se persiste y no entra en ningún registro.
+   *
+   * `lastPersistedMarketState` es la REFERENCIA HISTÓRICA: el estado del
+   * último registro realmente ESCRITO. Sólo avanza tras un `appendRecord` con
+   * éxito, de modo que los deltas del histórico van siempre de una observación
+   * persistida a la siguiente. Una captura intermedia no lo mueve; una captura
+   * fallida tampoco (`buildMarketState` devuelve null para ésas); un registro
+   * rechazado por validación, tampoco.
    */
-  private lastMarketState: MarketStateSnapshot | null = null;
+  private liveMarketState: MarketStateSnapshot | null = null;
+  private lastPersistedMarketState: MarketStateSnapshot | null = null;
   private lastPersistedAt: number | null = null;
   /** Newest observation not yet written. Flushed on stop(). */
   private pendingRecord: HistoryRecord | null = null;
@@ -442,7 +458,28 @@ export class CentralMarketStore {
     if (this.pendingRecord === null) return;
     StorageEngine.appendRecord(this.pendingRecord);
     this.lastPersistedAt = this.pendingRecord.timestamp;
+    this.rememberPersistedMarketState(this.pendingRecord);
     this.pendingRecord = null;
+  }
+
+  /**
+   * Avanza la referencia histórica. Se llama SÓLO tras escribir de verdad.
+   *
+   * Un registro sin `marketState` -la captura no describía un mercado- no la
+   * mueve: la comparación siguiente se hará contra el último estado realmente
+   * persistido, y `previousAt` dirá cuál fue.
+   */
+  private rememberPersistedMarketState(record: HistoryRecord): void {
+    if (record.marketState !== undefined) this.lastPersistedMarketState = record.marketState;
+  }
+
+  /**
+   * El estado de la ÚLTIMA captura, con sus cambios medidos contra la captura
+   * inmediatamente anterior (~6 s). Es observación EN VIVO: no se persiste, y
+   * no debe mezclarse con la serie histórica, cuya ventana es de ~60 s.
+   */
+  public getLiveMarketState(): MarketStateSnapshot | null {
+    return this.liveMarketState;
   }
 
   public setPollingInterval(ms: number): void {
@@ -476,11 +513,20 @@ export class CentralMarketStore {
       if (bestBuyPrice !== null && bestSellPrice !== null && spreadPercentage !== null) {
         this.completeSnapshots += 1;
         /*
-         * v5: el estado de mercado de ESTA captura, medido contra el último
-         * estado conocido. `null` si la captura no describe un mercado.
+         * v5: el estado de mercado de ESTA captura, en sus dos cadencias.
+         *
+         * El efímero se mide contra la captura anterior (~6 s) y sólo sirve
+         * para observar el mercado en vivo. El que va al registro se mide
+         * contra el último estado PERSISTIDO (~60 s), para que los deltas del
+         * histórico comparen observaciones históricas consecutivas y no una
+         * captura intermedia que nadie guardó.
+         *
+         * Ambos son `null` si la captura no describe un mercado.
          */
-        const marketState = buildMarketState(snapshot, this.lastMarketState);
-        if (marketState !== null) this.lastMarketState = marketState;
+        const liveState = buildMarketState(snapshot, this.liveMarketState);
+        if (liveState !== null) this.liveMarketState = liveState;
+
+        const marketState = buildMarketState(snapshot, this.lastPersistedMarketState);
 
         const record: HistoryRecord = {
           id: `tick-${snapshot.timestamp}`,
@@ -574,6 +620,7 @@ export class CentralMarketStore {
             } else {
               StorageEngine.appendRecord(record);
               this.lastPersistedAt = snapshot.timestamp;
+              this.rememberPersistedMarketState(record);
               this.pendingRecord = null;
               this.reportStorageState(snapshot.timestamp, null);
             }

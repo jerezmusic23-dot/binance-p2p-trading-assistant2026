@@ -299,8 +299,49 @@ describe('7. banco/monto y métodos de pago', () => {
       ad('b3', 969.5, { paymentOptions: [{ payType: 'Mercantil', tradeMethodName: 'Mercantil' }] }),
     ];
     const st = buildMarketState(snapshot({ topBuyAds: ads }))!;
-    expect(st.payTypesCompra.map((p) => p.payType)).toEqual(['Mercantil', 'Banesco']);
-    expect(st.payTypesCompra[0].ads).toBe(2);
+    expect(st.payTypeCompositionCompra.map((p) => p.payType)).toEqual(['Mercantil', 'Banesco']);
+    expect(st.payTypeCompositionCompra[0].adsOffering).toBe(2);
+  });
+
+  /*
+   * COMPOSICIÓN, NO PARTICIÓN.
+   *
+   * Un anuncio puede declarar varios métodos a la vez. La auditoría externa
+   * señaló que leer estos conteos como categorías excluyentes es un error, así
+   * que aquí se fija lo contrario de forma explícita: el mismo anuncio CUENTA
+   * EN AMBAS entradas, y las sumas se solapan a propósito.
+   */
+  it('un anuncio con Mercantil Y PagoMóvil cuenta en LOS DOS métodos', () => {
+    const ads = [
+      ad('b1', 969.3, {
+        paymentOptions: [
+          { payType: 'Mercantil', tradeMethodName: 'Mercantil' },
+          { payType: 'PagoMovil', tradeMethodName: 'Pago Móvil' },
+        ],
+        availableUsdtReported: 300,
+      }),
+      ad('b2', 969.4, {
+        paymentOptions: [{ payType: 'Mercantil', tradeMethodName: 'Mercantil' }],
+        availableUsdtReported: 100,
+      }),
+    ];
+    const st = buildMarketState(snapshot({ topBuyAds: ads }))!;
+    const byType = new Map(st.payTypeCompositionCompra.map((p) => [p.payType, p]));
+
+    // El anuncio b1 aparece en las dos entradas. No se reparte, no se divide.
+    expect(byType.get('Mercantil')!.adsOffering).toBe(2);
+    expect(byType.get('PagoMovil')!.adsOffering).toBe(1);
+    expect(byType.get('Mercantil')!.usdtOffering).toBe(400);
+    expect(byType.get('PagoMovil')!.usdtOffering).toBe(300);
+
+    // Y por eso las sumas SUPERAN el lado: no son partes de un todo.
+    const totalAds = st.payTypeCompositionCompra.reduce((acc, p) => acc + p.adsOffering, 0);
+    expect(totalAds).toBe(3);
+    expect(totalAds).toBeGreaterThan(st.compra!.ads);
+
+    const totalUsdt = st.payTypeCompositionCompra.reduce((acc, p) => acc + (p.usdtOffering ?? 0), 0);
+    expect(totalUsdt).toBe(700);
+    expect(totalUsdt).toBeGreaterThan(st.compra!.declaredUsdt!);
   });
 });
 

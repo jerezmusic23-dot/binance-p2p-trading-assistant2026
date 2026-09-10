@@ -104,17 +104,42 @@ export interface SideState {
   /** Rango relativo (p90-p10)/p50, en %. `null` si no medible. */
   priceRangePct: number | null;
 
-  /* ── Cambios contra la captura ANTERIOR conocida. Nunca hacia adelante. ── */
+  /*
+   * Cambios contra la observación ANTERIOR DE LA MISMA CADENCIA. Nunca hacia
+   * adelante. Quién es esa observación anterior lo decide quien llama: para el
+   * estado que se persiste es el último registro histórico escrito (~60 s),
+   * no una captura intermedia de ~6 s que nunca se guardó.
+   */
   leaderChanged: boolean | null;
   declaredUsdtDeltaPct: number | null;
   leaderPriceDeltaPct: number | null;
 }
 
-/** Participación de un método de pago dentro del lado. */
-export interface PayTypeShare {
+/**
+ * COMPOSICIÓN por método de pago dentro del lado.
+ *
+ * NO son categorías mutuamente excluyentes. Un anuncio puede declarar varios
+ * métodos a la vez -Mercantil y PagoMóvil, por ejemplo- y entonces cuenta en
+ * AMBAS entradas, y su volumen se suma en ambas.
+ *
+ * Consecuencias que hay que tener presentes al leer el dato:
+ *   - la suma de `adsOffering` puede superar, y normalmente supera, el número
+ *     de anuncios del lado;
+ *   - la suma de `usdtOffering` puede superar el volumen declarado del lado;
+ *   - restar entradas, o tratarlas como partes de un todo que suma 100%, es
+ *     leer mal el dato.
+ *
+ * Por eso el tipo no se llama "share": no hay cuota que repartir.
+ */
+export interface PayTypeComposition {
   payType: string;
-  ads: number;
-  usdt: number | null;
+  /** Anuncios del lado que OFRECEN este método, entre otros posibles. */
+  adsOffering: number;
+  /**
+   * USDT declarados por esos anuncios. Se solapa con el de otros métodos
+   * cuando un mismo anuncio ofrece varios. `null` si ninguno declaró volumen.
+   */
+  usdtOffering: number | null;
 }
 
 export interface MarketStateSnapshot {
@@ -131,10 +156,17 @@ export interface MarketStateSnapshot {
    */
   filterBank: string | null;
   filterAmountVes: number | null;
-  /** Composición por método de pago, por lado. Vacío si la captura no la trae. */
-  payTypesCompra: PayTypeShare[];
-  payTypesVenta: PayTypeShare[];
-  /** Instante de la captura anterior contra la que se midieron los cambios. */
+  /**
+   * Composición por método de pago, por lado. Vacío si la captura no la trae.
+   * Las entradas SE SOLAPAN: ver `PayTypeComposition`.
+   */
+  payTypeCompositionCompra: PayTypeComposition[];
+  payTypeCompositionVenta: PayTypeComposition[];
+  /**
+   * Instante de la observación anterior contra la que se midieron los cambios.
+   * En el estado que se PERSISTE es el timestamp del registro histórico
+   * anterior (~60 s), no el de una captura intermedia. `null` en el primero.
+   */
   previousAt: number | null;
 }
 
@@ -226,8 +258,16 @@ function depthOf(
   });
 }
 
-/** Participación por método de pago. Sólo lo que la captura trajo. */
-function payTypesOf(ads: readonly NormalizedAd[]): PayTypeShare[] {
+/**
+ * Composición por método de pago. Sólo lo que la captura trajo.
+ *
+ * Un anuncio recorre TODOS sus `paymentOptions`, así que contribuye a tantas
+ * entradas como métodos declare. Eso es deliberado: la pregunta que responde
+ * el dato es "cuántos anuncios aceptan este método", no "cómo se reparten los
+ * anuncios entre métodos" -esa segunda pregunta no tiene respuesta, porque los
+ * métodos no particionan el lado-.
+ */
+function payTypeCompositionOf(ads: readonly NormalizedAd[]): PayTypeComposition[] {
   const acc = new Map<string, { ads: number; usdt: number; withVolume: number }>();
   for (const ad of ads) {
     for (const opt of ad.paymentOptions ?? []) {
@@ -244,8 +284,12 @@ function payTypesOf(ads: readonly NormalizedAd[]): PayTypeShare[] {
     }
   }
   return [...acc.entries()]
-    .map(([payType, e]) => ({ payType, ads: e.ads, usdt: e.withVolume > 0 ? e.usdt : null }))
-    .sort((a, b) => b.ads - a.ads || a.payType.localeCompare(b.payType));
+    .map(([payType, e]) => ({
+      payType,
+      adsOffering: e.ads,
+      usdtOffering: e.withVolume > 0 ? e.usdt : null,
+    }))
+    .sort((a, b) => b.adsOffering - a.adsOffering || a.payType.localeCompare(b.payType));
 }
 
 /** Variación relativa firmada entre dos medidas. `null` si no es calculable. */
@@ -313,10 +357,17 @@ function buildSide(
 /**
  * Construye el estado de mercado de UNA captura.
  *
- * `previous` es el último estado CONOCIDO, no el de la captura inmediatamente
- * anterior en el reloj: si hubo capturas fallidas por medio, los cambios se
- * miden contra el último estado real, y `previousAt` dice cuál fue. Nunca se
- * mira hacia adelante.
+ * `previous` es el último estado conocido DE LA CADENCIA DE QUIEN LLAMA, y esa
+ * elección es del llamante, no de esta función:
+ *
+ *   - observación en vivo -> el estado de la captura anterior (~6 s);
+ *   - registro histórico  -> el estado del último registro PERSISTIDO (~60 s).
+ *
+ * Mezclarlas produce deltas cuya ventana temporal cambia sin avisar, que es
+ * exactamente lo que la auditoría externa encontró. En ambos casos `previous`
+ * es el último estado REAL de esa cadencia -si hubo capturas fallidas por
+ * medio, se mide contra el último estado real, no contra el hueco- y
+ * `previousAt` dice cuál fue. Nunca se mira hacia adelante.
  *
  * Devuelve `null` cuando la captura no describe un mercado -sin datos, o con
  * `status` distinto de LIVE/STALE-. Una captura fallida NO es un estado de
@@ -355,8 +406,8 @@ export function buildMarketState(
     venta,
     filterBank: snapshot.filterBank ?? null,
     filterAmountVes: snapshot.filterAmount ?? null,
-    payTypesCompra: payTypesOf(snapshot.topBuyAds ?? []),
-    payTypesVenta: payTypesOf(snapshot.topSellAds ?? []),
+    payTypeCompositionCompra: payTypeCompositionOf(snapshot.topBuyAds ?? []),
+    payTypeCompositionVenta: payTypeCompositionOf(snapshot.topSellAds ?? []),
     previousAt: previous?.capturedAt ?? null,
   };
 }
