@@ -21,6 +21,11 @@ import { BinanceP2PService, BANK_CODE_MAP } from './binanceP2PService.js';
 import { validateHistoryRecord } from './recordValidation.js';
 import { buildMarketContext } from './marketContext.js';
 import { buildMarketState, type MarketStateSnapshot } from './marketState.js';
+import {
+  HISTORY_INTERVAL_MS,
+  POLLING_INTERVAL_MS,
+  lastPersistedMarketStateOf,
+} from './datasetHealth.js';
 import { countVerifications } from './bankMatching.js';
 import { AMOUNT_TIERS, evaluateBankAmount } from './executability.js';
 import {
@@ -96,7 +101,7 @@ export class CentralMarketStore {
 
   private currentSnapshot: MarketSnapshot | null = null;
   private lastValidSnapshot: MarketSnapshot | null = null;
-  private pollingIntervalMs = 6000; // 6 seconds for fast live updates
+  private pollingIntervalMs = POLLING_INTERVAL_MS; // 6 seconds for fast live updates
   /*
    * LIVE CAPTURE and HISTORICAL PERSISTENCE are two different cadences.
    *
@@ -109,7 +114,7 @@ export class CentralMarketStore {
    *
    * Polling is NOT slowed down. Only the write is sampled.
    */
-  private readonly historyIntervalMs = 60_000;
+  private readonly historyIntervalMs = HISTORY_INTERVAL_MS;
   /*
    * DOS CADENCIAS, DOS REFERENCIAS.
    *
@@ -341,6 +346,24 @@ export class CentralMarketStore {
 
   private constructor() {
     StorageEngine.initialize();
+    /*
+     * D7: la referencia histórica sobrevive al reinicio.
+     *
+     * `lastPersistedMarketState` vivía sólo en memoria, así que un reinicio la
+     * ponía a null y el primer registro posterior declaraba `previousAt: null`
+     * -una ruptura de la cadena que no ocurrió en el mercado, sino en el
+     * contenedor-. Se reconstruye desde el último registro persistido que
+     * llevaba estado, que es exactamente la regla que sigue el proceso en
+     * marcha.
+     *
+     * `lastPersistedAt` NO se reconstruye a propósito: el primer registro tras
+     * un arranque debe escribirse de inmediato en lugar de dejar el histórico
+     * en blanco un minuto. Eso puede acortar el intervalo de ese único
+     * registro, y por eso `previousAt` viaja dentro del propio estado y
+     * `buildDatasetHealth` cuenta esos intervalos cortos: el hecho queda
+     * medido, no disimulado.
+     */
+    this.lastPersistedMarketState = lastPersistedMarketStateOf(StorageEngine.getHistory());
   }
 
   public static getInstance(): CentralMarketStore {

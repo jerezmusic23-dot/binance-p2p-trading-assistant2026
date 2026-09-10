@@ -12,6 +12,7 @@ import { marketReadingFromStorage } from './marketDecision.js';
 import { GENERAL_MARKET_KEY, projectCell } from './makerProjectionEngine.js';
 import { CentralMarketStore } from './centralStore.js';
 import { StorageEngine } from './storage.js';
+import { buildDatasetHealth } from './datasetHealth.js';
 import { AlertRule } from './types.js';
 
 export const apiRouter = Router();
@@ -457,6 +458,36 @@ apiRouter.get('/health', (req, res) => {
      */
     capture: centralStore.getCaptureStats(),
   });
+});
+
+/*
+ * SALUD DEL DATASET HISTÓRICO. Sólo lectura, y sólo sobre lo ya persistido.
+ *
+ * D7 es una fase de acumulación: antes de preguntarle nada al histórico hay
+ * que poder afirmar cuánto histórico hay. Esta ruta responde con cobertura,
+ * huecos, continuidad de `previousAt` y qué partes del estado de mercado no se
+ * pudieron medir.
+ *
+ * NO es una señal de trading y no entra en ninguna proyección. Es una métrica
+ * de calidad del dataset, y nada más.
+ *
+ * `dataset` describe la VENTANA ACTIVA -lo que `getHistory()` devuelve-; el
+ * archivo se reporta aparte, con su propio recuento, para que un histórico
+ * largo no parezca corto ni al revés. `capture` son contadores DEL PROCESO en
+ * curso, que se reinician con él: mezclarlos con los del fichero haría pasar
+ * un problema resuelto por uno actual.
+ */
+apiRouter.get('/diagnostics/dataset', (_req, res) => {
+  try {
+    res.json({
+      dataset: buildDatasetHealth(StorageEngine.getHistory()),
+      capture: centralStore.getCaptureStats(),
+      storage: StorageEngine.describeStorage(),
+      archive: StorageEngine.describeArchive(),
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Error describiendo el dataset' });
+  }
 });
 
 /*
