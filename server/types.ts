@@ -387,6 +387,8 @@ export interface MarketSnapshot {
   filterFallbackReason?: string;
 }
 
+import type { MarketStateSnapshot } from './marketState.js';
+
 export interface HistoryRecord {
   id: string;
   timestamp: number;
@@ -466,6 +468,20 @@ export interface HistoryRecord {
    * ambos grupos y lo dice en su respuesta.
    */
   generalReferenceVersion?: 'v4-no-recarga-pines';
+
+  /**
+   * ADDITIVE, v5. El ESTADO DEL MERCADO de esta captura, en agregados.
+   *
+   * Existe porque el libro completo (`topBuyAds`/`topSellAds`) se descartaba en
+   * la frontera de almacenamiento, y sin él la profundidad, la concentración,
+   * la dispersión y la rotación no eran estudiables por mucho histórico que se
+   * acumulara. Guarda agregados, nunca anuncios individuales.
+   *
+   * Ausente en todo registro anterior, y ausente también cuando la captura no
+   * describió un mercado (`FETCH_FAILED`). No lleva ninguna señal: es evidencia
+   * en bruto para que una fase posterior pueda estudiarla.
+   */
+  marketState?: MarketStateSnapshot;
 }
 
 /** What the storage layer is actually doing, for diagnosing persistence. */

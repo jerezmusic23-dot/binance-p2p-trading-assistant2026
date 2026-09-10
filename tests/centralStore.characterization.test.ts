@@ -131,10 +131,16 @@ describe('pollMarket - success path', () => {
      * ya puede distinguir un movimiento sostenido por volumen de otro sobre un
      * libro vacío, que era lo irrecuperable.
      *
+     * D6 añade la capa v5 `marketState`: profundidad relativa al precio
+     * estratégico, concentración (Top 1/3/5), dispersión, composición por
+     * método de pago y rotación del líder. Con eso ya es posible ESTUDIAR
+     * después si alguna de esas variables predice algo; ninguna entra todavía
+     * en la proyección.
+     *
      * SIGUE FUERA, y a propósito: los anuncios uno a uno. Persistir veinte
      * anuncios por minuto multiplicaría el fichero por veinte para responder
-     * preguntas que nadie ha hecho todavía. Si algún día hacen falta, se
-     * añaden igual que ésta: de forma aditiva y sin rellenar el pasado.
+     * preguntas que nadie ha hecho todavía. `marketState` guarda AGREGADOS,
+     * nunca un anuncio, y este test lo comprueba abajo.
      */
     const buy = Array.from({ length: 10 }, (_, i) =>
       makeAdItem({ advNo: `b${i}`, price: String(918 + i), tradable: '500' })
@@ -177,8 +183,26 @@ describe('pollMarket - success path', () => {
         'captureStatus',
         // Añadido aditivamente: el régimen de referencia general (v4, sin Recarga Pines).
         'generalReferenceVersion',
+        // Añadido aditivamente (D6): el estado de mercado agregado de la captura.
+        'marketState',
       ].sort()
     );
+
+    /*
+     * D6: el estado v5 guarda AGREGADOS del libro, jamás un anuncio. Diez
+     * anuncios entraron en la captura; ninguno debe poder reconstruirse desde
+     * el registro, ni por identificador ni por nombre de comerciante.
+     */
+    const state = record.marketState!;
+    expect(state.version).toBe('v5-market-state');
+    expect(state.compra!.ads).toBe(10);
+    const serialised = JSON.stringify(state);
+    for (let i = 0; i < 10; i += 1) expect(serialised).not.toContain(`"b${i}"`);
+    expect(serialised).not.toContain('merchantName');
+    expect(serialised).not.toContain('advNo');
+    // Y la primera captura no puede afirmar nada sobre la anterior.
+    expect(state.previousAt).toBeNull();
+    expect(state.compra!.leaderChanged).toBeNull();
 
     // La liquidez es la SUMA de lo publicado, con el recuento al lado: una
     // suma baja sin saber cuántos anuncios reportaron no significa nada.

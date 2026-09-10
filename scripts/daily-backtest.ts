@@ -16,14 +16,9 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { extractLegSeries } from '../server/dailyProjection.js';
-import {
-  MIN_PROFILE_DAYS,
-  backtestLeg,
-  groupByDay,
-  type LegBacktest,
-  type MakerLeg,
-} from '../server/projection/dailyShape.js';
+import { extractLegSeries, STRATEGIC_SUMMARY } from '../server/dailyProjection.js';
+import { MIN_PROFILE_DAYS, groupByDay, type MakerLeg } from '../server/projection/dailyShape.js';
+import { backtestLeg, type LegBacktest } from '../server/projection/dailyBacktest.js';
 import type { HistoryRecord } from '../server/types.js';
 
 const file = process.argv[2] ?? path.join(process.cwd(), 'data', 'market_history.json');
@@ -82,8 +77,13 @@ function main(): void {
     `serie MI COMPRA: ${compra.points.length} puntos (descartados: ${compra.extraction.droppedLegacy} v1, ${compra.extraction.droppedInvalid} inválidos)`
   );
 
-  const ventaDays = groupByDay(venta.points, 'VENTA');
-  const compraDays = groupByDay(compra.points, 'COMPRA');
+  /*
+   * MISMO resumen horario que la ruta estratégica de producción (D5). Agrupar
+   * aquí en EXTREME mediría un motor distinto del que realmente proyecta, y el
+   * backtest dejaría de decir nada sobre lo que el usuario ve.
+   */
+  const ventaDays = groupByDay(venta.points, 'VENTA', STRATEGIC_SUMMARY);
+  const compraDays = groupByDay(compra.points, 'COMPRA', STRATEGIC_SUMMARY);
   console.log(`días completos en la ventana 8–20: ${ventaDays.length}`);
 
   if (ventaDays.length <= MIN_PROFILE_DAYS) {

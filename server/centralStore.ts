@@ -20,6 +20,7 @@ import {
 import { BinanceP2PService, BANK_CODE_MAP } from './binanceP2PService.js';
 import { validateHistoryRecord } from './recordValidation.js';
 import { buildMarketContext } from './marketContext.js';
+import { buildMarketState, type MarketStateSnapshot } from './marketState.js';
 import { countVerifications } from './bankMatching.js';
 import { AMOUNT_TIERS, evaluateBankAmount } from './executability.js';
 import {
@@ -109,6 +110,13 @@ export class CentralMarketStore {
    * Polling is NOT slowed down. Only the write is sampled.
    */
   private readonly historyIntervalMs = 60_000;
+  /*
+   * Último estado de mercado REAL observado. Los cambios entre capturas se
+   * miden contra él, nunca contra una captura fallida: `buildMarketState`
+   * devuelve null para esas, y entonces esto no avanza. Así una caída de red no
+   * fabrica un cambio de líder ni una variación de liquidez.
+   */
+  private lastMarketState: MarketStateSnapshot | null = null;
   private lastPersistedAt: number | null = null;
   /** Newest observation not yet written. Flushed on stop(). */
   private pendingRecord: HistoryRecord | null = null;
@@ -467,6 +475,13 @@ export class CentralMarketStore {
       const { bestBuyPrice, bestSellPrice, spreadPercentage } = snapshot;
       if (bestBuyPrice !== null && bestSellPrice !== null && spreadPercentage !== null) {
         this.completeSnapshots += 1;
+        /*
+         * v5: el estado de mercado de ESTA captura, medido contra el último
+         * estado conocido. `null` si la captura no describe un mercado.
+         */
+        const marketState = buildMarketState(snapshot, this.lastMarketState);
+        if (marketState !== null) this.lastMarketState = marketState;
+
         const record: HistoryRecord = {
           id: `tick-${snapshot.timestamp}`,
           timestamp: snapshot.timestamp,
@@ -495,6 +510,7 @@ export class CentralMarketStore {
            * ausente en el registro.
            */
           ...buildMarketContext(snapshot),
+          ...(marketState === null ? {} : { marketState }),
           /*
            * ADDITIVE. The raw extremes above are untouched; these carry the
            * strategic level of the same observation, which is what a market
