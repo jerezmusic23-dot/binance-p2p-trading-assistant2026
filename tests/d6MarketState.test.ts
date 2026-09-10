@@ -385,3 +385,69 @@ describe('10. el script de backtest sigue siendo importable', () => {
     expect(src).toMatch(/groupByDay\(compra\.points, 'COMPRA', STRATEGIC_SUMMARY\)/);
   });
 });
+
+/* ════════════════════════════════════════════════════════════════════ */
+describe('11. el extremo ejecutable y la referencia estratégica no se contaminan', () => {
+  /*
+   * Invariante heredado de D2/D4 y que D6 no puede romper: el líder es el
+   * EXTREMO ejecutable y la referencia es la MEDIANA. Mover el extremo sin
+   * mover la mediana debe cambiar el líder y dejar la referencia intacta.
+   */
+  const base = [
+    ad('b1', 969.3, { availableUsdtReported: 10 }),
+    ad('b2', 969.9, { availableUsdtReported: 10 }),
+    ad('b3', 970.5, { availableUsdtReported: 10 }),
+  ];
+
+  it('un líder más agresivo no altera la referencia estratégica', () => {
+    const antes = buildMarketState(snapshot({ topBuyAds: base }))!;
+    // El nuevo anuncio es el mejor para COMPRA, pero la mediana del lado
+    // sigue calculándose fuera de aquí: el snapshot la trae ya fijada.
+    const conLider = buildMarketState(
+      snapshot({ topBuyAds: [ad('b0', 960.0, { availableUsdtReported: 10 }), ...base] })
+    )!;
+
+    expect(antes.compra!.leaderPrice).toBe(969.3);
+    expect(conLider.compra!.leaderPrice).toBe(960.0);
+
+    // La referencia usada por ambos es la MISMA: 969.9 del snapshot.
+    // El gap se recalcula, que es justamente para lo que existe.
+    expect(antes.compra!.leaderGapPct).toBeCloseTo(((969.3 - 969.9) / 969.9) * 100, 8);
+    expect(conLider.compra!.leaderGapPct).toBeCloseTo(((960.0 - 969.9) / 969.9) * 100, 8);
+    expect(conLider.compra!.leaderGapPct!).toBeLessThan(antes.compra!.leaderGapPct!);
+  });
+
+  it('el estado no reescribe ni guarda una referencia estratégica propia', () => {
+    const st = buildMarketState(snapshot({ topBuyAds: base }))!;
+    // La referencia vive en el registro (D2/D4), no duplicada aquí: si D6
+    // guardara su propia copia, podrían divergir.
+    expect(Object.keys(st.compra!)).not.toContain('strategicBuyPrice');
+    expect(Object.keys(st)).not.toContain('strategicBuyPrice');
+  });
+});
+
+/* ════════════════════════════════════════════════════════════════════ */
+describe('12. banco y monto no mezclan celdas', () => {
+  it('el estado conserva EXACTAMENTE el banco y el monto de su propia consulta', () => {
+    const c20 = buildMarketState(
+      snapshot({ filterBank: 'MERCANTIL', filterAmount: 20_000, topBuyAds: [ad('b1', 969.3)] })
+    )!;
+    const c50 = buildMarketState(
+      snapshot({ filterBank: 'MERCANTIL', filterAmount: 50_000, topBuyAds: [ad('b1', 969.3)] })
+    )!;
+
+    expect(c20.filterAmountVes).toBe(20_000);
+    expect(c50.filterAmountVes).toBe(50_000);
+    expect(c20.filterBank).toBe('MERCANTIL');
+  });
+
+  it('una celda no hereda el banco de la captura anterior', () => {
+    const previa = buildMarketState(
+      snapshot({ filterBank: 'BANESCO', filterAmount: 20_000, topBuyAds: [ad('b1', 969.3)] })
+    )!;
+    // La siguiente captura es GENERAL: no debe arrastrar BANESCO.
+    const general = buildMarketState(snapshot({ topBuyAds: [ad('b1', 969.3)] }), previa)!;
+    expect(general.filterBank).toBeNull();
+    expect(general.filterAmountVes).toBeNull();
+  });
+});
